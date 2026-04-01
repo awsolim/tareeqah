@@ -3,6 +3,7 @@
 
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
+import { createServiceClient } from "@/lib/supabase/service";
 import { getMosqueBySlug } from "@/lib/supabase/queries";
 
 export async function signup(formData: FormData) {
@@ -33,7 +34,10 @@ export async function signup(formData: FormData) {
   }
 
   if (data.user?.id) {
-    const { error: profileError } = await supabase.from("profiles").upsert({
+    // Use service client for profile creation — the user's session may not be
+    // established yet if email confirmation is enabled, so RLS would block the insert.
+    const serviceClient = createServiceClient();
+    const { error: profileError } = await serviceClient.from("profiles").upsert({
       id: data.user.id,
       full_name: fullName,
       email,

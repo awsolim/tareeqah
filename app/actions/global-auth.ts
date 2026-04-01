@@ -2,6 +2,7 @@
 
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
+import { createServiceClient } from "@/lib/supabase/service";
 
 export async function globalSignup(formData: FormData) {
   const fullName = String(formData.get("full_name") || "").trim();
@@ -27,7 +28,9 @@ export async function globalSignup(formData: FormData) {
   }
 
   if (data.user?.id) {
-    const { error: profileError } = await supabase.from("profiles").upsert({
+    // Use service client — session may not exist yet if email confirmation is enabled
+    const serviceClient = createServiceClient();
+    const { error: profileError } = await serviceClient.from("profiles").upsert({
       id: data.user.id,
       full_name: fullName,
       email,

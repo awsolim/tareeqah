@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
+import { createServiceClient } from "@/lib/supabase/service";
 
 /**
  * Build the correct redirect base URL, accounting for load balancers /
@@ -84,7 +85,10 @@ export async function GET(request: NextRequest) {
       user.email?.split("@")[0] ??
       "";
 
-    await supabase.from("profiles").upsert({
+    // Use service client for profile upsert to bypass RLS — this is a trusted
+    // server context and the user's session cookies may not be fully established yet.
+    const serviceClient = createServiceClient();
+    await serviceClient.from("profiles").upsert({
       id: user.id,
       full_name: fullName,
       email: user.email ?? null,
