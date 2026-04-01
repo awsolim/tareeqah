@@ -28,11 +28,12 @@ export function SignupFormWithRole({
 }: SignupFormWithRoleProps) {
   const [role, setRole] = useState<Role>("student");
 
-  const redirectTo = `${siteUrl}/auth/callback?next=/m/${slug}/dashboard&slug=${slug}&role=${role}`;
+  // Google OAuth redirects to complete-signup (no role needed — user picks role after auth)
+  const googleRedirectTo = `${siteUrl}/auth/callback?next=/m/${slug}/complete-signup&slug=${slug}`;
 
   return (
     <>
-      <GoogleSignInButton redirectTo={redirectTo} />
+      <GoogleSignInButton redirectTo={googleRedirectTo} />
 
       <AuthDivider />
 

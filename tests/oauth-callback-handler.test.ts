@@ -223,26 +223,24 @@ describe("#23: x-forwarded-host redirect handling", () => {
   });
 });
 
-describe("#22: auto-join new OAuth user as student", () => {
-  it("creates a student membership for a new user (not redirect to choose-role)", async () => {
+describe("#22: redirect new OAuth user to complete-signup", () => {
+  it("redirects a new user to complete-signup (not auto-create membership)", async () => {
     mockUserId = newUserId;
     mockUserEmail = newUserEmail;
     mockUserMetadata = { full_name: "New Google User", name: "New Google User" };
 
     const req = new NextRequest(
-      `http://localhost:3000/auth/callback?code=test-code&next=/m/${testMosqueSlug}/dashboard&slug=${testMosqueSlug}`
+      `http://localhost:3000/auth/callback?code=test-code&next=/m/${testMosqueSlug}/complete-signup&slug=${testMosqueSlug}`
     );
 
     const response = await GET(req);
 
-    // Should NOT redirect to choose-role (old behavior)
+    // Should redirect to complete-signup so user can pick a role
     const location = response.headers.get("location")!;
+    expect(location).toContain("complete-signup");
     expect(location).not.toContain("choose-role");
 
-    // Should redirect to dashboard
-    expect(location).toContain(`/m/${testMosqueSlug}/dashboard`);
-
-    // Verify a student membership was actually created in the DB
+    // No membership should have been created yet
     const { data: membership } = await supabase
       .from("mosque_memberships")
       .select("role")
@@ -250,8 +248,7 @@ describe("#22: auto-join new OAuth user as student", () => {
       .eq("mosque_id", testMosqueId)
       .maybeSingle();
 
-    expect(membership).toBeTruthy();
-    expect(membership!.role).toBe("student");
+    expect(membership).toBeNull();
   });
 
   it("upserts a profile from OAuth metadata", async () => {

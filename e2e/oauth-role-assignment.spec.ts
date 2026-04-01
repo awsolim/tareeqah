@@ -1,25 +1,33 @@
 import { test, expect } from '@playwright/test';
 import { TEST_MOSQUE_SLUG } from './helpers';
 
-// Tests for the OAuth role assignment bug we fixed
+// Tests for the OAuth signup flow — role is NO LONGER in the Google OAuth redirect URL.
+// Instead, Google OAuth redirects to /m/[slug]/complete-signup where the user picks a role.
 test.describe('OAuth role assignment', () => {
-  test('signup page Google OAuth button includes role in redirect URL', async ({ page }) => {
+  test('signup page Google OAuth button does NOT include role in redirect URL', async ({ page }) => {
     await page.goto(`/m/${TEST_MOSQUE_SLUG}/signup`);
 
-    // Select parent role first
-    await page.click('[data-testid="role-parent"]');
-
-    // Intercept the OAuth redirect to verify role is in the URL
-    await page.route('**/_supabase/**', async (route) => {
-      const url = route.request().url();
-      // Don't actually navigate to Supabase, just verify the URL
+    // Intercept the Supabase OAuth call to inspect the redirect URL
+    let oauthRedirectUrl = '';
+    await page.route('**/auth/v1/authorize**', async (route) => {
+      oauthRedirectUrl = route.request().url();
       await route.abort();
     });
 
-    // Get the Google button's behavior
+    // Click Google button (no role selection needed)
     const googleButton = page.getByRole('button', { name: /continue with google/i });
     await expect(googleButton).toBeVisible();
-    // The role should be embedded in the redirect URL via SignupFormWithRole
+    await googleButton.click();
+    await page.waitForTimeout(1000);
+
+    if (oauthRedirectUrl) {
+      const url = new URL(oauthRedirectUrl);
+      const redirectTo = url.searchParams.get('redirect_to') ?? '';
+      // Role should NOT be in the redirect URL for Google OAuth
+      expect(redirectTo).not.toContain('role=');
+      // Should redirect to complete-signup instead of dashboard
+      expect(redirectTo).toContain('complete-signup');
+    }
   });
 
   test('login page Google OAuth does NOT include role parameter', async ({ page }) => {
@@ -32,7 +40,7 @@ test.describe('OAuth role assignment', () => {
     await expect(page.locator('[data-testid="role-teacher"]')).not.toBeVisible();
   });
 
-  test('signup role selection changes are reflected before OAuth click', async ({ page }) => {
+  test('signup role selection changes are reflected for email signup form', async ({ page }) => {
     await page.goto(`/m/${TEST_MOSQUE_SLUG}/signup`);
 
     // Default is student — verify student button is highlighted
