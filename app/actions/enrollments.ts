@@ -183,7 +183,16 @@ export async function withdrawFromProgram(formData: FormData) {
     throw new Error(`Failed to withdraw: ${deleteError.message}`);
   }
 
+  // Reset application status so the student can re-apply or get another waiver
+  await supabase
+    .from("program_applications")
+    .update({ status: "accepted" })
+    .eq("program_id", programId)
+    .eq("student_profile_id", profile.id)
+    .eq("status", "joined");
+
   revalidateTag("enrollments", "max");
+  revalidateTag("applications", "max");
   revalidateTag("mosque-programs", "max");
 
   redirect(nextPath);
@@ -240,6 +249,14 @@ export async function removeStudentFromProgram(
     return { error: "You do not have permission to remove students from this program." };
   }
 
+  // Check if this was a waived enrollment (affects application reset status)
+  const { data: enrollment } = await supabase
+    .from("enrollments")
+    .select("id, payment_waived")
+    .eq("program_id", programId)
+    .eq("student_profile_id", studentProfileId)
+    .maybeSingle();
+
   // Cancel any active Stripe subscription for this student/program
   const { data: activeSub } = await supabase
     .from("program_subscriptions")
@@ -272,10 +289,12 @@ export async function removeStudentFromProgram(
     return { error: `Failed to remove student: ${deleteError.message}` };
   }
 
-  // Update program_application status to 'rejected' to allow re-application
+  // Waived students reset to "accepted" so admin can re-waive or student can pay.
+  // Paid/free students reset to "rejected" to require re-application.
+  const resetStatus = enrollment?.payment_waived ? "accepted" : "rejected";
   await supabase
     .from("program_applications")
-    .update({ status: "rejected" })
+    .update({ status: resetStatus })
     .eq("program_id", programId)
     .eq("student_profile_id", studentProfileId);
 

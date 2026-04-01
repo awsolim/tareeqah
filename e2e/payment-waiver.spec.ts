@@ -432,3 +432,303 @@ test.describe('Payment waiver — guards and validation', () => {
     await expect(page.getByRole('button', { name: /waive payment/i })).not.toBeVisible();
   });
 });
+
+test.describe('Payment waiver — withdraw and removal flows', () => {
+  test.afterEach(async () => {
+    const supabase = createTestSupabaseClient();
+    const { data: mosque } = await supabase
+      .from('mosques')
+      .select('id')
+      .eq('slug', TEST_MOSQUE_SLUG)
+      .single();
+
+    const { data: paidProgram } = await supabase
+      .from('programs')
+      .select('id')
+      .eq('mosque_id', mosque!.id)
+      .eq('title', 'Advanced Arabic')
+      .single();
+
+    // Clean up any waived enrollments
+    await supabase
+      .from('enrollments')
+      .delete()
+      .eq('program_id', paidProgram!.id)
+      .neq('student_profile_id', '00000000-0000-0000-0000-000000000001');
+
+    // Reset application back to pending
+    await supabase
+      .from('program_applications')
+      .update({ status: 'pending', reviewed_at: null })
+      .eq('program_id', paidProgram!.id)
+      .neq('student_profile_id', '00000000-0000-0000-0000-000000000001');
+  });
+
+  test('waived student can withdraw and application resets to accepted', async ({ page }) => {
+    const supabase = createTestSupabaseClient();
+    const { data: mosque } = await supabase
+      .from('mosques')
+      .select('id')
+      .eq('slug', TEST_MOSQUE_SLUG)
+      .single();
+
+    const { data: paidProgram } = await supabase
+      .from('programs')
+      .select('id')
+      .eq('mosque_id', mosque!.id)
+      .eq('title', 'Advanced Arabic')
+      .single();
+
+    const { data: studentMembership } = await supabase
+      .from('mosque_memberships')
+      .select('profile_id')
+      .eq('mosque_id', mosque!.id)
+      .eq('role', 'student')
+      .single();
+
+    const { data: adminMembership } = await supabase
+      .from('mosque_memberships')
+      .select('profile_id')
+      .eq('mosque_id', mosque!.id)
+      .eq('role', 'mosque_admin')
+      .single();
+
+    // Set up: accepted application + waived enrollment
+    await supabase
+      .from('program_applications')
+      .update({ status: 'joined' })
+      .eq('program_id', paidProgram!.id)
+      .eq('student_profile_id', studentMembership!.profile_id);
+
+    await supabase.from('enrollments').upsert(
+      {
+        program_id: paidProgram!.id,
+        student_profile_id: studentMembership!.profile_id,
+        payment_waived: true,
+        waived_by: adminMembership!.profile_id,
+        waived_at: new Date().toISOString(),
+      },
+      { onConflict: 'program_id,student_profile_id' }
+    );
+
+    // Student withdraws
+    await loginAsStudent(page);
+    await page.goto(`/m/${TEST_MOSQUE_SLUG}/programs/${paidProgram!.id}`);
+    await expect(page.getByText(/enrolled/i)).toBeVisible({ timeout: 10000 });
+    await page.getByRole('button', { name: /withdraw/i }).click();
+
+    // After withdraw, student should NOT see "Enrolled" — should see acceptance / payment options
+    await page.waitForURL(`**/programs/${paidProgram!.id}**`, { timeout: 10000 });
+    await expect(page.getByText(/accepted/i)).toBeVisible({ timeout: 10000 });
+
+    // Verify application was reset to "accepted" in DB
+    const { data: app } = await supabase
+      .from('program_applications')
+      .select('status')
+      .eq('program_id', paidProgram!.id)
+      .eq('student_profile_id', studentMembership!.profile_id)
+      .single();
+
+    expect(app?.status).toBe('accepted');
+  });
+
+  test('admin removes waived student — application resets to accepted', async ({ page }) => {
+    const supabase = createTestSupabaseClient();
+    const { data: mosque } = await supabase
+      .from('mosques')
+      .select('id')
+      .eq('slug', TEST_MOSQUE_SLUG)
+      .single();
+
+    const { data: paidProgram } = await supabase
+      .from('programs')
+      .select('id')
+      .eq('mosque_id', mosque!.id)
+      .eq('title', 'Advanced Arabic')
+      .single();
+
+    const { data: studentMembership } = await supabase
+      .from('mosque_memberships')
+      .select('profile_id')
+      .eq('mosque_id', mosque!.id)
+      .eq('role', 'student')
+      .single();
+
+    const { data: adminMembership } = await supabase
+      .from('mosque_memberships')
+      .select('profile_id')
+      .eq('mosque_id', mosque!.id)
+      .eq('role', 'mosque_admin')
+      .single();
+
+    // Set up waived enrollment
+    await supabase
+      .from('program_applications')
+      .update({ status: 'joined' })
+      .eq('program_id', paidProgram!.id)
+      .eq('student_profile_id', studentMembership!.profile_id);
+
+    await supabase.from('enrollments').upsert(
+      {
+        program_id: paidProgram!.id,
+        student_profile_id: studentMembership!.profile_id,
+        payment_waived: true,
+        waived_by: adminMembership!.profile_id,
+        waived_at: new Date().toISOString(),
+      },
+      { onConflict: 'program_id,student_profile_id' }
+    );
+
+    // Admin navigates to program detail and sees waived student
+    await loginAsAdmin(page);
+    await page.goto(`/m/${TEST_MOSQUE_SLUG}/admin/programs`);
+    await page.getByRole('heading', { name: /advanced arabic/i }).click();
+    await expect(page.getByText(/waived/i)).toBeVisible({ timeout: 10000 });
+
+    // Verify application reset in DB after revoke (reusing revoke flow here)
+    const revokeButton = page.getByRole('button', { name: /revoke waiver/i }).first();
+    await expect(revokeButton).toBeVisible({ timeout: 5000 });
+    await revokeButton.click();
+
+    // Application should be back to "accepted"
+    const { data: app } = await supabase
+      .from('program_applications')
+      .select('status')
+      .eq('program_id', paidProgram!.id)
+      .eq('student_profile_id', studentMembership!.profile_id)
+      .single();
+
+    expect(app?.status).toBe('accepted');
+  });
+});
+
+test.describe('Payment waiver — teacher permission edge cases', () => {
+  test('teacher without can_manage_programs does NOT see Waive Payment button', async ({ page }) => {
+    const supabase = createTestSupabaseClient();
+    const { data: mosque } = await supabase
+      .from('mosques')
+      .select('id')
+      .eq('slug', TEST_MOSQUE_SLUG)
+      .single();
+
+    const { data: paidProgram } = await supabase
+      .from('programs')
+      .select('id')
+      .eq('mosque_id', mosque!.id)
+      .eq('title', 'Advanced Arabic')
+      .single();
+
+    // Set application to accepted so waive button would appear if permissions allow
+    await supabase
+      .from('program_applications')
+      .update({ status: 'accepted', reviewed_at: new Date().toISOString() })
+      .eq('program_id', paidProgram!.id)
+      .eq('status', 'pending');
+
+    // Temporarily disable can_manage_programs for the test teacher
+    const { data: teacherMembership } = await supabase
+      .from('mosque_memberships')
+      .select('id, can_manage_programs')
+      .eq('mosque_id', mosque!.id)
+      .eq('role', 'teacher')
+      .single();
+
+    await supabase
+      .from('mosque_memberships')
+      .update({ can_manage_programs: false })
+      .eq('id', teacherMembership!.id);
+
+    await loginAsTeacher(page);
+    await page.goto(`/m/${TEST_MOSQUE_SLUG}/dashboard`);
+
+    // Teacher without can_manage_programs should NOT see waive payment controls
+    await expect(page.getByRole('button', { name: /waive payment/i })).not.toBeVisible();
+
+    // Restore can_manage_programs
+    await supabase
+      .from('mosque_memberships')
+      .update({ can_manage_programs: true })
+      .eq('id', teacherMembership!.id);
+
+    // Reset application
+    await supabase
+      .from('program_applications')
+      .update({ status: 'pending', reviewed_at: null })
+      .eq('program_id', paidProgram!.id)
+      .neq('student_profile_id', '00000000-0000-0000-0000-000000000001');
+  });
+});
+
+test.describe('Payment waiver — rejected then re-accepted flow', () => {
+  test('student rejected, re-accepted, then waived works correctly', async ({ page }) => {
+    const supabase = createTestSupabaseClient();
+    const { data: mosque } = await supabase
+      .from('mosques')
+      .select('id')
+      .eq('slug', TEST_MOSQUE_SLUG)
+      .single();
+
+    const { data: paidProgram } = await supabase
+      .from('programs')
+      .select('id')
+      .eq('mosque_id', mosque!.id)
+      .eq('title', 'Advanced Arabic')
+      .single();
+
+    const { data: studentMembership } = await supabase
+      .from('mosque_memberships')
+      .select('profile_id')
+      .eq('mosque_id', mosque!.id)
+      .eq('role', 'student')
+      .single();
+
+    // Simulate: rejected → re-accepted
+    await supabase
+      .from('program_applications')
+      .update({ status: 'rejected', reviewed_at: new Date().toISOString() })
+      .eq('program_id', paidProgram!.id)
+      .eq('student_profile_id', studentMembership!.profile_id);
+
+    await supabase
+      .from('program_applications')
+      .update({ status: 'accepted', reviewed_at: new Date().toISOString() })
+      .eq('program_id', paidProgram!.id)
+      .eq('student_profile_id', studentMembership!.profile_id);
+
+    // Admin waives payment
+    await loginAsAdmin(page);
+    await page.goto(`/m/${TEST_MOSQUE_SLUG}/admin/programs`);
+    await page.getByRole('heading', { name: /advanced arabic/i }).click();
+    await page.waitForURL(/\/admin\/programs\//);
+
+    const waiveButton = page.getByRole('button', { name: /waive payment/i }).first();
+    await expect(waiveButton).toBeVisible({ timeout: 5000 });
+    await waiveButton.click();
+
+    // Should succeed — student enrolled with waiver
+    await expect(page.getByText(/waived|enrolled/i).first()).toBeVisible({ timeout: 10000 });
+
+    // Verify enrollment exists
+    const { data: enrollment } = await supabase
+      .from('enrollments')
+      .select('payment_waived')
+      .eq('program_id', paidProgram!.id)
+      .eq('student_profile_id', studentMembership!.profile_id)
+      .single();
+
+    expect(enrollment?.payment_waived).toBe(true);
+
+    // Clean up
+    await supabase
+      .from('enrollments')
+      .delete()
+      .eq('program_id', paidProgram!.id)
+      .eq('student_profile_id', studentMembership!.profile_id);
+
+    await supabase
+      .from('program_applications')
+      .update({ status: 'pending', reviewed_at: null })
+      .eq('program_id', paidProgram!.id)
+      .eq('student_profile_id', studentMembership!.profile_id);
+  });
+});

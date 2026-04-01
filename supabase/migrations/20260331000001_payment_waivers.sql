@@ -18,7 +18,7 @@ CREATE POLICY "admins_teachers_insert_enrollments" ON enrollments
         AND mm.profile_id = auth.uid()
       WHERE p.id = enrollments.program_id
         AND mm.role IN ('mosque_admin', 'teacher', 'lead_teacher')
-        AND mm.can_manage_programs = true
+        AND (mm.role = 'mosque_admin' OR mm.can_manage_programs = true)
     )
   );
 
@@ -26,7 +26,8 @@ CREATE POLICY "admins_teachers_insert_enrollments" ON enrollments
 -- Existing delete policies may not cover admin deleting another user's enrollment.
 CREATE POLICY "admins_delete_enrollments" ON enrollments
   FOR DELETE USING (
-    EXISTS (
+    enrollments.payment_waived = true
+    AND EXISTS (
       SELECT 1
       FROM programs p
       JOIN mosque_memberships mm
@@ -49,6 +50,6 @@ CREATE POLICY "admins_teachers_update_applications" ON program_applications
         AND mm.profile_id = auth.uid()
       WHERE p.id = program_applications.program_id
         AND mm.role IN ('mosque_admin', 'teacher', 'lead_teacher')
-        AND mm.can_manage_programs = true
+        AND (mm.role = 'mosque_admin' OR mm.can_manage_programs = true)
     )
   );

@@ -58,9 +58,9 @@ export async function waivePayment(formData: FormData) {
     throw new Error("You do not have permission to waive payments.");
   }
 
-  // Teachers need can_manage_programs to waive
+  // Non-admin roles (teacher, lead_teacher) need can_manage_programs to waive
   if (
-    membership?.role === "teacher" &&
+    membership?.role !== "mosque_admin" &&
     !membership?.can_manage_programs
   ) {
     throw new Error("You do not have permission to waive payments.");
