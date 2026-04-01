@@ -501,6 +501,9 @@ export async function getEnrollmentsForProgramInAdminView(
       id,
       created_at,
       student_profile_id,
+      payment_waived,
+      waived_by,
+      waived_at,
       profiles!enrollments_student_profile_id_fkey (
         id,
         full_name
@@ -520,7 +523,34 @@ export async function getEnrollmentsForProgramInAdminView(
     throw new Error(`Failed to load admin enrollments: ${error.message}`);
   }
 
-  return data ?? [];
+  // Fetch waiver approver names for waived enrollments
+  const waivedByIds = (data ?? [])
+    .filter((e) => e.payment_waived && e.waived_by)
+    .map((e) => e.waived_by as string);
+
+  const uniqueWaivedByIds = [...new Set(waivedByIds)];
+
+  let waiverApprovers: Record<string, string> = {};
+
+  if (uniqueWaivedByIds.length > 0) {
+    const { data: approverProfiles } = await supabase
+      .from("profiles")
+      .select("id, full_name")
+      .in("id", uniqueWaivedByIds);
+
+    if (approverProfiles) {
+      waiverApprovers = Object.fromEntries(
+        approverProfiles.map((p) => [p.id, p.full_name ?? "Unknown"])
+      );
+    }
+  }
+
+  return (data ?? []).map((enrollment) => ({
+    ...enrollment,
+    waiver_approver_name: enrollment.waived_by
+      ? waiverApprovers[enrollment.waived_by] ?? null
+      : null,
+  }));
 }
 
 export async function getAdminProgramCardsByMosqueId(mosqueId: string) {
@@ -971,6 +1001,44 @@ export async function getTeacherProgramApplicationsInMosque(
 
   if (error) {
     throw new Error(`Failed to load teacher applications: ${error.message}`);
+  }
+
+  return data ?? [];
+}
+
+export async function getApplicationsForProgramInAdminView(
+  programId: string,
+  mosqueId: string
+) {
+  const supabase = await createClient();
+
+  const { data, error } = await supabase
+    .from("program_applications")
+    .select(`
+      id,
+      status,
+      created_at,
+      reviewed_at,
+      joined_at,
+      student_profile_id,
+      programs!inner (
+        id,
+        mosque_id,
+        title,
+        is_paid
+      ),
+      profiles!program_applications_student_profile_id_fkey (
+        id,
+        full_name,
+        email
+      )
+    `)
+    .eq("program_id", programId)
+    .eq("programs.mosque_id", mosqueId)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    throw new Error(`Failed to load admin program applications: ${error.message}`);
   }
 
   return data ?? [];

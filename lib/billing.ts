@@ -26,14 +26,19 @@ export function canStudentAccessProgram(options: {
   program: ProgramLike | null | undefined;
   isEnrolled: boolean;
   subscription?: ProgramSubscriptionLike | null;
+  paymentWaived?: boolean;
 }) {
-  const { program, isEnrolled, subscription } = options;
+  const { program, isEnrolled, subscription, paymentWaived } = options;
 
   if (!isEnrolled) {
     return false;
   }
 
   if (!isProgramPaid(program)) {
+    return true;
+  }
+
+  if (paymentWaived) {
     return true;
   }
 

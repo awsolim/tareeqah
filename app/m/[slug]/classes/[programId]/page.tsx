@@ -103,6 +103,7 @@ export default async function StudentClassPage({
     program,
     isEnrolled: Boolean(enrollment),
     subscription,
+    paymentWaived: Boolean(enrollment?.payment_waived),
   });
 
   if (!hasAccess) {

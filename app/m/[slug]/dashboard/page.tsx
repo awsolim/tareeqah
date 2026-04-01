@@ -23,6 +23,7 @@ import {
   rejectProgramApplication,
   joinApprovedFreeProgram,
 } from "@/app/actions/applications";
+import { waivePayment } from "@/app/actions/waivers";
 
 type PageProps = {
   params: Promise<{ slug: string }>;
@@ -325,6 +326,35 @@ export default async function DashboardPage({ params }: PageProps) {
                                 className="w-full rounded-xl bg-red-600 px-4 py-3 text-sm font-medium text-white"
                               >
                                 Reject
+                              </button>
+                            </form>
+                          </div>
+                        ) : null}
+
+                        {application.status === "accepted" && program.is_paid ? (
+                          <div className="mt-4">
+                            <form action={waivePayment}>
+                              <input type="hidden" name="slug" value={slug} />
+                              <input
+                                type="hidden"
+                                name="applicationId"
+                                value={application.id}
+                              />
+                              <input
+                                type="hidden"
+                                name="studentProfileId"
+                                value={application.student_profile_id}
+                              />
+                              <input
+                                type="hidden"
+                                name="programId"
+                                value={program.id}
+                              />
+                              <button
+                                type="submit"
+                                className="w-full rounded-xl bg-amber-600 px-4 py-3 text-sm font-medium text-white"
+                              >
+                                Waive Payment
                               </button>
                             </form>
                           </div>

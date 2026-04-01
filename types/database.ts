@@ -198,18 +198,27 @@ export type Database = {
           id: string;
           program_id: string;
           student_profile_id: string;
+          payment_waived: boolean;
+          waived_by: string | null;
+          waived_at: string | null;
           created_at: string;
         };
         Insert: {
           id?: string;
           program_id: string;
           student_profile_id: string;
+          payment_waived?: boolean;
+          waived_by?: string | null;
+          waived_at?: string | null;
           created_at?: string;
         };
         Update: {
           id?: string;
           program_id?: string;
           student_profile_id?: string;
+          payment_waived?: boolean;
+          waived_by?: string | null;
+          waived_at?: string | null;
           created_at?: string;
         };
         Relationships: [];
