@@ -39,7 +39,7 @@ Tareeqah is a **multi-tenant** application. Each mosque gets its own URL namespa
 | Payments | [Stripe](https://stripe.com) (subscriptions, checkout) |
 | Styling | [Tailwind CSS 4](https://tailwindcss.com) |
 | Fonts | [Geist](https://vercel.com/font) (Sans + Mono) |
-| Deployment | [Vercel](https://vercel.com) |
+| Deployment | [Netlify](https://netlify.com) |
 
 ## Project Structure
 
@@ -107,17 +107,13 @@ types/
 
 3. **Set up environment variables**
 
-   Create a `.env.local` file in the project root:
-   ```env
-   NEXT_PUBLIC_SUPABASE_URL=your_supabase_project_url
-   NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
+   Copy the example file and fill in your values:
+   ```bash
+   cp .env.example .env.local
    ```
 
-   For Stripe (when enabling paid programs):
-   ```env
-   STRIPE_SECRET_KEY=your_stripe_secret_key
-   STRIPE_WEBHOOK_SECRET=your_stripe_webhook_secret
-   ```
+   See [`.env.example`](.env.example) for the full list of variables and where
+   each one comes from (Supabase project settings, Stripe dashboard, etc.).
 
 4. **Run the dev server**
    ```bash
@@ -158,13 +154,20 @@ The database schema lives in Supabase. Key tables:
 
 ## Deployment
 
-Deploy to Vercel with zero configuration:
+The app deploys to [Netlify](https://netlify.com) via the
+[`@netlify/plugin-nextjs`](https://github.com/netlify/next-runtime) plugin.
+Build settings live in [`netlify.toml`](netlify.toml).
+
+The simplest path is to connect the GitHub repo to a Netlify site for automatic
+deployments on push. Set the environment variables from `.env.example` in the
+site's **Site settings → Environment variables**.
+
+For manual/preview deploys with the [Netlify CLI](https://docs.netlify.com/cli/get-started/):
 
 ```bash
-vercel
+netlify deploy          # preview deploy
+netlify deploy --prod   # production deploy
 ```
-
-Or connect the GitHub repo to Vercel for automatic deployments on push.
 
 ## License
 
