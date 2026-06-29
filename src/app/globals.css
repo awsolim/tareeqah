@@ -1,0 +1,133 @@
+@import "tailwindcss";
+
+:root {
+  --primary-blue: #2f8fb3;
+  --primary-blue-dark: #257b9c;
+  --primary-blue-soft: #e7f3f8;
+  --teal: #22a6b3;
+  --workspace: #f2f4f5;
+  --panel: #ffffff;
+  --toolbar: #e8e8e8;
+  --divider: #d6dce0;
+  --text: #26323a;
+  --muted: #6b747b;
+  --warning: #f59e0b;
+  --danger: #e25241;
+}
+
+@theme inline {
+  --color-background: var(--workspace);
+  --color-foreground: var(--text);
+  --font-sans: ui-rounded, "SF Pro Rounded", "Nunito Sans", Aptos, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--workspace);
+  color: var(--text);
+  font-family: ui-rounded, "SF Pro Rounded", "Nunito Sans", Aptos, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+.app-container {
+  width: min(1180px, 100%);
+  margin: 0 auto;
+  padding: 0 14px;
+}
+
+@media (min-width: 768px) {
+  .app-container {
+    padding: 0 24px;
+  }
+}
+
+.account-panel-slide-forward {
+  animation: account-panel-forward 220ms ease-out both;
+}
+
+.account-panel-slide-back {
+  animation: account-panel-back 220ms ease-out both;
+}
+
+.page-slide-in-from-right {
+  animation: page-slide-from-right 240ms ease-out both;
+}
+
+.page-slide-in-from-left {
+  animation: page-slide-from-left 240ms ease-out both;
+}
+
+@keyframes account-panel-forward {
+  from {
+    opacity: 0.7;
+    transform: translateX(26px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes account-panel-back {
+  from {
+    opacity: 0.7;
+    transform: translateX(-26px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes page-slide-from-right {
+  from {
+    opacity: 0.86;
+    transform: translateX(32px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes page-slide-from-left {
+  from {
+    opacity: 0.86;
+    transform: translateX(-32px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .account-panel-slide-forward,
+  .account-panel-slide-back,
+  .page-slide-in-from-right,
+  .page-slide-in-from-left {
+    animation: none;
+  }
+}
