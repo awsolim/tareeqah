@@ -4,10 +4,25 @@ import { useEffect } from "react";
 
 export function PwaRegistrar() {
   useEffect(() => {
-    const canRegister =
-      window.location.protocol === "https:" ||
-      window.location.hostname === "localhost" ||
-      window.location.hostname === "127.0.0.1";
+    if (process.env.NODE_ENV !== "production") {
+      if ("serviceWorker" in navigator) {
+        navigator.serviceWorker
+          .getRegistrations()
+          .then((registrations) => Promise.all(registrations.map((registration) => registration.unregister())))
+          .catch(() => {});
+      }
+
+      if ("caches" in window) {
+        caches
+          .keys()
+          .then((keys) => Promise.all(keys.map((key) => caches.delete(key))))
+          .catch(() => {});
+      }
+
+      return;
+    }
+
+    const canRegister = window.location.protocol === "https:";
 
     if (!("serviceWorker" in navigator) || !canRegister) {
       return;

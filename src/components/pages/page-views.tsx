@@ -2,6 +2,7 @@ import Link from "next/link";
 import { AuthPanel } from "@/components/auth/auth-panel";
 import { GoogleAuthCallback } from "@/components/auth/google-auth-callback";
 import { OAuthProfileCompletion } from "@/components/auth/oauth-profile-completion";
+import { PortalRoleRedirect } from "@/components/data/portal-role-redirect";
 import { InboxAnnouncementsData, MosqueDirectoryRows, PortalAccountData, ProgramDetailData, PublicMasjidData, PublicProgramsData, StudentClassesData, StudentHomeData, TeacherAnnouncementData, TeacherClassesData, TeacherHomeData, TeacherInboxData, TeacherScheduleData, TeacherStudentsData } from "@/components/data/supabase-public-sections";
 import { ActionToolbar } from "@/components/ui/action-toolbar";
 import { DataRow } from "@/components/ui/data-row";
@@ -145,7 +146,7 @@ function AuthForm({ mode, slug }: { mode: "login" | "signup"; slug: string }) {
 
 export function RootHomePage() {
   return (
-    <main className="min-h-screen bg-[#F2F4F5]">
+    <main className="min-h-screen bg-[var(--workspace)]">
       <div className="border-b border-[#D6DCE0] bg-white">
         <div className="app-container py-8">
           <p className="text-sm font-medium uppercase tracking-wide text-[#6B747B]">Tareeqah</p>
@@ -179,6 +180,14 @@ export function PublicProgramsPage({ slug }: { slug: string }) {
       <Workspace>
         <PublicProgramsData slug={slug} />
       </Workspace>
+    </PageShell>
+  );
+}
+
+export function PublicAccountPage({ slug }: { slug: string }) {
+  return (
+    <PageShell slug={slug}>
+      <PortalAccountData slug={slug} />
     </PageShell>
   );
 }
@@ -252,17 +261,21 @@ export function CompleteOAuthProfilePage({ slug }: { slug: string }) {
 
 export function PortalDashboardPage({ slug }: { slug: string }) {
   return (
-    <>
+    <PortalRoleRedirect slug={slug} teacherHref={`/m/${slug}/teacher`} adminHref={`/m/${slug}/admin`}>
       <PageTitleBar title="Home" />
       <Workspace>
         <StudentHomeData slug={slug} />
       </Workspace>
-    </>
+    </PortalRoleRedirect>
   );
 }
 
 export function PortalAccountPage({ slug }: { slug: string }) {
-  return <PortalAccountData slug={slug} />;
+  return (
+    <PortalRoleRedirect slug={slug} teacherHref={`/m/${slug}/teacher/account`} adminHref={`/m/${slug}/admin/settings`}>
+      <PortalAccountData slug={slug} />
+    </PortalRoleRedirect>
+  );
 }
 
 export function PortalFamilyPage({ slug }: { slug: string }) {
@@ -284,12 +297,12 @@ export function PortalFamilyPage({ slug }: { slug: string }) {
 
 export function PortalClassesPage({ slug }: { slug: string }) {
   return (
-    <>
+    <PortalRoleRedirect slug={slug} teacherHref={`/m/${slug}/teacher/classes`} adminHref={`/m/${slug}/admin/programs`}>
       <PageTitleBar title="Classes" tone="teal" />
       <Workspace>
         <StudentClassesData slug={slug} />
       </Workspace>
-    </>
+    </PortalRoleRedirect>
   );
 }
 
@@ -353,14 +366,14 @@ export function PortalAttendancePage({ slug }: { slug: string }) {
 
 export function PortalAnnouncementsPage({ slug }: { slug: string }) {
   return (
-    <>
+    <PortalRoleRedirect slug={slug} teacherHref={`/m/${slug}/teacher/inbox`} adminHref={`/m/${slug}/admin/enrollments`}>
       <PageTitleBar title="Inbox" />
       <Workspace>
         <Panel>
           <InboxAnnouncementsData slug={slug} />
         </Panel>
       </Workspace>
-    </>
+    </PortalRoleRedirect>
   );
 }
 

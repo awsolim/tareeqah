@@ -9,6 +9,11 @@ type MosqueChrome = {
   logoUrl: string | null;
 };
 
+type ProfileSummary = {
+  fullName: string | null;
+  avatarUrl: string | null;
+};
+
 let sessionLoaded = false;
 let cachedSession: Session | null = null;
 let sessionPromise: Promise<Session | null> | null = null;
@@ -21,6 +26,8 @@ const accessCache = new Map<string, UserAccess>();
 const accessPromises = new Map<string, Promise<UserAccess>>();
 const profileNameCache = new Map<string, string | null>();
 const profileNamePromises = new Map<string, Promise<string | null>>();
+const profileSummaryCache = new Map<string, ProfileSummary>();
+const profileSummaryPromises = new Map<string, Promise<ProfileSummary>>();
 
 export function getCachedSessionSnapshot() {
   return sessionLoaded ? cachedSession : undefined;
@@ -66,6 +73,8 @@ export function clearUserScopedCaches() {
   accessPromises.clear();
   profileNameCache.clear();
   profileNamePromises.clear();
+  profileSummaryCache.clear();
+  profileSummaryPromises.clear();
 }
 
 export function getCachedMosqueChrome(slug: string) {
@@ -164,12 +173,65 @@ export async function loadCachedProfileName(userId: string) {
 export function setCachedProfileName(userId: string, name: string | null) {
   profileNameCache.set(userId, name);
   profileNamePromises.delete(userId);
+  const cachedSummary = profileSummaryCache.get(userId);
+  if (cachedSummary) {
+    profileSummaryCache.set(userId, { ...cachedSummary, fullName: name });
+  }
 }
 
 export async function refreshCachedProfileName(userId: string) {
   profileNameCache.delete(userId);
   profileNamePromises.delete(userId);
   return loadCachedProfileName(userId);
+}
+
+export async function loadCachedProfileSummary(userId: string) {
+  const cached = profileSummaryCache.get(userId);
+  if (cached) {
+    return cached;
+  }
+
+  const existing = profileSummaryPromises.get(userId);
+  if (existing) {
+    return existing;
+  }
+
+  const promise = (async () => {
+    const { data } = await createSupabaseBrowserClient()
+      .from("profiles")
+      .select("full_name, avatar_url")
+      .eq("id", userId)
+      .maybeSingle();
+
+    const summary = {
+      fullName: data?.full_name?.trim() || null,
+      avatarUrl: data?.avatar_url?.trim() || null,
+    };
+    profileSummaryCache.set(userId, summary);
+    profileNameCache.set(userId, summary.fullName);
+    return summary;
+  })()
+    .catch(() => ({ fullName: null, avatarUrl: null }))
+    .finally(() => {
+      profileSummaryPromises.delete(userId);
+    });
+
+  profileSummaryPromises.set(userId, promise);
+  return promise;
+}
+
+export function setCachedProfileSummary(userId: string, summary: Partial<ProfileSummary>) {
+  const current = profileSummaryCache.get(userId) ?? { fullName: profileNameCache.get(userId) ?? null, avatarUrl: null };
+  const next = { ...current, ...summary };
+  profileSummaryCache.set(userId, next);
+  profileSummaryPromises.delete(userId);
+  profileNameCache.set(userId, next.fullName);
+}
+
+export async function refreshCachedProfileSummary(userId: string) {
+  profileSummaryCache.delete(userId);
+  profileSummaryPromises.delete(userId);
+  return loadCachedProfileSummary(userId);
 }
 
 function startAuthListener() {

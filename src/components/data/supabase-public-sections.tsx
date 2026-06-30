@@ -5,12 +5,12 @@ import Link from "next/link";
 import { ChildrenManager } from "@/components/data/children-manager";
 import { TransitionLink } from "@/components/layout/transition-link";
 import { useRouter, useSearchParams } from "next/navigation";
-import type { ReactNode, RefObject } from "react";
+import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode, RefObject, WheelEvent as ReactWheelEvent } from "react";
 import { useEffect, useRef, useState } from "react";
 import { EmptyState } from "@/components/data/empty-state";
 import { FlatLink } from "@/components/ui/flat-button";
 import { getAccountLabel, getDefaultLandingHref } from "@/lib/authz";
-import { clearUserScopedCaches, loadCachedSession, loadCachedUserAccess, setCachedProfileName, setCachedSessionSnapshot } from "@/lib/client-cache";
+import { clearUserScopedCaches, loadCachedSession, loadCachedUserAccess, setCachedProfileName, setCachedProfileSummary, setCachedSessionSnapshot } from "@/lib/client-cache";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import type { Database, Json } from "@/lib/supabase/types";
 import { cn } from "@/lib/utils";
@@ -26,7 +26,7 @@ type Enrollment = Database["public"]["Tables"]["enrollments"]["Row"];
 type EnrollmentRequest = Database["public"]["Tables"]["enrollment_requests"]["Row"];
 type AnnouncementReceipt = Database["public"]["Tables"]["program_announcement_receipts"]["Row"];
 type ProgramSessionCancellation = Database["public"]["Tables"]["program_session_cancellations"]["Row"];
-type TeacherDisplay = Pick<Profile, "id" | "full_name" | "avatar_url" | "teacher_credentials">;
+type TeacherDisplay = Pick<Profile, "id" | "full_name" | "avatar_url" | "teacher_credentials" | "teacher_whatsapp_number">;
 type StudentDisplay = Pick<Profile, "id" | "full_name" | "email" | "phone_number" | "avatar_url" | "age" | "gender" | "date_of_birth">;
 type ParentDisplay = Pick<Profile, "id" | "full_name" | "email" | "phone_number" | "avatar_url">;
 
@@ -399,7 +399,7 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
       if (programData?.teacher_profile_id) {
         const { data: teacherData } = await supabase
           .from("profiles")
-          .select("id, full_name, avatar_url, teacher_credentials")
+          .select("id, full_name, avatar_url, teacher_credentials, teacher_whatsapp_number")
           .eq("id", programData.teacher_profile_id)
           .maybeSingle();
         teacher = teacherData ?? null;
@@ -515,6 +515,7 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
   const teacherName = program.teacher?.full_name ?? "Teacher to be announced";
   const isTeacherContext = section === "teacher";
   const teacherCredentials = program.teacher?.teacher_credentials?.trim() || mockTeacherCredentials(program.title);
+  const teacherWhatsAppHref = getWhatsAppHref(program.teacher?.teacher_whatsapp_number);
   const age = formatAgeRange(program.age_range_text);
   const gender = formatGender(program.audience_gender);
   const price = formatPrice(program.price_monthly_cents);
@@ -673,6 +674,93 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
             ) : null}
 
             {hasMediaSection ? <ProgramMediaGallery items={galleryItems} /> : null}
+          </div>
+
+          <div className="space-y-4 lg:sticky lg:top-24">
+            <aside className="rounded-2xl border border-[#C8DCE2] bg-white p-4 shadow-[0_14px_34px_rgba(38,50,58,0.10)]">
+              <div className="flex items-baseline gap-2">
+                <p className="text-2xl font-semibold text-[#26323A]">{price}</p>
+                {program.is_paid ? <span className="text-xs text-[#6B747B]">monthly</span> : null}
+              </div>
+              {isSignedIn ? (
+                isTeacherContext || isStaffForProgram ? (
+                  <div className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#EEF6F8] px-4 text-sm font-semibold text-[#2F6F83] ring-1 ring-[#CFE2E8]">
+                    Teaching
+                  </div>
+                ) : accountType === "parent" ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => setChildSelectorOpen((value) => !value)}
+                      disabled={parentChildren.length === 0}
+                      className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#248B72] px-4 text-sm font-semibold !text-white shadow-[0_10px_22px_rgba(36,139,114,0.24)] transition-colors hover:bg-[#17624F] disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      Request Enrollment
+                    </button>
+                    {childSelectorOpen ? (
+                      <ChildEnrollmentSelector
+                        program={program}
+                        childrenProfiles={parentChildren}
+                        statuses={childStatuses}
+                        selectedChildIds={selectedChildIds}
+                        onToggle={(childId) =>
+                          setSelectedChildIds((current) =>
+                            current.includes(childId) ? current.filter((id) => id !== childId) : [...current, childId],
+                          )
+                        }
+                        onSubmit={requestEnrollment}
+                        busy={requestBusy}
+                      />
+                    ) : parentChildren.length === 0 ? (
+                      <p className="mt-3 rounded-xl bg-[#FFF7E6] p-3 text-sm leading-6 text-[#8A5A00]">Add children in Family settings before requesting enrollment.</p>
+                    ) : null}
+                  </>
+                ) : isEnrolled ? (
+                  <div className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#E8F7F2] px-4 text-sm font-semibold text-[#17624F] ring-1 ring-[#B9E4D7]">
+                    Enrolled
+                  </div>
+                ) : requestStatus === "pending" ? (
+                  <div className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#FFF7E6] px-4 text-sm font-semibold text-[#8A5A00] ring-1 ring-[#F3D28A]">
+                    Pending Review
+                  </div>
+                ) : !selfEligibility.eligible ? (
+                  <div className="mt-4 rounded-2xl bg-[#FFF7E6] p-4 text-sm leading-6 text-[#8A5A00] ring-1 ring-[#F3D28A]">
+                    {selfEligibility.reason ?? "This class is not available for this profile."}
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={requestEnrollment}
+                    disabled={requestBusy}
+                    className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#248B72] px-4 text-sm font-semibold !text-white shadow-[0_10px_22px_rgba(36,139,114,0.24)] transition-colors hover:bg-[#17624F] disabled:opacity-60"
+                  >
+                    {requestBusy ? "Sending..." : "Request Enrollment"}
+                  </button>
+                )
+              ) : (
+                <Link href={`/m/${slug}/login`} className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#248B72] px-4 text-sm font-semibold !text-white shadow-[0_10px_22px_rgba(36,139,114,0.24)] transition-colors hover:bg-[#17624F]">
+                  Log In to Request Enrollment
+                </Link>
+              )}
+              {requestMessage ? (
+                <div className="mt-3 rounded-xl border border-[#B9E4D7] bg-[#F0FBF7] p-3 text-sm leading-6 text-[#17624F]">
+                  <p>{requestMessage}</p>
+                  {requestStatus === "pending" ? (
+                    <Link href={`/m/${slug}/portal/announcements`} className="mt-1 inline-flex font-semibold text-[#17624F] underline">
+                      Check inbox
+                    </Link>
+                  ) : null}
+                </div>
+              ) : null}
+
+              <dl className="mt-5 divide-y divide-[#E6ECEF] text-sm">
+                <SidebarFact label="Age" value={age} />
+                <SidebarFact label="Audience" value={gender} />
+                <SidebarFact label="Schedule" value={schedule.full} />
+                <SidebarFact label="Teacher" value={teacherName} />
+                <SidebarFact label="Status" value={program.is_active ? "Open" : "Closed"} />
+              </dl>
+            </aside>
 
             <DetailSection title="Instructor">
               <div className="flex items-center gap-4">
@@ -684,103 +772,28 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
               </div>
               <p className="mt-4 text-sm leading-7 text-[#52616A]">{teacherCredentials}</p>
               <div className="mt-5 flex justify-center">
-                <button type="button" className="inline-flex min-h-11 min-w-36 items-center justify-center gap-2 rounded-lg bg-[#17624F] px-5 text-sm font-semibold text-white shadow-[0_10px_20px_rgba(23,98,79,0.18)] ring-1 ring-[#0F4537]/20 transition-colors hover:bg-[#0F4537]">
-                  <PhoneIcon />
-                  Contact
-                </button>
+                {teacherWhatsAppHref ? (
+                  <a
+                    href={teacherWhatsAppHref}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex min-h-11 min-w-36 items-center justify-center gap-2 rounded-lg bg-[#17624F] px-5 text-sm font-semibold !text-white shadow-[0_10px_20px_rgba(23,98,79,0.18)] ring-1 ring-[#0F4537]/20 transition-colors hover:bg-[#0F4537]"
+                    style={{ color: "#fff" }}
+                  >
+                    <MessageIcon className="text-white" style={{ color: "#fff" }} />
+                    <span className="!text-white" style={{ color: "#fff" }}>
+                      Contact
+                    </span>
+                  </a>
+                ) : (
+                  <span className="inline-flex min-h-11 min-w-36 items-center justify-center gap-2 rounded-lg bg-[#E8EEF2] px-5 text-sm font-semibold text-[#6B747B] ring-1 ring-[#D6E0E4]">
+                    <MessageIcon />
+                    Contact unavailable
+                  </span>
+                )}
               </div>
             </DetailSection>
           </div>
-
-          <aside className="rounded-2xl border border-[#C8DCE2] bg-white p-4 shadow-[0_14px_34px_rgba(38,50,58,0.10)] lg:sticky lg:top-24">
-            <div className="flex items-baseline gap-2">
-              <p className="text-2xl font-semibold text-[#26323A]">{price}</p>
-              {program.is_paid ? <span className="text-xs text-[#6B747B]">monthly</span> : null}
-            </div>
-            {isSignedIn ? (
-              isTeacherContext || isStaffForProgram ? (
-                <div className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#EEF6F8] px-4 text-sm font-semibold text-[#2F6F83] ring-1 ring-[#CFE2E8]">
-                  Teaching
-                </div>
-              ) : accountType === "parent" ? (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => setChildSelectorOpen((value) => !value)}
-                    disabled={parentChildren.length === 0}
-                    className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#248B72] px-4 text-sm font-semibold !text-white shadow-[0_10px_22px_rgba(36,139,114,0.24)] transition-colors hover:bg-[#17624F] disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    Request Enrollment
-                  </button>
-                  {childSelectorOpen ? (
-                    <ChildEnrollmentSelector
-                      program={program}
-                      childrenProfiles={parentChildren}
-                      statuses={childStatuses}
-                      selectedChildIds={selectedChildIds}
-                      onToggle={(childId) =>
-                        setSelectedChildIds((current) =>
-                          current.includes(childId) ? current.filter((id) => id !== childId) : [...current, childId],
-                        )
-                      }
-                      onSubmit={requestEnrollment}
-                      busy={requestBusy}
-                    />
-                  ) : parentChildren.length === 0 ? (
-                    <p className="mt-3 rounded-xl bg-[#FFF7E6] p-3 text-sm leading-6 text-[#8A5A00]">Add children in Family settings before requesting enrollment.</p>
-                  ) : null}
-                </>
-              ) : isEnrolled ? (
-                <div className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#E8F7F2] px-4 text-sm font-semibold text-[#17624F] ring-1 ring-[#B9E4D7]">
-                  Enrolled
-                </div>
-              ) : requestStatus === "pending" ? (
-                <div className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#FFF7E6] px-4 text-sm font-semibold text-[#8A5A00] ring-1 ring-[#F3D28A]">
-                  Pending Review
-                </div>
-              ) : !selfEligibility.eligible ? (
-                <div className="mt-4 rounded-2xl bg-[#FFF7E6] p-4 text-sm leading-6 text-[#8A5A00] ring-1 ring-[#F3D28A]">
-                  {selfEligibility.reason ?? "This class is not available for this profile."}
-                </div>
-              ) : (
-                <button
-                  type="button"
-                  onClick={requestEnrollment}
-                  disabled={requestBusy}
-                  className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#248B72] px-4 text-sm font-semibold !text-white shadow-[0_10px_22px_rgba(36,139,114,0.24)] transition-colors hover:bg-[#17624F] disabled:opacity-60"
-                >
-                  {requestBusy ? "Sending..." : "Request Enrollment"}
-                </button>
-              )
-            ) : (
-              <Link href={`/m/${slug}/login`} className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#248B72] px-4 text-sm font-semibold !text-white shadow-[0_10px_22px_rgba(36,139,114,0.24)] transition-colors hover:bg-[#17624F]">
-                Log In to Request Enrollment
-              </Link>
-            )}
-            {requestMessage ? (
-              <div className="mt-3 rounded-xl border border-[#B9E4D7] bg-[#F0FBF7] p-3 text-sm leading-6 text-[#17624F]">
-                <p>{requestMessage}</p>
-                {requestStatus === "pending" ? (
-                  <Link href={`/m/${slug}/portal/announcements`} className="mt-1 inline-flex font-semibold text-[#17624F] underline">
-                    Check inbox
-                  </Link>
-                ) : null}
-              </div>
-            ) : null}
-
-            <dl className="mt-5 divide-y divide-[#E6ECEF] text-sm">
-              <SidebarFact label="Age" value={age} />
-              <SidebarFact label="Audience" value={gender} />
-              <SidebarFact label="Schedule" value={schedule.full} />
-              <SidebarFact label="Teacher" value={teacherName} />
-              <SidebarFact label="Status" value={program.is_active ? "Open" : "Closed"} />
-            </dl>
-
-            <div className="mt-5 rounded-xl bg-[#EFF9F6] p-4 text-sm text-[#17624F]">
-              <p className="font-semibold">Need help?</p>
-              <p className="mt-1 leading-6">Contact the shaykh before registering if you are unsure if this class is the right fit.</p>
-            </div>
-          </aside>
         </div>
       </div>
     </div>
@@ -841,6 +854,7 @@ type EditableProfileField = "fullName" | "password" | "email" | "dateOfBirth" | 
 
 export function PortalAccountData({ slug }: { slug: string }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [profile, setProfile] = useState<Profile | null>(null);
   const [sessionEmail, setSessionEmail] = useState("");
   const [fallbackName, setFallbackName] = useState("");
@@ -856,6 +870,7 @@ export function PortalAccountData({ slug }: { slug: string }) {
   const [editingField, setEditingField] = useState<EditableProfileField | null>(null);
   const [photoDraftUrl, setPhotoDraftUrl] = useState("");
   const [photoScale, setPhotoScale] = useState(1);
+  const [photoOffset, setPhotoOffset] = useState({ x: 0, y: 0 });
   const [switchBusy, setSwitchBusy] = useState(false);
   const [switchBusyEmail, setSwitchBusyEmail] = useState<string | null>(null);
   const [switchMessage, setSwitchMessage] = useState<string | null>(null);
@@ -863,6 +878,20 @@ export function PortalAccountData({ slug }: { slug: string }) {
   const photoInputRef = useRef<HTMLInputElement | null>(null);
   const canUseAccountSwitcher = process.env.NODE_ENV !== "production";
   const devSwitchAccounts = canUseAccountSwitcher ? getDevSwitchAccounts() : [];
+
+  useEffect(() => {
+    const panelParam = searchParams.get("panel");
+    if (!panelParam || !isAccountPanel(panelParam)) {
+      return;
+    }
+
+    setActivePanel(panelParam);
+    setPanelMotion("forward");
+    setHasPanelNavigated(false);
+    setEditingField(null);
+    setProfileMessage(null);
+    setSwitchMessage(null);
+  }, [searchParams]);
 
   useEffect(() => {
     let active = true;
@@ -911,6 +940,11 @@ export function PortalAccountData({ slug }: { slug: string }) {
         email: profileRow?.email ?? session.user.email ?? "",
         password: "",
       });
+      setCachedProfileSummary(session.user.id, {
+        fullName: profileRow?.full_name?.trim() || metadataName || session.user.email?.split("@")[0] || null,
+        avatarUrl: profileRow?.avatar_url?.trim() || null,
+      });
+      window.dispatchEvent(new Event("tareeqah:profile-name-changed"));
       setLoading(false);
     }
 
@@ -977,6 +1011,7 @@ export function PortalAccountData({ slug }: { slug: string }) {
     setPanelMotion("forward");
     setPhotoDraftUrl(profileForm.avatarUrl);
     setPhotoScale(1);
+    setPhotoOffset({ x: 0, y: 0 });
     setProfileMessage(null);
     setActivePanel("photo");
   }
@@ -997,6 +1032,8 @@ export function PortalAccountData({ slug }: { slug: string }) {
     reader.onload = () => {
       if (typeof reader.result === "string") {
         setPhotoDraftUrl(reader.result);
+        setPhotoScale(1);
+        setPhotoOffset({ x: 0, y: 0 });
       }
     };
     reader.readAsDataURL(file);
@@ -1026,17 +1063,25 @@ export function PortalAccountData({ slug }: { slug: string }) {
 
     setProfile((current) => (current ? { ...current, avatar_url: cleanedAvatarUrl || null } : current));
     setProfileForm((current) => ({ ...current, avatarUrl: cleanedAvatarUrl }));
+    setCachedProfileSummary(profile.id, {
+      fullName: profile.full_name?.trim() || null,
+      avatarUrl: cleanedAvatarUrl || null,
+    });
+    window.dispatchEvent(new Event("tareeqah:profile-name-changed"));
     setProfileSaving(false);
     setProfileMessage(cleanedAvatarUrl ? "Profile photo updated." : "Profile photo removed.");
   }
 
   async function confirmPhotoChanges() {
-    await saveAvatarUrl(photoDraftUrl);
+    const croppedAvatarUrl = photoDraftUrl ? await cropAvatarImage(photoDraftUrl, photoScale, photoOffset).catch(() => photoDraftUrl) : "";
+    await saveAvatarUrl(croppedAvatarUrl);
     setActivePanel("settings");
   }
 
   async function removeProfilePhoto() {
     setPhotoDraftUrl("");
+    setPhotoScale(1);
+    setPhotoOffset({ x: 0, y: 0 });
     await saveAvatarUrl("");
   }
 
@@ -1112,6 +1157,10 @@ export function PortalAccountData({ slug }: { slug: string }) {
 
       if (field === "fullName") {
         setCachedProfileName(profile.id, profileForm.fullName.trim() || null);
+        setCachedProfileSummary(profile.id, {
+          fullName: profileForm.fullName.trim() || null,
+          avatarUrl: profile.avatar_url?.trim() || null,
+        });
         window.dispatchEvent(new Event("tareeqah:profile-name-changed"));
       }
     }
@@ -1151,7 +1200,7 @@ export function PortalAccountData({ slug }: { slug: string }) {
             <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-full border-4 border-[#79B7C8] text-3xl font-semibold text-[#2F8FB3]">!</div>
             <h1 className="mt-6 text-2xl font-semibold text-[#26323A]">Log in required</h1>
             <p className="mt-2 text-sm leading-6 text-[#6B747B]">Your account page is available after signing in.</p>
-            <Link href={`/m/${slug}/login`} className="mt-7 inline-flex min-h-12 items-center justify-center rounded-full bg-[#26323A] px-7 text-sm font-semibold text-white shadow-[0_12px_24px_rgba(38,50,58,0.18)]">
+            <Link href={`/m/${slug}/login`} className="mt-7 inline-flex min-h-12 items-center justify-center rounded-full bg-[#26323A] px-7 text-sm font-semibold !text-white shadow-[0_12px_24px_rgba(38,50,58,0.18)]">
               Log in
             </Link>
           </div>
@@ -1264,10 +1313,12 @@ export function PortalAccountData({ slug }: { slug: string }) {
         previewUrl={photoDraftUrl || profile?.avatar_url || ""}
         name={displayName}
         scale={photoScale}
+        offset={photoOffset}
         saving={profileSaving}
         fileInputRef={photoInputRef}
         onBack={closePhotoPanel}
         onScaleChange={setPhotoScale}
+        onOffsetChange={setPhotoOffset}
         onFileChange={handlePhotoFile}
         onConfirm={confirmPhotoChanges}
       />
@@ -1330,21 +1381,37 @@ export function PortalAccountData({ slug }: { slug: string }) {
     ),
   };
 
+  const mobilePanel = activePanel;
+  const desktopPanel = activePanel === "menu" ? "settings" : activePanel;
+
+  function renderAccountPanel(panel: AccountPanel) {
+    return (
+      <div
+        key={panel}
+        className={cn(
+          hasPanelNavigated ? "account-panel-slide" : "",
+          hasPanelNavigated && (panelMotion === "forward" ? "account-panel-slide-forward" : "account-panel-slide-back"),
+        )}
+      >
+        <AccountPanelFrame>{accountPanels[panel]}</AccountPanelFrame>
+      </div>
+    );
+  }
+
   return (
     <section className="min-h-[calc(100vh-140px)] overflow-hidden bg-[#F7F8FA] px-5 py-8 text-[#26323A]">
-      <div className="mx-auto max-w-sm overflow-hidden">
-        <div
-          key={activePanel}
-          className={cn(
-            hasPanelNavigated ? "account-panel-slide" : "",
-            hasPanelNavigated && (panelMotion === "forward" ? "account-panel-slide-forward" : "account-panel-slide-back"),
-          )}
-        >
-          <AccountPanelFrame>{accountPanels[activePanel]}</AccountPanelFrame>
-        </div>
+      <div className="mx-auto max-w-sm overflow-hidden md:hidden">
+        {renderAccountPanel(mobilePanel)}
+      </div>
+      <div className="mx-auto hidden max-w-lg overflow-hidden md:block">
+        {renderAccountPanel(desktopPanel)}
       </div>
     </section>
   );
+}
+
+function isAccountPanel(value: string): value is AccountPanel {
+  return value === "menu" || value === "settings" || value === "family" || value === "billing" || value === "security" || value === "homescreen" || value === "photo" || value === "switchAccount";
 }
 
 export function InboxAnnouncementsData({ slug }: { slug: string }) {
@@ -1760,17 +1827,22 @@ export function TeacherInboxData({ slug }: { slug: string }) {
 
     const studentIds = Array.from(new Set((requestRows ?? []).map((request) => request.student_profile_id)));
     const parentIds = Array.from(new Set((requestRows ?? []).map((request) => request.parent_profile_id).filter(Boolean))) as string[];
-    const { data: students } = studentIds.length
-      ? await supabase.from("profiles").select("id, full_name, email, phone_number, avatar_url, age, gender, date_of_birth").in("id", studentIds)
-      : { data: [] as Profile[] };
-    const { data: parents } = parentIds.length
-      ? await supabase.from("profiles").select("id, full_name, email, phone_number, avatar_url").in("id", parentIds)
-      : { data: [] as Profile[] };
+    const authorIds = Array.from(new Set((announcementRows ?? []).map((announcement) => announcement.author_profile_id).filter(Boolean))) as string[];
+    const [{ data: students }, { data: parents }, { data: authors }] = await Promise.all([
+      studentIds.length
+        ? supabase.from("profiles").select("id, full_name, email, phone_number, avatar_url, age, gender, date_of_birth").in("id", studentIds)
+        : Promise.resolve({ data: [] as StudentDisplay[] }),
+      parentIds.length
+        ? supabase.from("profiles").select("id, full_name, email, phone_number, avatar_url").in("id", parentIds)
+        : Promise.resolve({ data: [] as ParentDisplay[] }),
+      authorIds.length ? supabase.from("profiles").select("*").in("id", authorIds) : Promise.resolve({ data: [] as Profile[] }),
+    ]);
 
     setAnnouncements(
       (announcementRows ?? []).map((announcement) => ({
         ...announcement,
         program: teacherPrograms.find((program) => program.id === announcement.program_id) ?? null,
+        author: (authors ?? []).find((author) => author.id === announcement.author_profile_id) ?? null,
       })),
     );
     setRequests(
@@ -1974,11 +2046,17 @@ export function TeacherAnnouncementData({ slug, programId }: { slug: string; pro
       return;
     }
 
+    const authorIds = Array.from(new Set((announcementRows ?? []).map((announcement) => announcement.author_profile_id).filter(Boolean))) as string[];
+    const { data: authors } = authorIds.length
+      ? await supabase.from("profiles").select("*").in("id", authorIds)
+      : { data: [] as Profile[] };
+
     setProgram(programRow);
     setAnnouncements(
       (announcementRows ?? []).map((announcement) => ({
         ...announcement,
         program: programRow,
+        author: (authors ?? []).find((author) => author.id === announcement.author_profile_id) ?? null,
       })),
     );
     setLoading(false);
@@ -2669,7 +2747,7 @@ async function fetchMosqueProgramsSnapshot(slug: string): Promise<MosquePrograms
   let teachers: TeacherDisplay[] = [];
 
   if (teacherIds.length > 0) {
-    const { data: teacherData, error: teacherError } = await supabase.from("profiles").select("id, full_name, avatar_url, teacher_credentials").in("id", teacherIds);
+    const { data: teacherData, error: teacherError } = await supabase.from("profiles").select("id, full_name, avatar_url, teacher_credentials, teacher_whatsapp_number").in("id", teacherIds);
     if (teacherError) {
       throw new Error(teacherError.message);
     }
@@ -3353,9 +3431,11 @@ function IconActionButton({
 }
 
 function TeacherAnnouncementBubble({ announcement }: { announcement: AnnouncementWithContext }) {
+  const authorName = announcement.author?.full_name?.trim() || "You";
+
   return (
     <article className="flex gap-3">
-      <DefaultProfileIcon />
+      <Avatar src={announcement.author?.avatar_url ?? null} name={authorName} />
       <div className="min-w-0 flex-1 rounded-2xl rounded-tl-sm border border-[#E1E8EC] bg-white p-3 shadow-[0_6px_18px_rgba(38,50,58,0.05)]">
         <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
           <h3 className="text-sm font-semibold text-[#26323A]">You</h3>
@@ -3609,7 +3689,7 @@ function ProgramMediaGallery({ items }: { items: readonly ProgramMedia[] }) {
     <DetailSection title="Program Media">
       <div className="overflow-hidden rounded-xl border border-[#D6DCE0] bg-[#F5F7F8]">
         <div className="relative flex aspect-[16/10] items-end overflow-hidden p-5 text-white">
-          <Image src={mediaUrl(activeItem)} alt="" fill className="object-cover" sizes="(min-width: 1024px) 720px, 100vw" />
+          <Image src={mediaUrl(activeItem)} alt={mediaAltText(activeItem)} fill className="object-cover" sizes="(min-width: 1024px) 720px, 100vw" />
           <div className="absolute inset-0 bg-gradient-to-t from-black/45 via-black/5 to-transparent" />
           {mediaType(activeItem) === "video" ? (
             <span className="absolute left-1/2 top-1/2 flex h-14 w-14 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-white/90 text-[#17624F] shadow-lg" aria-hidden>
@@ -3619,6 +3699,7 @@ function ProgramMediaGallery({ items }: { items: readonly ProgramMedia[] }) {
           <div className="relative">
             <p className="text-xs font-medium uppercase tracking-wide text-white/80">{mediaType(activeItem) === "video" ? "Video" : "Photo"}</p>
             <p className="mt-1 text-lg font-semibold">{mediaTitle(activeItem)}</p>
+            {mediaCaption(activeItem) ? <p className="mt-1 max-w-xl text-sm leading-5 text-white/85">{mediaCaption(activeItem)}</p> : null}
           </div>
         </div>
         <div className="grid grid-cols-4 gap-2 border-t border-[#D6DCE0] bg-white p-2">
@@ -3633,7 +3714,7 @@ function ProgramMediaGallery({ items }: { items: readonly ProgramMedia[] }) {
               )}
               aria-label={`Show ${mediaTitle(item)}`}
             >
-              <Image src={mediaThumbnail(item)} alt="" fill className="object-cover" sizes="96px" />
+              <Image src={mediaThumbnail(item)} alt={mediaAltText(item)} fill className="object-cover" sizes="96px" />
               <span className="absolute inset-0 bg-black/15" />
               <span className="absolute bottom-1 left-1 right-1 truncate text-[10px] font-medium text-white">{mediaShortLabel(item)}</span>
             </button>
@@ -3662,6 +3743,14 @@ function mediaThumbnail(item: ProgramMedia) {
 
 function mediaTitle(item: ProgramMedia) {
   return item.title ?? "Program media";
+}
+
+function mediaCaption(item: ProgramMedia) {
+  return item.caption ?? "";
+}
+
+function mediaAltText(item: ProgramMedia) {
+  return item.alt_text ?? mediaTitle(item);
 }
 
 function mediaShortLabel(item: ProgramMedia) {
@@ -3743,10 +3832,12 @@ function ChildEnrollmentSelector({
   );
 }
 
-function PhoneIcon() {
+function MessageIcon({ className, style }: { className?: string; style?: CSSProperties } = {}) {
   return (
-    <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 2 .7 2.8a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.3-1.2a2 2 0 0 1 2.1-.5c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2Z" />
+    <svg viewBox="0 0 24 24" className={cn("h-4 w-4", className)} style={style} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4v8Z" />
+      <path d="M8 9h8" />
+      <path d="M8 13h5" />
     </svg>
   );
 }
@@ -3979,11 +4070,16 @@ function HomeUpcomingRows({
   currentUserId?: string | null;
 }) {
   const [cancellations, setCancellations] = useState<ProgramSessionCancellation[]>([]);
+  const [cancellationsLoadedKey, setCancellationsLoadedKey] = useState<string | null>(null);
   const [cancelTarget, setCancelTarget] = useState<HomeLesson | null>(null);
   const [cancelMessage, setCancelMessage] = useState("");
   const [cancelBusy, setCancelBusy] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
   const week = currentWeekDays();
+  const weekStartKey = dayKey(week[0]);
+  const weekEndKey = dayKey(week[week.length - 1]);
+  const programKey = programs.map((program) => program.id).sort().join("|");
+  const cancellationLoadKey = `${programKey}:${weekStartKey}:${weekEndKey}`;
   const lessonSources: Array<{ program: Program | ProgramWithTeacher; ownerLabel?: string }> = programs.flatMap((program) => {
     const labels = ownerLabelsByProgramId[program.id] ?? [];
     return labels.length ? labels.map((ownerLabel) => ({ program, ownerLabel })) : [{ program }];
@@ -3998,23 +4094,24 @@ function HomeUpcomingRows({
     const programIds = Array.from(new Set(programs.map((program) => program.id)));
     if (programIds.length === 0) {
       setCancellations([]);
+      setCancellationsLoadedKey(cancellationLoadKey);
       return;
     }
 
     const supabase = createSupabaseBrowserClient();
     let active = true;
-    const firstDay = dayKey(week[0]);
-    const lastDay = dayKey(week[week.length - 1]);
+    setCancellationsLoadedKey((current) => (current === cancellationLoadKey ? current : null));
 
     supabase
       .from("program_session_cancellations")
       .select("*")
       .in("program_id", programIds)
-      .gte("session_date", firstDay)
-      .lte("session_date", lastDay)
+      .gte("session_date", weekStartKey)
+      .lte("session_date", weekEndKey)
       .then(({ data }) => {
         if (active) {
           setCancellations(data ?? []);
+          setCancellationsLoadedKey(cancellationLoadKey);
         }
       });
 
@@ -4022,7 +4119,7 @@ function HomeUpcomingRows({
       active = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [programs.map((program) => program.id).join("|"), dayKey(week[0]), dayKey(week[week.length - 1])]);
+  }, [programKey, weekStartKey, weekEndKey]);
 
   function openCancelModal(lesson: HomeLesson) {
     setCancelTarget(lesson);
@@ -4097,6 +4194,10 @@ function HomeUpcomingRows({
     setCancelMessage("");
   }
 
+  if (cancellationsLoadedKey !== cancellationLoadKey) {
+    return <HomeUpcomingLoadingRows />;
+  }
+
   if (lessons.length === 0) {
     return <HomeEmptyState title="No upcoming classes" text="Upcoming sessions will appear here after schedules are added." />;
   }
@@ -4160,6 +4261,31 @@ function HomeUpcomingRows({
           </div>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+function HomeUpcomingLoadingRows() {
+  return (
+    <div className="space-y-5" aria-label="Loading upcoming classes">
+      <div className="grid grid-cols-7 gap-1 px-1">
+        {Array.from({ length: 7 }).map((_, index) => (
+          <div key={index} className="flex flex-col items-center gap-1.5">
+            <div className="h-14 w-full max-w-12 animate-pulse rounded-2xl bg-[#E8EEF2]" />
+            <div className="h-2 w-3 animate-pulse rounded-full bg-[#DDE8EE]" />
+          </div>
+        ))}
+      </div>
+      <div className="rounded-[24px] bg-white px-4 py-3 shadow-[0_8px_24px_rgba(38,50,58,0.06)]">
+        <div className="flex items-center gap-3">
+          <div className="h-14 w-14 shrink-0 animate-pulse rounded-2xl bg-[#E8EEF2]" />
+          <div className="min-w-0 flex-1 space-y-2">
+            <div className="h-5 w-44 animate-pulse rounded-full bg-[#E8EEF2]" />
+            <div className="h-4 w-32 animate-pulse rounded-full bg-[#EEF2F4]" />
+          </div>
+          <div className="h-2.5 w-2.5 animate-pulse rounded-full bg-[#A8C9D4]" />
+        </div>
+      </div>
     </div>
   );
 }
@@ -4473,27 +4599,122 @@ function EditableProfileRow({
   );
 }
 
+const avatarCropWorkspaceSize = 420;
+const avatarCropCircleSize = 256;
+const avatarCropOutputSize = 512;
+
+function cropAvatarImage(source: string, scale: number, offset: { x: number; y: number }) {
+  return new Promise<string>((resolve, reject) => {
+    const image = new window.Image();
+    image.crossOrigin = "anonymous";
+    image.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = avatarCropOutputSize;
+      canvas.height = avatarCropOutputSize;
+      const context = canvas.getContext("2d");
+      if (!context) {
+        reject(new Error("Canvas not available"));
+        return;
+      }
+
+      const fitScale = Math.min(avatarCropWorkspaceSize / image.naturalWidth, avatarCropWorkspaceSize / image.naturalHeight);
+      const totalScale = fitScale * scale;
+      const displayWidth = image.naturalWidth * totalScale;
+      const displayHeight = image.naturalHeight * totalScale;
+      const imageLeft = avatarCropWorkspaceSize / 2 - displayWidth / 2 + offset.x;
+      const imageTop = avatarCropWorkspaceSize / 2 - displayHeight / 2 + offset.y;
+      const cropLeft = (avatarCropWorkspaceSize - avatarCropCircleSize) / 2;
+      const cropTop = (avatarCropWorkspaceSize - avatarCropCircleSize) / 2;
+      const sourceX = (cropLeft - imageLeft) / totalScale;
+      const sourceY = (cropTop - imageTop) / totalScale;
+      const sourceSize = avatarCropCircleSize / totalScale;
+
+      context.fillStyle = "#F2F4F5";
+      context.fillRect(0, 0, avatarCropOutputSize, avatarCropOutputSize);
+      context.drawImage(image, sourceX, sourceY, sourceSize, sourceSize, 0, 0, avatarCropOutputSize, avatarCropOutputSize);
+      resolve(canvas.toDataURL("image/jpeg", 0.9));
+    };
+    image.onerror = () => reject(new Error("Could not load image"));
+    image.src = source;
+  });
+}
+
 function EditProfilePhotoPanel({
   previewUrl,
   name,
   scale,
+  offset,
   saving,
   fileInputRef,
   onBack,
   onScaleChange,
+  onOffsetChange,
   onFileChange,
   onConfirm,
 }: {
   previewUrl: string;
   name: string;
   scale: number;
+  offset: { x: number; y: number };
   saving: boolean;
   fileInputRef: RefObject<HTMLInputElement | null>;
   onBack: () => void;
   onScaleChange: (nextScale: number) => void;
+  onOffsetChange: (nextOffset: { x: number; y: number }) => void;
   onFileChange: (file: File | null) => void;
   onConfirm: () => void;
 }) {
+  const [dragState, setDragState] = useState<{ pointerId: number; startX: number; startY: number; originX: number; originY: number } | null>(null);
+
+  function beginDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!previewUrl) {
+      return;
+    }
+
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDragState({
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: offset.x,
+      originY: offset.y,
+    });
+  }
+
+  function dragPhoto(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!dragState || dragState.pointerId !== event.pointerId) {
+      return;
+    }
+
+    event.preventDefault();
+    onOffsetChange({
+      x: dragState.originX + event.clientX - dragState.startX,
+      y: dragState.originY + event.clientY - dragState.startY,
+    });
+  }
+
+  function endDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (dragState?.pointerId === event.pointerId) {
+      setDragState(null);
+    }
+  }
+
+  function zoomPhoto(event: ReactWheelEvent<HTMLDivElement>) {
+    if (!previewUrl) {
+      return;
+    }
+
+    event.preventDefault();
+    const delta = event.deltaY > 0 ? -0.08 : 0.08;
+    onScaleChange(Math.min(2.5, Math.max(0.6, Number((scale + delta).toFixed(2)))));
+  }
+
+  function resetPhoto() {
+    onScaleChange(1);
+    onOffsetChange({ x: 0, y: 0 });
+  }
+
   return (
     <section className="-mx-5 min-h-[calc(100vh-140px)] bg-white px-5 pb-8 pt-1">
       <header className="flex h-14 items-center justify-between">
@@ -4504,24 +4725,53 @@ function EditProfilePhotoPanel({
         <span className="h-10 w-10" aria-hidden />
       </header>
 
-      <div className="mt-5 overflow-hidden rounded-[28px] bg-[#F2F3F3] px-6 py-16">
-        <div className="relative mx-auto flex h-64 w-64 items-center justify-center overflow-hidden rounded-full border-2 border-white bg-gradient-to-br from-[#DAF7ED] via-[#D9EEF3] to-[#80BDAF] shadow-[0_18px_44px_rgba(38,50,58,0.12)]">
+      <div className="mt-5 rounded-[28px] bg-[#F2F3F3] px-4 py-8 md:px-8">
+        <div
+          className={cn(
+            "relative mx-auto flex h-[420px] w-full max-w-[420px] items-center justify-center overflow-hidden rounded-[28px] bg-[#EEF0F0]",
+            previewUrl && "cursor-grab touch-none select-none active:cursor-grabbing",
+          )}
+          onPointerDown={beginDrag}
+          onPointerMove={dragPhoto}
+          onPointerUp={endDrag}
+          onPointerCancel={endDrag}
+          onWheel={zoomPhoto}
+        >
           {previewUrl ? (
-            <div className="h-full w-full bg-cover bg-center" style={{ backgroundImage: `url(${previewUrl})`, transform: `scale(${scale})` }} aria-hidden />
+            <div
+              className="pointer-events-none absolute left-1/2 top-1/2 h-[420px] w-[420px] bg-contain bg-center bg-no-repeat will-change-transform"
+              style={{
+                backgroundImage: `url("${previewUrl}")`,
+                transform: `translate(-50%, -50%) translate3d(${offset.x}px, ${offset.y}px, 0) scale(${scale})`,
+              }}
+              aria-hidden
+            />
           ) : (
             <span className="text-5xl font-semibold text-[#17624F]">{initials(name)}</span>
           )}
+          <div
+            className="pointer-events-none absolute inset-0"
+            style={{
+              background:
+                "radial-gradient(circle 128px at center, transparent 0 126px, rgba(242, 243, 243, 0.74) 127px, rgba(242, 243, 243, 0.86) 100%)",
+            }}
+            aria-hidden
+          />
+          <div
+            className="pointer-events-none absolute left-1/2 top-1/2 h-64 w-64 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white shadow-[0_22px_48px_rgba(38,50,58,0.18)]"
+            aria-hidden
+          />
         </div>
       </div>
 
       <div className="mx-auto -mt-8 flex w-fit items-center overflow-hidden rounded-full bg-white shadow-[0_14px_30px_rgba(38,50,58,0.14)] ring-1 ring-[#E4EAEE]">
-        <button type="button" onClick={() => onScaleChange(Math.max(1, Number((scale - 0.1).toFixed(1))))} className="flex h-12 w-14 items-center justify-center text-2xl text-[#26323A]" aria-label="Zoom out">
+        <button type="button" onClick={() => onScaleChange(Math.max(0.6, Number((scale - 0.1).toFixed(1))))} className="flex h-12 w-14 items-center justify-center text-2xl text-[#26323A]" aria-label="Zoom out">
           -
         </button>
-        <button type="button" onClick={() => onScaleChange(Math.min(1.8, Number((scale + 0.1).toFixed(1))))} className="flex h-12 w-14 items-center justify-center border-l border-[#E4EAEE] text-2xl text-[#26323A]" aria-label="Zoom in">
+        <button type="button" onClick={() => onScaleChange(Math.min(2.5, Number((scale + 0.1).toFixed(1))))} className="flex h-12 w-14 items-center justify-center border-l border-[#E4EAEE] text-2xl text-[#26323A]" aria-label="Zoom in">
           +
         </button>
-        <button type="button" onClick={() => onScaleChange(1)} className="h-12 border-l border-[#E4EAEE] px-6 text-sm font-semibold text-[#26323A]">
+        <button type="button" onClick={resetPhoto} className="h-12 border-l border-[#E4EAEE] px-6 text-sm font-semibold text-[#26323A]">
           Reset
         </button>
       </div>
@@ -4903,6 +5153,16 @@ function formatPrice(cents: number | null) {
     currency: "USD",
     maximumFractionDigits: 0,
   }).format(cents / 100);
+}
+
+function getWhatsAppHref(phoneNumber: string | null | undefined) {
+  const trimmed = phoneNumber?.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const digits = trimmed.replace(/\D/g, "").replace(/^00/, "");
+  return digits ? `https://wa.me/${digits}` : null;
 }
 
 function formatAgeRange(ageRange: string | null) {

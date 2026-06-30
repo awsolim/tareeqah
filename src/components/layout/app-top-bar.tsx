@@ -170,9 +170,11 @@ export function AppTopBar({
   navItems: NavItem[];
   mobileNavItems?: NavItem[];
 }) {
-  const cachedChrome = mosqueSlug ? getCachedMosqueChrome(mosqueSlug) : null;
-  const [displayName, setDisplayName] = useState(cachedChrome?.name ?? (mosqueSlug ? titleFromSlug(mosqueSlug) : appName));
-  const [logoUrl, setLogoUrl] = useState<string | null>(cachedChrome?.logoUrl ?? null);
+  const [displayName, setDisplayName] = useState(
+    mosqueSlug ? titleFromSlug(mosqueSlug) : appName
+  );
+  const [logoUrl, setLogoUrl] = useState<string | null>(null);
+
   const portalInboxHref = mosqueSlug ? `/m/${mosqueSlug}/portal/announcements` : "";
   const teacherInboxHref = mosqueSlug ? `/m/${mosqueSlug}/teacher/inbox` : "";
   const showStudentBadges = Boolean((mobileNavItems ?? navItems).some((item) => item.label === "Inbox" && item.href === portalInboxHref));
@@ -183,10 +185,20 @@ export function AppTopBar({
 
   useEffect(() => {
     if (!mosqueSlug) {
+      setDisplayName(appName);
+      setLogoUrl(null);
       return;
     }
 
     let cancelled = false;
+
+    const cachedChrome = getCachedMosqueChrome(mosqueSlug);
+
+    if (cachedChrome) {
+      setDisplayName(cachedChrome.name);
+      setLogoUrl(cachedChrome.logoUrl);
+    }
+
     loadMosqueChrome(mosqueSlug).then((data) => {
       if (!cancelled && data) {
         setDisplayName(data.name);
@@ -197,10 +209,13 @@ export function AppTopBar({
     return () => {
       cancelled = true;
     };
-  }, [mosqueSlug]);
+  }, [mosqueSlug, appName]);
+
+
+
 
   return (
-    <header className="sticky top-0 z-30 border-b border-[#D6DCE0] bg-white text-[#26323A]">
+    <header className="sticky top-0 z-30 border-b border-[#D6DCE0] bg-white text-[#26323A] md:hidden">
       <div className="app-container flex min-h-16 items-center justify-between gap-3 py-2">
         <Link href={homeHref} className="flex min-w-0 items-center gap-3">
           <TopBarLogo src={logoUrl} name={displayName} />

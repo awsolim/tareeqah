@@ -66,7 +66,7 @@ export function ChildrenManager({ slug }: { slug: string }) {
 
     const { data: profiles, error: profilesError } = await supabase
       .from("profiles")
-      .select("id, full_name, email, phone_number, avatar_url, teacher_credentials, age, gender, account_type, global_role, date_of_birth, created_at, updated_at")
+      .select("id, full_name, email, phone_number, avatar_url, teacher_credentials, teacher_whatsapp_number, age, gender, account_type, global_role, date_of_birth, created_at, updated_at")
       .in("id", childIds);
 
     if (profilesError) {

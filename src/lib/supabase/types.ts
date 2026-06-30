@@ -56,6 +56,7 @@ export type Database = {
           phone_number: string | null;
           avatar_url: string | null;
           teacher_credentials: string | null;
+          teacher_whatsapp_number: string | null;
           age: string | null;
           gender: string | null;
           account_type: string | null;
@@ -228,7 +229,10 @@ export type Database = {
           url: string;
           thumbnail_url: string | null;
           title: string | null;
+          caption: string | null;
+          alt_text: string | null;
           short_label: string | null;
+          is_featured: boolean;
           created_at: string;
           updated_at: string;
         };
