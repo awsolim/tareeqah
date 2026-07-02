@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { FormEvent, useMemo, useState } from "react";
 import { FlatButton } from "@/components/ui/flat-button";
 import { getDefaultLandingHref, loadUserAccessByMosqueSlug } from "@/lib/authz";
+import { normalizePhoneNumber, phoneCountryCodes } from "@/lib/phone";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
 
@@ -57,6 +58,7 @@ export function AuthPanel({ mode, slug }: { mode: AuthMode; slug: string }) {
   const pathname = usePathname();
   const [accountType, setAccountType] = useState<AccountType>("student");
   const [fullName, setFullName] = useState("");
+  const [phoneCountryCode, setPhoneCountryCode] = useState("+1");
   const [phone, setPhone] = useState("");
   const [gender, setGender] = useState("");
   const [dateOfBirth, setDateOfBirth] = useState("");
@@ -81,6 +83,13 @@ export function AuthPanel({ mode, slug }: { mode: AuthMode; slug: string }) {
     const supabase = createSupabaseBrowserClient();
 
     if (isSignup) {
+      const normalizedPhone = normalizePhoneNumber(phone, phoneCountryCode);
+      if (normalizedPhone.error) {
+        setSubmitting(false);
+        setError(normalizedPhone.error);
+        return;
+      }
+
       const { data, error: signUpError } = await supabase.auth.signUp({
         email,
         password,
@@ -89,7 +98,7 @@ export function AuthPanel({ mode, slug }: { mode: AuthMode; slug: string }) {
           data: {
             account_type: accountType,
             full_name: fullName,
-            phone,
+            phone: normalizedPhone.value,
             gender: accountType === "student" ? gender : "",
             date_of_birth: accountType === "student" ? dateOfBirth : "",
             age: "",
@@ -233,7 +242,12 @@ export function AuthPanel({ mode, slug }: { mode: AuthMode; slug: string }) {
         {isSignup ? (
           <>
             <AuthInput label="Full name" name="fullName" value={fullName} onChange={setFullName} autoComplete="name" required />
-            <AuthInput label="Phone number" name="phone" value={phone} onChange={setPhone} autoComplete="tel" required />
+            <PhoneInput
+              countryCode={phoneCountryCode}
+              onCountryCodeChange={setPhoneCountryCode}
+              phone={phone}
+              onPhoneChange={setPhone}
+            />
             {accountType === "student" ? (
               <>
                 <AuthSelect
@@ -273,6 +287,52 @@ export function AuthPanel({ mode, slug }: { mode: AuthMode; slug: string }) {
         </FlatButton>
       </form>
     </div>
+  );
+}
+
+function PhoneInput({
+  countryCode,
+  onCountryCodeChange,
+  phone,
+  onPhoneChange,
+}: {
+  countryCode: string;
+  onCountryCodeChange: (value: string) => void;
+  phone: string;
+  onPhoneChange: (value: string) => void;
+}) {
+  return (
+    <label className="block">
+      <span className="text-sm font-medium text-[#26323A]">Phone number</span>
+      <div className="mt-1 grid grid-cols-[116px_minmax(0,1fr)]">
+        <select
+          name="phoneCountryCode"
+          value={countryCode}
+          onChange={(event) => onCountryCodeChange(event.target.value)}
+          required
+          suppressHydrationWarning
+          className="h-11 border border-r-0 border-[#B9C3C8] bg-white px-2 text-sm text-[#26323A] outline-none focus:border-[#2F8FB3]"
+        >
+          {phoneCountryCodes.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+        <input
+          name="phone"
+          type="tel"
+          value={phone}
+          onChange={(event) => onPhoneChange(event.target.value)}
+          autoComplete="tel-national"
+          required
+          inputMode="tel"
+          placeholder={countryCode === "+1" ? "780 555 1234" : "Phone number"}
+          suppressHydrationWarning
+          className="h-11 w-full border border-[#B9C3C8] bg-white px-3 text-sm text-[#26323A] outline-none focus:border-[#2F8FB3]"
+        />
+      </div>
+    </label>
   );
 }
 

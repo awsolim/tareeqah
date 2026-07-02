@@ -83,13 +83,13 @@ export default function manifest(): MetadataRoute.Manifest {
         name: "Classes",
         short_name: "Classes",
         description: "Open your class list",
-        url: "/m/assiddiq/portal/classes",
+        url: "/portal/classes",
       },
       {
         name: "Inbox",
         short_name: "Inbox",
         description: "Open announcements and notifications",
-        url: "/m/assiddiq/portal/announcements",
+        url: "/portal/announcements",
       },
     ],
   };

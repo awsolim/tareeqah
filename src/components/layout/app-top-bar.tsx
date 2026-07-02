@@ -58,7 +58,7 @@ function BottomNav({ items, inboxBadgeCount = 0 }: { items: NavItem[]; inboxBadg
   }
 
   return (
-    <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-[#D6DCE0] bg-[#FAFBFC] md:hidden" aria-label="Mobile primary navigation">
+    <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-[#D6DCE0] bg-[var(--workspace)] md:hidden" aria-label="Mobile primary navigation">
       <div className="mx-auto grid max-w-md" style={{ gridTemplateColumns: `repeat(${visibleItems.length}, minmax(0, 1fr))` }}>
         {visibleItems.map((item, index) => {
           const pendingHref = pendingNavigation?.fromPath === pathname ? pendingNavigation.href : null;
@@ -215,7 +215,7 @@ export function AppTopBar({
 
 
   return (
-    <header className="sticky top-0 z-30 border-b border-[#D6DCE0] bg-white text-[#26323A] md:hidden">
+    <header className="sticky top-0 z-30 border-b border-[#D6DCE0] bg-[var(--workspace)] text-[#26323A] md:hidden">
       <div className="app-container flex min-h-16 items-center justify-between gap-3 py-2">
         <Link href={homeHref} className="flex min-w-0 items-center gap-3">
           <TopBarLogo src={logoUrl} name={displayName} />

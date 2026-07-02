@@ -30,6 +30,17 @@ function shouldUseStripeConnect() {
   return process.env.STRIPE_CONNECT_PLATFORM === "true";
 }
 
+function isMasjidSubdomain(origin: string, mosqueSlug: string) {
+  try {
+    const hostname = new URL(origin).hostname.toLowerCase();
+    const rootDomain = (process.env.NEXT_PUBLIC_ROOT_DOMAIN || "tareeqah.ca").toLowerCase();
+
+    return hostname === `${mosqueSlug}.${rootDomain}` || hostname === `${mosqueSlug}.localhost`;
+  } catch {
+    return false;
+  }
+}
+
 export async function POST(request: Request) {
   try {
     const authorization = request.headers.get("authorization") ?? "";
@@ -93,7 +104,7 @@ export async function POST(request: Request) {
     const stripeRequestOptions = shouldUseStripeConnect() && mosque.stripe_account_id ? { stripeAccount: mosque.stripe_account_id } : undefined;
 
     const origin = getOrigin(request);
-    const returnPath = `/m/${mosque.slug}/portal/announcements`;
+    const returnPath = isMasjidSubdomain(origin, mosque.slug) ? "/portal/announcements" : `/m/${mosque.slug}/portal/announcements`;
     const stripe = getStripe();
     const session = await stripe.checkout.sessions.create(
       {

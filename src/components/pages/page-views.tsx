@@ -32,14 +32,14 @@ import { formatDate, formatTime } from "@/lib/utils";
 function Workspace({ children, overlap = true }: { children: React.ReactNode; overlap?: boolean }) {
   return (
     <div
-      className={`app-container relative z-10 pb-8 ${overlap ? "" : "py-8"}`}
-      style={overlap ? { marginTop: "-132px", paddingLeft: "4px", paddingRight: "4px" } : undefined}
+      className={`relative z-10 min-h-[calc(100vh-260px)] ${overlap ? "" : "bg-[var(--workspace)] py-8"}`}
+      style={overlap ? { marginTop: "-132px" } : undefined}
     >
       <div
         className={
           overlap
-            ? "overflow-hidden rounded-t-[34px] border border-[#D6DCE0] bg-white shadow-[0_-18px_48px_rgba(38,50,58,0.18)]"
-            : "bg-white ring-1 ring-[#D6DCE0]"
+            ? "min-h-[calc(100vh-260px)] overflow-hidden rounded-t-[34px] bg-[var(--workspace)]"
+            : "bg-[var(--workspace)]"
         }
       >
         {children}

@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { FlatButton } from "@/components/ui/flat-button";
 import { getDefaultLandingHref, loadUserAccessByMosqueSlug } from "@/lib/authz";
+import { normalizePhoneNumber, phoneCountryCodes } from "@/lib/phone";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
 
@@ -18,6 +19,7 @@ export function OAuthProfileCompletion({ slug }: { slug: string }) {
   const router = useRouter();
   const [accountType, setAccountType] = useState<AccountType>("student");
   const [fullName, setFullName] = useState("");
+  const [phoneCountryCode, setPhoneCountryCode] = useState("+1");
   const [phone, setPhone] = useState("");
   const [gender, setGender] = useState("");
   const [dateOfBirth, setDateOfBirth] = useState("");
@@ -53,11 +55,18 @@ export function OAuthProfileCompletion({ slug }: { slug: string }) {
     setSaving(true);
     setError(null);
 
+    const normalizedPhone = normalizePhoneNumber(phone, phoneCountryCode);
+    if (normalizedPhone.error) {
+      setSaving(false);
+      setError(normalizedPhone.error);
+      return;
+    }
+
     const supabase = createSupabaseBrowserClient();
     const { error: rpcError } = await supabase.rpc("complete_oauth_profile", {
       signup_account_type: accountType,
       signup_full_name: fullName,
-      signup_phone: phone,
+      signup_phone: normalizedPhone.value,
       signup_gender: accountType === "student" ? gender : "",
       signup_date_of_birth: accountType === "student" ? dateOfBirth : null,
       signup_mosque_slug: slug,
@@ -109,7 +118,12 @@ export function OAuthProfileCompletion({ slug }: { slug: string }) {
       </fieldset>
 
       <CompletionInput label="Full name" name="fullName" value={fullName} onChange={setFullName} autoComplete="name" required />
-      <CompletionInput label="Phone number" name="phone" value={phone} onChange={setPhone} autoComplete="tel" required />
+      <CompletionPhoneInput
+        countryCode={phoneCountryCode}
+        onCountryCodeChange={setPhoneCountryCode}
+        phone={phone}
+        onPhoneChange={setPhone}
+      />
 
       {accountType === "student" ? (
         <>
@@ -135,6 +149,50 @@ export function OAuthProfileCompletion({ slug }: { slug: string }) {
         {saving ? "Saving..." : "Continue"}
       </FlatButton>
     </form>
+  );
+}
+
+function CompletionPhoneInput({
+  countryCode,
+  onCountryCodeChange,
+  phone,
+  onPhoneChange,
+}: {
+  countryCode: string;
+  onCountryCodeChange: (value: string) => void;
+  phone: string;
+  onPhoneChange: (value: string) => void;
+}) {
+  return (
+    <label className="block">
+      <span className="text-sm font-medium text-[#26323A]">Phone number</span>
+      <div className="mt-1 grid grid-cols-[116px_minmax(0,1fr)]">
+        <select
+          name="phoneCountryCode"
+          value={countryCode}
+          onChange={(event) => onCountryCodeChange(event.target.value)}
+          required
+          className="h-11 border border-r-0 border-[#B9C3C8] bg-white px-2 text-sm text-[#26323A] outline-none focus:border-[#2F8FB3]"
+        >
+          {phoneCountryCodes.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+        <input
+          name="phone"
+          type="tel"
+          value={phone}
+          onChange={(event) => onPhoneChange(event.target.value)}
+          autoComplete="tel-national"
+          required
+          inputMode="tel"
+          placeholder={countryCode === "+1" ? "780 555 1234" : "Phone number"}
+          className="h-11 w-full border border-[#B9C3C8] bg-white px-3 text-sm text-[#26323A] outline-none focus:border-[#2F8FB3]"
+        />
+      </div>
+    </label>
   );
 }
 

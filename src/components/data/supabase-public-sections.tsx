@@ -127,6 +127,52 @@ function studentRequestNotificationKey(request: Pick<EnrollmentRequest, "id" | "
   return [request.id, request.status, request.reviewed_at ?? request.requested_at ?? ""].join(":");
 }
 
+async function getCurrentAccessToken() {
+  const supabase = createSupabaseBrowserClient();
+  const { data: sessionData } = await supabase.auth.getSession();
+  return sessionData.session?.access_token ?? null;
+}
+
+function queueEnrollmentRequestSubmittedEmails(requestIds: string[]) {
+  if (requestIds.length === 0) {
+    return;
+  }
+
+  void (async () => {
+    const accessToken = await getCurrentAccessToken();
+    if (!accessToken) {
+      return;
+    }
+
+    await fetch("/api/email/enrollment-request-submitted", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({ requestIds }),
+    });
+  })().catch(() => null);
+}
+
+function queueEnrollmentRequestReviewedEmail(requestId: string) {
+  void (async () => {
+    const accessToken = await getCurrentAccessToken();
+    if (!accessToken) {
+      return;
+    }
+
+    await fetch("/api/email/enrollment-request-reviewed", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({ requestId }),
+    });
+  })().catch(() => null);
+}
+
 function getDevSwitchAccounts() {
   const storedAccounts = readStoredDevSwitchAccounts();
   const rawAccounts = process.env.NEXT_PUBLIC_DEV_SWITCH_ACCOUNTS;
@@ -293,11 +339,11 @@ export function StudentHomeData({ slug }: { slug: string }) {
   const enrolledPrograms = programs.filter((program) => enrolledProgramIds.includes(program.id));
 
   return (
-    <section className="space-y-5 bg-[#F5F7F8] p-4">
+    <section className="space-y-5 bg-[var(--workspace)] p-4">
       <HomeNotification
         tone={unreadCount > 0 ? "active" : "empty"}
         title={unreadCount > 0 ? `${unreadCount} unread message${unreadCount === 1 ? "" : "s"}` : "No new inbox items"}
-        text={unreadCount > 0 ? "Class announcements are waiting in your inbox." : "New announcements and request updates will appear here."}
+        text={unreadCount > 0 ? "Class announcements are waiting in your inbox." : "New announcements/updates will appear here."}
         href={unreadCount > 0 ? `/m/${slug}/portal/announcements` : undefined}
       />
       <HomeSectionTitle title="Upcoming" />
@@ -550,20 +596,23 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
         return;
       }
 
-      const { error: parentInsertError } = await supabase.from("enrollment_requests").upsert(
-        requestableChildIds.map((childId) => ({
-          mosque_id: mosque.id,
-          program_id: program.id,
-          student_profile_id: childId,
-          parent_profile_id: currentUserId,
-          status: "pending",
-          reviewed_by: null,
-          reviewed_at: null,
-          review_note: null,
-          student_dismissed_at: null,
-        })),
-        { onConflict: "program_id,student_profile_id" },
-      );
+      const { data: parentRequestRows, error: parentInsertError } = await supabase
+        .from("enrollment_requests")
+        .upsert(
+          requestableChildIds.map((childId) => ({
+            mosque_id: mosque.id,
+            program_id: program.id,
+            student_profile_id: childId,
+            parent_profile_id: currentUserId,
+            status: "pending",
+            reviewed_by: null,
+            reviewed_at: null,
+            review_note: null,
+            student_dismissed_at: null,
+          })),
+          { onConflict: "program_id,student_profile_id" },
+        )
+        .select("id");
 
       if (parentInsertError) {
         setRequestMessage(parentInsertError.message);
@@ -581,6 +630,7 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
       setSelectedChildIds([]);
       setChildSelectorOpen(false);
       setRequestMessage(`${requestableChildIds.length} enrollment request${requestableChildIds.length === 1 ? "" : "s"} sent for review.`);
+      queueEnrollmentRequestSubmittedEmails((parentRequestRows ?? []).map((row) => row.id));
       setRequestBusy(false);
       return;
     }
@@ -592,20 +642,23 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
       return;
     }
 
-    const { error: insertError } = await supabase.from("enrollment_requests").upsert(
-      {
-        mosque_id: mosque.id,
-        program_id: program.id,
-        student_profile_id: currentUserId,
-        parent_profile_id: null,
-        status: "pending",
-        reviewed_by: null,
-        reviewed_at: null,
-        review_note: null,
-        student_dismissed_at: null,
-      },
-      { onConflict: "program_id,student_profile_id" },
-    );
+    const { data: requestRows, error: insertError } = await supabase
+      .from("enrollment_requests")
+      .upsert(
+        {
+          mosque_id: mosque.id,
+          program_id: program.id,
+          student_profile_id: currentUserId,
+          parent_profile_id: null,
+          status: "pending",
+          reviewed_by: null,
+          reviewed_at: null,
+          review_note: null,
+          student_dismissed_at: null,
+        },
+        { onConflict: "program_id,student_profile_id" },
+      )
+      .select("id");
 
     if (insertError) {
       setRequestMessage(insertError.message);
@@ -615,11 +668,12 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
 
     setRequestStatus("pending");
     setRequestMessage("Your request has been sent and will be reviewed by the teacher.");
+    queueEnrollmentRequestSubmittedEmails((requestRows ?? []).map((row) => row.id));
     setRequestBusy(false);
   }
 
   return (
-    <div className="bg-[#F5F7F8] p-4">
+    <div className="bg-[var(--workspace)] p-4">
       <div className="space-y-5">
         <section className="overflow-hidden rounded-[28px] bg-white shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
           <ProgramHero program={program} />
@@ -826,7 +880,7 @@ export function StudentClassesData({ slug }: { slug: string }) {
   }
 
   return (
-    <section className="bg-white">
+    <section className="bg-[var(--workspace)]">
       <div className="grid grid-cols-2 border-b border-[#D6DCE0]">
         <button
           type="button"
@@ -1177,15 +1231,15 @@ export function PortalAccountData({ slug }: { slug: string }) {
 
   if (loading) {
     return (
-      <div className="min-h-[calc(100vh-140px)] bg-[#F7F8FA] px-5 py-8">
+      <div className="min-h-[calc(100vh-140px)] bg-[var(--workspace)] px-5 py-8">
         <div className="mx-auto max-w-sm space-y-4">
-          <div className="mx-auto h-28 w-28 rounded-full bg-[#E8EEF2]" />
-          <div className="mx-auto h-6 w-40 rounded-full bg-[#E8EEF2]" />
-          <div className="mx-auto h-4 w-28 rounded-full bg-[#E8EEF2]" />
+          <div className="mx-auto h-28 w-28 rounded-full bg-[var(--placeholder)]" />
+          <div className="mx-auto h-6 w-40 rounded-full bg-[var(--placeholder)]" />
+          <div className="mx-auto h-4 w-28 rounded-full bg-[var(--placeholder)]" />
           <div className="mt-8 space-y-3">
-            <div className="h-16 rounded-2xl bg-white" />
-            <div className="h-16 rounded-2xl bg-white" />
-            <div className="h-16 rounded-2xl bg-white" />
+            <div className="h-16 rounded-2xl bg-[#fffdf8]" />
+            <div className="h-16 rounded-2xl bg-[#fffdf8]" />
+            <div className="h-16 rounded-2xl bg-[#fffdf8]" />
           </div>
         </div>
       </div>
@@ -1194,7 +1248,7 @@ export function PortalAccountData({ slug }: { slug: string }) {
 
   if (!isSignedIn) {
     return (
-      <section className="min-h-[calc(100vh-140px)] bg-[#F7F8FA] px-5 py-10 text-[#26323A]">
+      <section className="min-h-[calc(100vh-140px)] bg-[var(--workspace)] px-5 py-10 text-[#26323A]">
         <div className="mx-auto max-w-sm">
           <div className="rounded-[30px] bg-white p-8 text-center shadow-[0_18px_45px_rgba(38,50,58,0.08)] ring-1 ring-[#E4EAEE]">
             <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-full border-4 border-[#79B7C8] text-3xl font-semibold text-[#2F8FB3]">!</div>
@@ -1399,7 +1453,7 @@ export function PortalAccountData({ slug }: { slug: string }) {
   }
 
   return (
-    <section className="min-h-[calc(100vh-140px)] overflow-hidden bg-[#F7F8FA] px-5 py-8 text-[#26323A]">
+    <section className="min-h-[calc(100vh-140px)] overflow-hidden bg-[var(--workspace)] px-5 py-8 text-[#26323A]">
       <div className="mx-auto max-w-sm overflow-hidden md:hidden">
         {renderAccountPanel(mobilePanel)}
       </div>
@@ -1699,7 +1753,7 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
   }
 
   return (
-    <div className="bg-[#F5F7F8]">
+    <div className="bg-[var(--workspace)]">
       <SegmentedTabs
         tabs={[
           { id: "announcements", label: "Announcements" },
@@ -1885,10 +1939,15 @@ export function TeacherInboxData({ slug }: { slug: string }) {
     }
 
     const supabase = createSupabaseBrowserClient();
-    await supabase
+    const { error: reviewError } = await supabase
       .from("enrollment_requests")
       .update({ status, reviewed_by: currentUserId, reviewed_at: new Date().toISOString() })
       .eq("id", request.id);
+
+    if (reviewError) {
+      setError(reviewError.message);
+      return;
+    }
 
     if (status === "approved" && !request.program?.is_paid) {
       await supabase.from("enrollments").upsert(
@@ -1900,6 +1959,7 @@ export function TeacherInboxData({ slug }: { slug: string }) {
       );
     }
 
+    queueEnrollmentRequestReviewedEmail(request.id);
     window.dispatchEvent(new Event("tareeqah:notifications-changed"));
     await loadTeacherInbox();
   }
@@ -1924,7 +1984,7 @@ export function TeacherInboxData({ slug }: { slug: string }) {
   }
 
   return (
-    <div className="bg-[#F5F7F8]">
+    <div className="bg-[var(--workspace)]">
       <SegmentedTabs
         tabs={[
           { id: "announcements", label: "Announcements" },
@@ -2100,7 +2160,7 @@ export function TeacherAnnouncementData({ slug, programId }: { slug: string; pro
   }
 
   return (
-    <section className="space-y-4 bg-[#F5F7F8] p-4">
+    <section className="space-y-4 bg-[var(--workspace)] p-4">
       {program ? (
         <div>
           <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">Class</p>
@@ -2256,7 +2316,7 @@ export function TeacherScheduleData({ slug, programId }: { slug: string; program
   }
 
   return (
-    <section className="bg-[#F5F7F8] p-4">
+    <section className="bg-[var(--workspace)] p-4">
       <div className="space-y-5 rounded-[28px] bg-white p-5 shadow-[0_12px_32px_rgba(38,50,58,0.08)]">
         <div>
           <h2 className="text-2xl font-semibold leading-8 text-[#26323A]">Class schedule</h2>
@@ -2326,7 +2386,7 @@ export function TeacherScheduleData({ slug, programId }: { slug: string; program
         {saved ? <div className="rounded-[18px] border border-[#BEE5D4] bg-[#EAF8F1] px-4 py-3 text-sm text-[#17624F]">Schedule saved.</div> : null}
 
         <div className="flex justify-end gap-3 border-t border-[#EEF2F4] pt-4">
-          <button type="button" onClick={() => { setRows(initialRows); setError(null); setSaved(false); }} className="min-h-10 rounded-[6px] border border-[#D6DCE0] bg-white px-5 text-sm font-semibold text-[#26323A] hover:bg-[#F5F7F8]">
+          <button type="button" onClick={() => { setRows(initialRows); setError(null); setSaved(false); }} className="min-h-10 rounded-[6px] border border-[#D6DCE0] bg-white px-5 text-sm font-semibold text-[#26323A] hover:bg-[var(--workspace)]">
             Cancel
           </button>
           <button type="button" onClick={saveSchedule} disabled={saving} className="min-h-10 rounded-[6px] bg-[#17624F] px-5 text-sm font-semibold text-white hover:bg-[#0F4537] disabled:opacity-60">
@@ -2379,7 +2439,7 @@ export function TeacherHomeData({ slug }: { slug: string }) {
   }
 
   return (
-    <div className="space-y-4 bg-[#F5F7F8] p-4">
+    <div className="space-y-4 bg-[var(--workspace)] p-4">
       <HomeNotification
         tone={pendingRequestCount > 0 ? "active" : "empty"}
         title={pendingRequestCount > 0 ? "Action required" : "No new inbox items"}
@@ -2408,7 +2468,7 @@ export function TeacherClassesData({ slug }: { slug: string }) {
   }
 
   return (
-    <div className="grid gap-4 bg-[#F5F7F8] p-4 md:grid-cols-2">
+    <div className="grid gap-4 bg-[var(--workspace)] p-4 md:grid-cols-2">
       {programs.map((program) => (
         <TeacherClassCard key={program.id} program={program} mosqueSlug={slug} />
       ))}
@@ -2572,7 +2632,7 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
   const averageAttendance = students.length ? `${88 + (students.length % 8)}%` : "0%";
 
   return (
-    <div className="bg-[#F5F7F8] p-4">
+    <div className="bg-[var(--workspace)] p-4">
       <div className="space-y-5">
         <section className="overflow-hidden rounded-[28px] bg-white shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
           <ProgramHero program={program} />
@@ -3176,8 +3236,8 @@ function SegmentedTabs({
   onChange: (value: string) => void;
 }) {
   return (
-    <div className="border-b border-[#D6DCE0] bg-white p-3">
-      <div className="grid rounded-full bg-[#EEF2F4] p-1" style={{ gridTemplateColumns: `repeat(${tabs.length}, minmax(0, 1fr))` }}>
+    <div className="border-b border-[#E8DDCB] bg-[var(--workspace)] p-3">
+      <div className="grid rounded-full bg-[var(--placeholder-soft)] p-1" style={{ gridTemplateColumns: `repeat(${tabs.length}, minmax(0, 1fr))` }}>
         {tabs.map((tab) => (
           <button
             key={tab.id}
@@ -3185,7 +3245,7 @@ function SegmentedTabs({
             onClick={() => onChange(tab.id)}
             className={cn(
               "relative min-h-10 rounded-full px-3 text-sm font-semibold transition",
-              value === tab.id ? "bg-white text-[#17624F] shadow-sm" : "text-[#6B747B]",
+              value === tab.id ? "bg-[#fffdf8] text-[#17624F] shadow-sm" : "text-[#6B747B]",
             )}
           >
             {tab.label}
@@ -3236,7 +3296,7 @@ function MiniEmpty({ text }: { text: string }) {
 function InboxLoadingPanel({ label }: { label: string }) {
   return (
     <div className="flex min-h-64 items-center justify-center" aria-label={label}>
-      <span className="h-11 w-11 animate-spin rounded-full border-4 border-[#DDEEF3] border-t-[#2F8FB3]" aria-hidden />
+      <span className="h-11 w-11 animate-spin rounded-full border-4 border-[var(--placeholder-strong)] border-t-[#2F8FB3]" aria-hidden />
     </div>
   );
 }
@@ -3687,7 +3747,7 @@ function ProgramMediaGallery({ items }: { items: readonly ProgramMedia[] }) {
 
   return (
     <DetailSection title="Program Media">
-      <div className="overflow-hidden rounded-xl border border-[#D6DCE0] bg-[#F5F7F8]">
+      <div className="overflow-hidden rounded-xl border border-[#D6DCE0] bg-[var(--workspace)]">
         <div className="relative flex aspect-[16/10] items-end overflow-hidden p-5 text-white">
           <Image src={mediaUrl(activeItem)} alt={mediaAltText(activeItem)} fill className="object-cover" sizes="(min-width: 1024px) 720px, 100vw" />
           <div className="absolute inset-0 bg-gradient-to-t from-black/45 via-black/5 to-transparent" />
@@ -3860,7 +3920,7 @@ function ProgramCardGrid({
   }
 
   return (
-    <div className="grid gap-4 bg-[#F5F7F8] p-4 md:grid-cols-2 lg:grid-cols-3">
+    <div className="grid gap-4 bg-[var(--workspace)] p-4 md:grid-cols-2 lg:grid-cols-3">
       {programs.map((program) => (
         <ProgramCard key={program.id} program={program} enrolled={enrolledProgramIds.includes(program.id)} detailHref={`${detailBaseHref ?? `/m/${mosqueSlug}/programs`}/${program.id}`} />
       ))}
@@ -3870,7 +3930,7 @@ function ProgramCardGrid({
 
 function EnrolledClassList({ programs, mosqueSlug }: { programs: ProgramWithTeacher[]; mosqueSlug: string }) {
   return (
-    <div className="grid gap-4 bg-[#F5F7F8] p-4 md:grid-cols-2">
+    <div className="grid gap-4 bg-[var(--workspace)] p-4 md:grid-cols-2">
       {programs.map((program) => (
         <TransitionLink key={program.id} href={`/m/${mosqueSlug}/portal/classes/${program.id}`} label="Class Details" className="overflow-hidden rounded-xl bg-white shadow-md">
           <ProgramHero program={program} />
@@ -3950,7 +4010,7 @@ function AudienceDetails({ age, gender }: { age: string; gender: string }) {
         <span>{age}</span>
       </div>
       <div className="flex min-h-7 items-center gap-2">
-        <span className="h-2.5 w-2.5 rounded-full bg-[#D9A72E]" aria-hidden />
+        <span className="h-2.5 w-2.5 rounded-full bg-[#2F8FB3]" aria-hidden />
         <span>{gender}</span>
       </div>
     </div>
@@ -3968,11 +4028,22 @@ function HomeNotification({
   text: string;
   href?: string;
 }) {
+  if (tone === "empty") {
+    return (
+      <div className="px-5 py-3">
+        <div className="min-w-0">
+          <h2 className="text-base font-semibold text-[#26323A]">{title}</h2>
+          <p className="mt-0.5 text-sm leading-5 text-[#52616A]">{text}</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className={cn("relative overflow-hidden rounded-[28px] px-5 py-4 shadow-[0_14px_34px_rgba(38,50,58,0.08)]", tone === "active" ? "bg-[linear-gradient(135deg,#E7FFF3_0%,#D4F3EA_52%,#BFE6F3_100%)]" : "bg-white")}>
+    <div className="relative overflow-hidden rounded-[28px] bg-[linear-gradient(135deg,#E7FFF3_0%,#D4F3EA_52%,#BFE6F3_100%)] px-5 py-4 shadow-[0_14px_34px_rgba(38,50,58,0.08)]">
       <div className="absolute right-[-28px] top-[-38px] h-28 w-28 rounded-full bg-white/45" aria-hidden />
       <div className="relative flex items-center gap-3">
-        <div className={cn("flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl text-xl font-medium", tone === "active" ? "bg-white/80 text-[#17624F]" : "bg-[#E7F3F8] text-[#62AFC3]")}>
+        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-white/80 text-xl font-medium text-[#17624F]">
           !
         </div>
         <div className="min-w-0 flex-1">
@@ -3999,7 +4070,7 @@ function HomeSectionTitle({ title }: { title: string }) {
 
 function HomeEmptyState({ title, text }: { title: string; text: string }) {
   return (
-    <div className="rounded-[26px] bg-white px-6 py-8 text-center shadow-[0_10px_28px_rgba(38,50,58,0.06)]">
+    <div className="px-6 py-8 text-center">
       <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full border-4 border-[#62AFC3] text-2xl font-medium text-[#62AFC3]">!</div>
       <h3 className="mt-4 text-base font-semibold text-[#26323A]">{title}</h3>
       <p className="mt-1 text-sm leading-6 text-[#6B747B]">{text}</p>
@@ -4009,15 +4080,15 @@ function HomeEmptyState({ title, text }: { title: string; text: string }) {
 
 function HomeLoadingState() {
   return (
-    <section className="space-y-5 bg-[#F5F7F8] p-4" aria-label="Loading home">
-      <div className="rounded-[30px] bg-white p-5 shadow-[0_18px_45px_rgba(38,50,58,0.08)]">
+    <section className="space-y-5 bg-[var(--workspace)] p-4" aria-label="Loading home">
+      <div className="rounded-[30px] bg-[#fffdf8] p-5 shadow-[0_18px_45px_rgba(38,50,58,0.08)]">
         <div className="flex items-center gap-4">
-          <div className="h-14 w-14 shrink-0 animate-pulse rounded-2xl bg-[#E8EEF2]" />
+          <div className="h-14 w-14 shrink-0 animate-pulse rounded-2xl bg-[var(--placeholder)]" />
           <div className="min-w-0 flex-1 space-y-2">
-            <div className="h-5 w-36 animate-pulse rounded-full bg-[#E8EEF2]" />
-            <div className="h-4 w-44 animate-pulse rounded-full bg-[#EEF2F4]" />
+            <div className="h-5 w-36 animate-pulse rounded-full bg-[var(--placeholder)]" />
+            <div className="h-4 w-44 animate-pulse rounded-full bg-[var(--placeholder-soft)]" />
           </div>
-          <div className="h-10 w-20 animate-pulse rounded-full bg-[#EEF2F4]" />
+          <div className="h-10 w-20 animate-pulse rounded-full bg-[var(--placeholder-soft)]" />
         </div>
       </div>
       <HomeSectionTitle title="Upcoming" />
@@ -4025,17 +4096,17 @@ function HomeLoadingState() {
         <div className="grid grid-cols-7 gap-1 px-1">
           {Array.from({ length: 7 }).map((_, index) => (
             <div key={index} className="flex flex-col items-center gap-1.5">
-              <div className="h-14 w-full max-w-12 animate-pulse rounded-2xl bg-[#E8EEF2]" />
-              <div className="h-2 w-3 animate-pulse rounded-full bg-[#DDE8EE]" />
+              <div className="h-14 w-full max-w-12 animate-pulse rounded-2xl bg-[var(--placeholder)]" />
+              <div className="h-2 w-3 animate-pulse rounded-full bg-[var(--placeholder-strong)]" />
             </div>
           ))}
         </div>
-        <div className="rounded-[24px] bg-white px-4 py-3 shadow-[0_8px_24px_rgba(38,50,58,0.06)]">
+        <div className="rounded-[24px] bg-[#fffdf8] px-4 py-3 shadow-[0_8px_24px_rgba(38,50,58,0.06)]">
           <div className="flex items-center gap-3">
-            <div className="h-14 w-14 shrink-0 animate-pulse rounded-2xl bg-[#E8EEF2]" />
+            <div className="h-14 w-14 shrink-0 animate-pulse rounded-2xl bg-[var(--placeholder)]" />
             <div className="min-w-0 flex-1 space-y-2">
-              <div className="h-5 w-44 animate-pulse rounded-full bg-[#E8EEF2]" />
-              <div className="h-4 w-32 animate-pulse rounded-full bg-[#EEF2F4]" />
+              <div className="h-5 w-44 animate-pulse rounded-full bg-[var(--placeholder)]" />
+              <div className="h-4 w-32 animate-pulse rounded-full bg-[var(--placeholder-soft)]" />
             </div>
             <div className="h-2.5 w-2.5 animate-pulse rounded-full bg-[#A8C9D4]" />
           </div>
@@ -4271,17 +4342,17 @@ function HomeUpcomingLoadingRows() {
       <div className="grid grid-cols-7 gap-1 px-1">
         {Array.from({ length: 7 }).map((_, index) => (
           <div key={index} className="flex flex-col items-center gap-1.5">
-            <div className="h-14 w-full max-w-12 animate-pulse rounded-2xl bg-[#E8EEF2]" />
-            <div className="h-2 w-3 animate-pulse rounded-full bg-[#DDE8EE]" />
+            <div className="h-14 w-full max-w-12 animate-pulse rounded-2xl bg-[var(--placeholder)]" />
+            <div className="h-2 w-3 animate-pulse rounded-full bg-[var(--placeholder-strong)]" />
           </div>
         ))}
       </div>
-      <div className="rounded-[24px] bg-white px-4 py-3 shadow-[0_8px_24px_rgba(38,50,58,0.06)]">
+      <div className="rounded-[24px] bg-[#fffdf8] px-4 py-3 shadow-[0_8px_24px_rgba(38,50,58,0.06)]">
         <div className="flex items-center gap-3">
-          <div className="h-14 w-14 shrink-0 animate-pulse rounded-2xl bg-[#E8EEF2]" />
+          <div className="h-14 w-14 shrink-0 animate-pulse rounded-2xl bg-[var(--placeholder)]" />
           <div className="min-w-0 flex-1 space-y-2">
-            <div className="h-5 w-44 animate-pulse rounded-full bg-[#E8EEF2]" />
-            <div className="h-4 w-32 animate-pulse rounded-full bg-[#EEF2F4]" />
+            <div className="h-5 w-44 animate-pulse rounded-full bg-[var(--placeholder)]" />
+            <div className="h-4 w-32 animate-pulse rounded-full bg-[var(--placeholder-soft)]" />
           </div>
           <div className="h-2.5 w-2.5 animate-pulse rounded-full bg-[#A8C9D4]" />
         </div>
@@ -4716,7 +4787,7 @@ function EditProfilePhotoPanel({
   }
 
   return (
-    <section className="-mx-5 min-h-[calc(100vh-140px)] bg-white px-5 pb-8 pt-1">
+    <section className="-mx-5 min-h-[calc(100vh-140px)] bg-[var(--workspace)] px-5 pb-8 pt-1">
       <header className="flex h-14 items-center justify-between">
         <button type="button" onClick={onBack} className="flex h-10 w-10 items-center justify-center text-[#26323A]" aria-label="Back">
           <BackArrowIcon />
@@ -4974,30 +5045,30 @@ function Avatar({ src, name }: { src: string | null; name: string }) {
 function DirectorySkeleton() {
   return (
     <div className="space-y-3 p-4">
-      <div className="h-12 bg-[#F2F4F5]" />
-      <div className="h-12 bg-[#F2F4F5]" />
+      <div className="h-12 bg-[var(--placeholder-soft)]" />
+      <div className="h-12 bg-[var(--placeholder-soft)]" />
     </div>
   );
 }
 
 function ProgramDetailLoadingState() {
   return (
-    <div className="space-y-5 bg-[#F5F7F8] p-4">
-      <div className="overflow-hidden rounded-[28px] bg-white shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
-        <div className="h-40 animate-pulse bg-[#E6EDF0]" />
+    <div className="space-y-5 bg-[var(--workspace)] p-4">
+      <div className="overflow-hidden rounded-[28px] bg-[#fffdf8] shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
+        <div className="h-40 animate-pulse bg-[var(--placeholder)]" />
         <div className="space-y-3 p-4">
-          <div className="h-4 w-36 animate-pulse rounded-full bg-[#DDE8EE]" />
-          <div className="h-7 w-4/5 animate-pulse rounded-full bg-[#E6EDF0]" />
-          <div className="h-4 w-full animate-pulse rounded-full bg-[#EEF2F4]" />
-          <div className="h-4 w-3/4 animate-pulse rounded-full bg-[#EEF2F4]" />
+          <div className="h-4 w-36 animate-pulse rounded-full bg-[var(--placeholder-strong)]" />
+          <div className="h-7 w-4/5 animate-pulse rounded-full bg-[var(--placeholder)]" />
+          <div className="h-4 w-full animate-pulse rounded-full bg-[var(--placeholder-soft)]" />
+          <div className="h-4 w-3/4 animate-pulse rounded-full bg-[var(--placeholder-soft)]" />
         </div>
       </div>
-      <div className="rounded-[24px] bg-white p-5 shadow-[0_12px_28px_rgba(38,50,58,0.06)]">
-        <div className="h-6 w-44 animate-pulse rounded-full bg-[#E6EDF0]" />
+      <div className="rounded-[24px] bg-[#fffdf8] p-5 shadow-[0_12px_28px_rgba(38,50,58,0.06)]">
+        <div className="h-6 w-44 animate-pulse rounded-full bg-[var(--placeholder)]" />
         <div className="mt-5 grid gap-3">
-          <div className="h-12 animate-pulse rounded-2xl bg-[#EDF2F4]" />
-          <div className="h-12 animate-pulse rounded-2xl bg-[#EDF2F4]" />
-          <div className="h-12 animate-pulse rounded-2xl bg-[#EDF2F4]" />
+          <div className="h-12 animate-pulse rounded-2xl bg-[var(--placeholder-soft)]" />
+          <div className="h-12 animate-pulse rounded-2xl bg-[var(--placeholder-soft)]" />
+          <div className="h-12 animate-pulse rounded-2xl bg-[var(--placeholder-soft)]" />
         </div>
       </div>
     </div>
@@ -5006,16 +5077,16 @@ function ProgramDetailLoadingState() {
 
 function ClassesLoadingPlaceholders({ count = 2 }: { count?: number }) {
   return (
-    <div className="grid gap-4 bg-[#F5F7F8] p-4 md:grid-cols-2" aria-label="Loading classes">
+    <div className="grid gap-4 bg-[var(--workspace)] p-4 md:grid-cols-2" aria-label="Loading classes">
       {Array.from({ length: count }).map((_, index) => (
-        <div key={index} className="overflow-hidden rounded-[22px] border border-[#E4EAED] bg-white shadow-[0_12px_28px_rgba(38,50,58,0.08)]">
-          <div className="h-36 animate-pulse bg-[#E6EDF0]" />
+        <div key={index} className="overflow-hidden rounded-[22px] border border-[#E8DDCB] bg-[#fffdf8] shadow-[0_12px_28px_rgba(38,50,58,0.08)]">
+          <div className="h-36 animate-pulse bg-[var(--placeholder)]" />
           <div className="space-y-3 p-4">
-            <div className="h-6 w-3/4 animate-pulse rounded bg-[#E6EDF0]" />
-            <div className="h-4 w-1/2 animate-pulse rounded bg-[#EDF2F4]" />
+            <div className="h-6 w-3/4 animate-pulse rounded bg-[var(--placeholder)]" />
+            <div className="h-4 w-1/2 animate-pulse rounded bg-[var(--placeholder-soft)]" />
             <div className="flex gap-3 pt-2">
-              <div className="h-9 flex-1 animate-pulse rounded bg-[#EDF2F4]" />
-              <div className="h-9 flex-1 animate-pulse rounded bg-[#EDF2F4]" />
+              <div className="h-9 flex-1 animate-pulse rounded bg-[var(--placeholder-soft)]" />
+              <div className="h-9 flex-1 animate-pulse rounded bg-[var(--placeholder-soft)]" />
             </div>
           </div>
         </div>

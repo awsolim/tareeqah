@@ -46,15 +46,15 @@ function InstantNavPreview({ preview }: { preview: NavPreview }) {
   if (preview.label === "Me") {
     return (
       <div className={slideClass}>
-        <div className="min-h-[calc(100vh-140px)] bg-[#F7F8FA] px-5 py-8">
+        <div className="min-h-[calc(100vh-140px)] bg-[var(--workspace)] px-5 py-8">
           <div className="mx-auto max-w-sm space-y-4">
-            <div className="mx-auto h-28 w-28 animate-pulse rounded-full bg-[#E8EEF2]" />
-            <div className="mx-auto h-6 w-40 animate-pulse rounded-full bg-[#E8EEF2]" />
-            <div className="mx-auto h-4 w-28 animate-pulse rounded-full bg-[#E8EEF2]" />
+            <div className="mx-auto h-28 w-28 animate-pulse rounded-full bg-[var(--placeholder)]" />
+            <div className="mx-auto h-6 w-40 animate-pulse rounded-full bg-[var(--placeholder)]" />
+            <div className="mx-auto h-4 w-28 animate-pulse rounded-full bg-[var(--placeholder)]" />
             <div className="mt-8 space-y-3">
-              <div className="h-16 animate-pulse rounded-2xl bg-white" />
-              <div className="h-16 animate-pulse rounded-2xl bg-white" />
-              <div className="h-16 animate-pulse rounded-2xl bg-white" />
+              <div className="h-16 animate-pulse rounded-2xl bg-[#fffdf8]" />
+              <div className="h-16 animate-pulse rounded-2xl bg-[#fffdf8]" />
+              <div className="h-16 animate-pulse rounded-2xl bg-[#fffdf8]" />
             </div>
         </div>
         </div>
@@ -80,8 +80,8 @@ function InstantNavPreview({ preview }: { preview: NavPreview }) {
           )}
         </div>
       </section>
-      <div className="app-container relative z-10 pb-8" style={{ marginTop: "-132px", paddingLeft: "4px", paddingRight: "4px" }}>
-        <div className="overflow-hidden rounded-t-[34px] border border-[#D6DCE0] bg-white shadow-[0_-18px_48px_rgba(38,50,58,0.18)]">
+      <div className="relative z-10 min-h-[calc(100vh-260px)]" style={{ marginTop: "-132px" }}>
+        <div className="min-h-[calc(100vh-260px)] overflow-hidden rounded-t-[34px] bg-[var(--workspace)]">
           <InstantPreviewContent preview={preview} />
         </div>
       </div>
@@ -112,15 +112,15 @@ function InstantPreviewContent({ preview }: { preview: NavPreview }) {
   if (preview.label === "Inbox") {
     return (
       <>
-        <div className="border-b border-[#D6DCE0] bg-white p-3">
-          <div className="grid grid-cols-2 rounded-full bg-[#EEF2F4] p-1">
-            <div className="flex min-h-10 items-center justify-center rounded-full bg-white px-3 text-sm font-semibold text-[#17624F] shadow-sm">Announcements</div>
+        <div className="border-b border-[#E8DDCB] bg-[var(--workspace)] p-3">
+          <div className="grid grid-cols-2 rounded-full bg-[var(--placeholder-soft)] p-1">
+            <div className="flex min-h-10 items-center justify-center rounded-full bg-[#fffdf8] px-3 text-sm font-semibold text-[#17624F] shadow-sm">Announcements</div>
             <div className="flex min-h-10 items-center justify-center px-3 text-sm font-semibold text-[#6B747B]">Requests</div>
           </div>
         </div>
-        <div className="space-y-4 bg-[#F5F7F8] p-4">
+        <div className="space-y-4 bg-[var(--workspace)] p-4">
           <div className="flex min-h-64 items-center justify-center">
-            <span className="h-11 w-11 animate-spin rounded-full border-4 border-[#DDEEF3] border-t-[#2F8FB3]" />
+            <span className="h-11 w-11 animate-spin rounded-full border-4 border-[var(--placeholder-strong)] border-t-[#2F8FB3]" />
           </div>
         </div>
       </>
@@ -128,15 +128,15 @@ function InstantPreviewContent({ preview }: { preview: NavPreview }) {
   }
 
   return (
-    <div className="space-y-5 bg-[#F5F7F8] p-4">
-      <div className="rounded-[30px] bg-white p-5 shadow-[0_18px_45px_rgba(38,50,58,0.08)]">
+    <div className="space-y-5 bg-[var(--workspace)] p-4">
+      <div className="rounded-[30px] bg-[#fffdf8] p-5 shadow-[0_18px_45px_rgba(38,50,58,0.08)]">
         <div className="flex items-center gap-4">
-          <div className="h-14 w-14 shrink-0 animate-pulse rounded-2xl bg-[#E8EEF2]" />
+          <div className="h-14 w-14 shrink-0 animate-pulse rounded-2xl bg-[var(--placeholder)]" />
           <div className="min-w-0 flex-1 space-y-2">
-            <div className="h-5 w-36 animate-pulse rounded-full bg-[#E8EEF2]" />
-            <div className="h-4 w-44 animate-pulse rounded-full bg-[#EEF2F4]" />
+            <div className="h-5 w-36 animate-pulse rounded-full bg-[var(--placeholder)]" />
+            <div className="h-4 w-44 animate-pulse rounded-full bg-[var(--placeholder-soft)]" />
           </div>
-          <div className="h-10 w-20 animate-pulse rounded-full bg-[#EEF2F4]" />
+          <div className="h-10 w-20 animate-pulse rounded-full bg-[var(--placeholder-soft)]" />
         </div>
       </div>
       <div className="px-1 pt-1">
@@ -146,17 +146,17 @@ function InstantPreviewContent({ preview }: { preview: NavPreview }) {
         <div className="grid grid-cols-7 gap-1 px-1">
           {Array.from({ length: 7 }).map((_, index) => (
             <div key={index} className="flex flex-col items-center gap-1.5">
-              <div className="h-14 w-full max-w-12 animate-pulse rounded-2xl bg-[#E8EEF2]" />
-              <div className="h-2 w-3 animate-pulse rounded-full bg-[#DDE8EE]" />
+              <div className="h-14 w-full max-w-12 animate-pulse rounded-2xl bg-[var(--placeholder)]" />
+              <div className="h-2 w-3 animate-pulse rounded-full bg-[var(--placeholder-strong)]" />
             </div>
           ))}
         </div>
-        <div className="rounded-[24px] bg-white px-4 py-3 shadow-[0_8px_24px_rgba(38,50,58,0.06)]">
+        <div className="rounded-[24px] bg-[#fffdf8] px-4 py-3 shadow-[0_8px_24px_rgba(38,50,58,0.06)]">
           <div className="flex items-center gap-3">
-            <div className="h-14 w-14 shrink-0 animate-pulse rounded-2xl bg-[#E8EEF2]" />
+            <div className="h-14 w-14 shrink-0 animate-pulse rounded-2xl bg-[var(--placeholder)]" />
             <div className="min-w-0 flex-1 space-y-2">
-              <div className="h-5 w-44 animate-pulse rounded-full bg-[#E8EEF2]" />
-              <div className="h-4 w-32 animate-pulse rounded-full bg-[#EEF2F4]" />
+              <div className="h-5 w-44 animate-pulse rounded-full bg-[var(--placeholder)]" />
+              <div className="h-4 w-32 animate-pulse rounded-full bg-[var(--placeholder-soft)]" />
             </div>
             <div className="h-2.5 w-2.5 animate-pulse rounded-full bg-[#A8C9D4]" />
           </div>
@@ -168,21 +168,21 @@ function InstantPreviewContent({ preview }: { preview: NavPreview }) {
 
 function PreviewDetailSkeleton() {
   return (
-    <div className="space-y-5 bg-[#F5F7F8] p-4">
-      <div className="overflow-hidden rounded-[24px] bg-white shadow-[0_12px_28px_rgba(38,50,58,0.08)]">
-        <div className="h-40 animate-pulse bg-[#E6EDF0]" />
+    <div className="space-y-5 bg-[var(--workspace)] p-4">
+      <div className="overflow-hidden rounded-[24px] bg-[#fffdf8] shadow-[0_12px_28px_rgba(38,50,58,0.08)]">
+        <div className="h-40 animate-pulse bg-[var(--placeholder)]" />
         <div className="space-y-3 p-4">
-          <div className="h-7 w-4/5 animate-pulse rounded-full bg-[#E6EDF0]" />
-          <div className="h-4 w-1/2 animate-pulse rounded-full bg-[#EDF2F4]" />
-          <div className="h-4 w-3/4 animate-pulse rounded-full bg-[#EDF2F4]" />
+          <div className="h-7 w-4/5 animate-pulse rounded-full bg-[var(--placeholder)]" />
+          <div className="h-4 w-1/2 animate-pulse rounded-full bg-[var(--placeholder-soft)]" />
+          <div className="h-4 w-3/4 animate-pulse rounded-full bg-[var(--placeholder-soft)]" />
         </div>
       </div>
-      <div className="rounded-[24px] bg-white p-5 shadow-[0_12px_28px_rgba(38,50,58,0.06)]">
-        <div className="h-6 w-44 animate-pulse rounded-full bg-[#E6EDF0]" />
+      <div className="rounded-[24px] bg-[#fffdf8] p-5 shadow-[0_12px_28px_rgba(38,50,58,0.06)]">
+        <div className="h-6 w-44 animate-pulse rounded-full bg-[var(--placeholder)]" />
         <div className="mt-5 grid gap-3">
-          <div className="h-14 animate-pulse rounded-2xl bg-[#EDF2F4]" />
-          <div className="h-14 animate-pulse rounded-2xl bg-[#EDF2F4]" />
-          <div className="h-14 animate-pulse rounded-2xl bg-[#EDF2F4]" />
+          <div className="h-14 animate-pulse rounded-2xl bg-[var(--placeholder-soft)]" />
+          <div className="h-14 animate-pulse rounded-2xl bg-[var(--placeholder-soft)]" />
+          <div className="h-14 animate-pulse rounded-2xl bg-[var(--placeholder-soft)]" />
         </div>
       </div>
     </div>
@@ -191,16 +191,16 @@ function PreviewDetailSkeleton() {
 
 function PreviewClassCards({ count }: { count: number }) {
   return (
-    <div className="grid gap-4 bg-[#F5F7F8] p-4 md:grid-cols-2">
+    <div className="grid gap-4 bg-[var(--workspace)] p-4 md:grid-cols-2">
       {Array.from({ length: count }).map((_, index) => (
-        <div key={index} className="overflow-hidden rounded-[22px] border border-[#E4EAED] bg-white shadow-[0_12px_28px_rgba(38,50,58,0.08)]">
-          <div className="h-36 animate-pulse bg-[#E6EDF0]" />
+        <div key={index} className="overflow-hidden rounded-[22px] border border-[#E8DDCB] bg-[#fffdf8] shadow-[0_12px_28px_rgba(38,50,58,0.08)]">
+          <div className="h-36 animate-pulse bg-[var(--placeholder)]" />
           <div className="space-y-3 p-4">
-            <div className="h-6 w-3/4 animate-pulse rounded bg-[#E6EDF0]" />
-            <div className="h-4 w-1/2 animate-pulse rounded bg-[#EDF2F4]" />
+            <div className="h-6 w-3/4 animate-pulse rounded bg-[var(--placeholder)]" />
+            <div className="h-4 w-1/2 animate-pulse rounded bg-[var(--placeholder-soft)]" />
             <div className="flex gap-3 pt-2">
-              <div className="h-9 flex-1 animate-pulse rounded bg-[#EDF2F4]" />
-              <div className="h-9 flex-1 animate-pulse rounded bg-[#EDF2F4]" />
+              <div className="h-9 flex-1 animate-pulse rounded bg-[var(--placeholder-soft)]" />
+              <div className="h-9 flex-1 animate-pulse rounded bg-[var(--placeholder-soft)]" />
             </div>
           </div>
         </div>
@@ -208,3 +208,4 @@ function PreviewClassCards({ count }: { count: number }) {
     </div>
   );
 }
+

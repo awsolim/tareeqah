@@ -74,8 +74,8 @@ export function AppChrome({
     <>
       <AppTopBar appName={masjid.name} mosqueSlug={slug} homeHref={`/m/${slug}`} navItems={resolvedNav} mobileNavItems={resolvedMobileNav} />
       <DesktopSidebar appName={masjid.name} mosqueSlug={slug} homeHref={`/m/${slug}`} navItems={resolvedNav} mobileNavItems={resolvedMobileNav} section={section} />
-      <div className="md:min-h-screen md:bg-[var(--workspace)] md:py-6 md:pl-72 md:pr-6">
-        <div className="md:mx-auto md:min-h-[calc(100vh-3rem)] md:max-w-[1480px] md:overflow-hidden md:rounded-[32px] md:bg-[#F6F8FA] md:shadow-[0_24px_70px_rgba(38,50,58,0.18)] md:ring-1 md:ring-white/70">
+      <div className="md:min-h-screen md:bg-[var(--workspace)] md:pl-72">
+        <div className="md:min-h-screen md:overflow-hidden md:bg-transparent">
           <PageTransitionFrame>{children}</PageTransitionFrame>
         </div>
       </div>

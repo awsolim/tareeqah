@@ -71,7 +71,7 @@ export function DesktopSidebar({
   }, [mosqueSlug]);
 
   return (
-    <aside className="fixed inset-y-0 left-0 z-40 hidden w-72 flex-col border-r border-[#D6DCE0] bg-white px-5 py-6 text-[#26323A] md:flex">
+    <aside className="fixed inset-y-0 left-0 z-40 hidden w-72 flex-col border-r border-[#D6DCE0] bg-[var(--workspace)] px-5 py-6 text-[#26323A] md:flex">
       <Link href={homeHref} className="flex min-w-0 items-center gap-3">
         <SidebarLogo src={logoUrl} name={displayName} />
         <span className="min-w-0">
