@@ -88,6 +88,7 @@ export async function POST(request: Request) {
         program_id: programId,
         student_profile_id: studentProfileId,
         parent_profile_id: parentProfileId,
+        program_track_id: enrollmentRequest.program_track_id,
         enrollment_request_id: enrollmentRequestId,
         stripe_account_id: metadata.stripe_account_id ?? null,
         stripe_customer_id: typeof session.customer === "string" ? session.customer : session.customer?.id ?? null,
@@ -107,6 +108,7 @@ export async function POST(request: Request) {
       {
         program_id: programId,
         student_profile_id: studentProfileId,
+        program_track_id: enrollmentRequest.program_track_id,
       },
       { onConflict: "program_id,student_profile_id" },
     );

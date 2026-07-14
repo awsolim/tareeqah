@@ -3,7 +3,7 @@ import { AuthPanel } from "@/components/auth/auth-panel";
 import { GoogleAuthCallback } from "@/components/auth/google-auth-callback";
 import { OAuthProfileCompletion } from "@/components/auth/oauth-profile-completion";
 import { PortalRoleRedirect } from "@/components/data/portal-role-redirect";
-import { InboxAnnouncementsData, MosqueDirectoryRows, PortalAccountData, ProgramDetailData, PublicMasjidData, PublicProgramsData, StudentClassesData, StudentHomeData, TeacherAnnouncementData, TeacherClassesData, TeacherHomeData, TeacherInboxData, TeacherScheduleData, TeacherStudentsData } from "@/components/data/supabase-public-sections";
+import { AdminTeacherRequestsData, InboxAnnouncementsData, MosqueDirectoryRows, PortalAccountData, ProgramDetailData, PublicMasjidData, PublicProgramsData, StudentClassesData, StudentHomeData, TeacherAnnouncementData, TeacherClassesData, TeacherHomeData, TeacherInboxData, TeacherInstructorsData, TeacherProgramCreateData, TeacherProgramSettingsData, TeacherScheduleData, TeacherStudentsData } from "@/components/data/supabase-public-sections";
 import { ActionToolbar } from "@/components/ui/action-toolbar";
 import { DataRow } from "@/components/ui/data-row";
 import { DataTable } from "@/components/ui/data-table";
@@ -192,10 +192,10 @@ export function PublicAccountPage({ slug }: { slug: string }) {
   );
 }
 
-export function PublicProgramDetailPage({ programId, slug }: { programId: string; slug: string }) {
+export function PublicProgramDetailPage({ programId, slug, returnTo }: { programId: string; slug: string; returnTo?: string }) {
   return (
     <PageShell slug={slug}>
-      <PageTitleBar title="Class Details" backHref={`/m/${slug}/programs`} backLabel="Programs" tone="teal" />
+      <PageTitleBar title="Class Details" backHref={returnTo ?? `/m/${slug}/programs`} backLabel={returnTo?.includes("/teacher/classes") || returnTo?.includes("/portal/classes") ? "Classes" : "Programs"} tone="teal" />
       <Workspace>
         <ProgramDetailData slug={slug} programId={programId} section="public" />
       </Workspace>
@@ -217,9 +217,31 @@ export function PortalProgramDetailPage({ programId, slug }: { programId: string
 export function TeacherProgramDetailPage({ programId, slug }: { programId: string; slug: string }) {
   return (
     <>
-      <PageTitleBar title="Class Details" backHref={`/m/${slug}/teacher/classes`} backLabel="Classes" tone="teal" />
+      <PageTitleBar title="Edit Program" backHref={`/m/${slug}/teacher/classes`} backLabel="Classes" tone="teal" />
       <Workspace>
-        <ProgramDetailData slug={slug} programId={programId} section="teacher" />
+        <TeacherProgramSettingsData slug={slug} programId={programId} />
+      </Workspace>
+    </>
+  );
+}
+
+export function TeacherProgramCreatePage({ slug }: { slug: string }) {
+  return (
+    <>
+      <PageTitleBar title="Add Class" backHref={`/m/${slug}/teacher/classes`} backLabel="Classes" tone="teal" />
+      <Workspace>
+        <TeacherProgramCreateData slug={slug} />
+      </Workspace>
+    </>
+  );
+}
+
+export function TeacherInstructorsPage({ programId, slug }: { programId: string; slug: string }) {
+  return (
+    <>
+      <PageTitleBar title="Instructors" backHref={`/m/${slug}/teacher/classes`} backLabel="Classes" tone="teal" />
+      <Workspace>
+        <TeacherInstructorsData slug={slug} programId={programId} />
       </Workspace>
     </>
   );
@@ -503,6 +525,7 @@ export function AdminDashboardPage({ slug }: { slug: string }) {
     <PageShell section="admin" slug={slug}>
       <PageTitleBar title="Admin" subtitle="Operational view for classes, enrollment, and attendance." />
       <Workspace>
+        <AdminTeacherRequestsData slug={slug} />
         <div className="grid lg:grid-cols-2">
           <Panel>
             <SectionHeader title="Today's Classes" />

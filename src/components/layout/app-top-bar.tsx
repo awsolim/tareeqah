@@ -13,7 +13,7 @@ import { cn } from "@/lib/utils";
 function BottomNav({ items, inboxBadgeCount = 0 }: { items: NavItem[]; inboxBadgeCount?: number }) {
   const pathname = usePathname();
   const router = useRouter();
-  const [pendingNavigation, setPendingNavigation] = useState<{ href: string; fromPath: string } | null>(null);
+  const [pendingHref, setPendingHref] = useState<string | null>(null);
   const itemByLabel = new Map(items.map((item) => [item.label, item]));
   const visibleItems = ["Home", "Classes", "Inbox", "Me"]
     .map((label) => itemByLabel.get(label))
@@ -25,6 +25,10 @@ function BottomNav({ items, inboxBadgeCount = 0 }: { items: NavItem[]; inboxBadg
       router.prefetch(item.href);
     }
   }, [items, router]);
+
+  useEffect(() => {
+    setPendingHref(null);
+  }, [pathname]);
 
   function transitionDirection(targetIndex: number) {
     if (currentIndex < 0 || targetIndex === currentIndex) {
@@ -52,16 +56,24 @@ function BottomNav({ items, inboxBadgeCount = 0 }: { items: NavItem[]; inboxBadg
     const href = item.href;
     router.prefetch(href);
     if (pathname !== href) {
-      setPendingNavigation({ href, fromPath: pathname });
+      setPendingHref(href);
       router.push(href);
     }
   }
 
   return (
-    <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-[#D6DCE0] bg-[var(--workspace)] md:hidden" aria-label="Mobile primary navigation">
-      <div className="mx-auto grid max-w-md" style={{ gridTemplateColumns: `repeat(${visibleItems.length}, minmax(0, 1fr))` }}>
+    <nav
+      className="pointer-events-auto fixed inset-x-0 z-[2147483647] h-[74px] border-t border-[#D6DCE0] bg-[var(--workspace)] md:hidden"
+      style={{
+        bottom: "0px",
+        paddingBottom: "env(safe-area-inset-bottom)",
+        transform: "translate3d(0,0,0)",
+        contain: "layout paint style",
+      }}
+      aria-label="Mobile primary navigation"
+    >
+      <div className="mx-auto grid h-full w-full max-w-md" style={{ gridTemplateColumns: `repeat(${visibleItems.length}, minmax(0, 1fr))` }}>
         {visibleItems.map((item, index) => {
-          const pendingHref = pendingNavigation?.fromPath === pathname ? pendingNavigation.href : null;
           const active = pendingHref ? pendingHref === item.href : isNavItemActive(pathname, item);
           const badgeCount = item.label === "Inbox" ? inboxBadgeCount : 0;
           return (
@@ -69,7 +81,7 @@ function BottomNav({ items, inboxBadgeCount = 0 }: { items: NavItem[]; inboxBadg
               key={`${item.label}-${item.href}`}
               href={item.href}
               onClick={(event) => {
-                if (pathname === item.href) {
+                if (pathname === item.href && !pendingHref) {
                   return;
                 }
 
@@ -77,27 +89,48 @@ function BottomNav({ items, inboxBadgeCount = 0 }: { items: NavItem[]; inboxBadg
                 beginNavigation(index, item);
               }}
               className={cn(
-                "flex min-h-16 flex-col items-center justify-center gap-1 px-1 text-[11px] font-medium text-[#6B747B]",
+                "relative flex h-[74px] min-w-0 flex-col items-center justify-start px-1 pt-2.5 text-[11px] font-medium text-[#6B747B]",
                 active && "text-[#2F8FB3]",
               )}
             >
               <span
-                className={cn(
-                  "relative flex h-8 min-w-12 items-center justify-center rounded-full px-3",
-                  active && "bg-[#E7F3F8]",
-                )}
+                className="relative flex h-9 w-[52px] shrink-0 items-center justify-center"
                 aria-hidden
               >
+                <span className={cn("absolute inset-x-1 inset-y-0 rounded-full opacity-0", active && "bg-[#E7F3F8] opacity-100")} aria-hidden />
+                <span className="relative flex h-9 w-[52px] items-center justify-center">
                 <NavIcon label={item.label} />
                 {badgeCount ? <NavBadge count={badgeCount} /> : null}
+                </span>
               </span>
-              <span className="max-w-full truncate">{item.label}</span>
+              <span className="mt-0.5 block h-4 w-full truncate text-center leading-4">{item.label}</span>
             </Link>
           );
         })}
       </div>
     </nav>
   );
+}
+
+export function MobileBottomNav({
+  mosqueSlug,
+  navItems,
+  mobileNavItems,
+}: {
+  mosqueSlug?: string;
+  navItems: NavItem[];
+  mobileNavItems?: NavItem[];
+}) {
+  const resolvedItems = mobileNavItems ?? navItems;
+  const portalInboxHref = mosqueSlug ? `/m/${mosqueSlug}/portal/announcements` : "";
+  const teacherInboxHref = mosqueSlug ? `/m/${mosqueSlug}/teacher/inbox` : "";
+  const showStudentBadges = Boolean(resolvedItems.some((item) => item.label === "Inbox" && item.href === portalInboxHref));
+  const showTeacherBadges = Boolean(resolvedItems.some((item) => item.label === "Inbox" && item.href === teacherInboxHref));
+  const { totalCount: studentTotalCount } = useStudentNotificationCounts(showStudentBadges ? (mosqueSlug ?? "") : "");
+  const { totalCount: teacherTotalCount } = useTeacherNotificationCounts(showTeacherBadges ? (mosqueSlug ?? "") : "");
+  const inboxBadgeCount = showStudentBadges ? studentTotalCount : showTeacherBadges ? teacherTotalCount : 0;
+
+  return <BottomNav items={resolvedItems} inboxBadgeCount={inboxBadgeCount} />;
 }
 
 function isNavItemActive(pathname: string, item: NavItem) {
@@ -113,11 +146,12 @@ function NavBadge({ count }: { count: number }) {
 }
 
 function NavIcon({ label }: { label: string }) {
-  const className = "h-5 w-5";
+  const className = "h-6 w-6";
+  const strokeWidth = 1.55;
 
   if (label === "Home") {
     return (
-      <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
         <path d="M3.5 11.5 12 4l8.5 7.5" />
         <path d="M6.5 10.5V20h11v-9.5" />
         <path d="M10 20v-5h4v5" />
@@ -127,7 +161,7 @@ function NavIcon({ label }: { label: string }) {
 
   if (label === "Classes") {
     return (
-      <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
         <rect x="4" y="5" width="16" height="13" rx="1.5" />
         <path d="M8 9h8" />
         <path d="M8 13h5" />
@@ -138,7 +172,7 @@ function NavIcon({ label }: { label: string }) {
 
   if (label === "Inbox") {
     return (
-      <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
         <path d="M4 6h16v12H4z" />
         <path d="m4 8 8 6 8-6" />
       </svg>
@@ -147,7 +181,7 @@ function NavIcon({ label }: { label: string }) {
 
   if (label === "Me") {
     return (
-      <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
         <circle cx="12" cy="8" r="3.2" />
         <path d="M5.5 19c1-3.2 3.2-5 6.5-5s5.5 1.8 6.5 5" />
       </svg>
@@ -174,14 +208,6 @@ export function AppTopBar({
     mosqueSlug ? titleFromSlug(mosqueSlug) : appName
   );
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
-
-  const portalInboxHref = mosqueSlug ? `/m/${mosqueSlug}/portal/announcements` : "";
-  const teacherInboxHref = mosqueSlug ? `/m/${mosqueSlug}/teacher/inbox` : "";
-  const showStudentBadges = Boolean((mobileNavItems ?? navItems).some((item) => item.label === "Inbox" && item.href === portalInboxHref));
-  const showTeacherBadges = Boolean((mobileNavItems ?? navItems).some((item) => item.label === "Inbox" && item.href === teacherInboxHref));
-  const { totalCount: studentTotalCount } = useStudentNotificationCounts(showStudentBadges ? (mosqueSlug ?? "") : "");
-  const { totalCount: teacherTotalCount } = useTeacherNotificationCounts(showTeacherBadges ? (mosqueSlug ?? "") : "");
-  const inboxBadgeCount = showStudentBadges ? studentTotalCount : showTeacherBadges ? teacherTotalCount : 0;
 
   useEffect(() => {
     if (!mosqueSlug) {
@@ -216,8 +242,8 @@ export function AppTopBar({
 
   return (
     <header className="sticky top-0 z-30 border-b border-[#D6DCE0] bg-[var(--workspace)] text-[#26323A] md:hidden">
-      <div className="app-container flex min-h-16 items-center justify-between gap-3 py-2">
-        <Link href={homeHref} className="flex min-w-0 items-center gap-3">
+      <div className="app-container flex min-h-[72px] items-center gap-2 py-2">
+        <Link href={homeHref} className="flex min-w-0 flex-1 items-center gap-3">
           <TopBarLogo src={logoUrl} name={displayName} />
           <span className="min-w-0">
             <span className="block truncate text-xl font-medium leading-6 text-[#26323A]">{displayName}</span>
@@ -225,14 +251,13 @@ export function AppTopBar({
           </span>
         </Link>
         <HorizontalNav items={navItems} />
-        <div className="flex items-center gap-2 md:hidden">
+        <div className="flex shrink-0 items-center gap-2 md:hidden">
           <AuthStatusActions loginHref={`${homeHref}/login`} mosqueSlug={mosqueSlug ?? ""} />
         </div>
         <div className="hidden md:block">
           <AuthStatusActions loginHref={`${homeHref}/login`} mosqueSlug={mosqueSlug ?? ""} />
         </div>
       </div>
-      <BottomNav items={mobileNavItems ?? navItems} inboxBadgeCount={inboxBadgeCount} />
     </header>
   );
 }

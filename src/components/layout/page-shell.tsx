@@ -1,4 +1,4 @@
-import { AppTopBar } from "@/components/layout/app-top-bar";
+import { AppTopBar, MobileBottomNav } from "@/components/layout/app-top-bar";
 import { DesktopSidebar } from "@/components/layout/desktop-sidebar";
 import { NavItem } from "@/components/layout/horizontal-nav";
 import { PageTransitionFrame } from "@/components/layout/page-transition-frame";
@@ -73,6 +73,7 @@ export function AppChrome({
   return (
     <>
       <AppTopBar appName={masjid.name} mosqueSlug={slug} homeHref={`/m/${slug}`} navItems={resolvedNav} mobileNavItems={resolvedMobileNav} />
+      <MobileBottomNav mosqueSlug={slug} navItems={resolvedNav} mobileNavItems={resolvedMobileNav} />
       <DesktopSidebar appName={masjid.name} mosqueSlug={slug} homeHref={`/m/${slug}`} navItems={resolvedNav} mobileNavItems={resolvedMobileNav} section={section} />
       <div className="md:min-h-screen md:bg-[var(--workspace)] md:pl-72">
         <div className="md:min-h-screen md:overflow-hidden md:bg-transparent">

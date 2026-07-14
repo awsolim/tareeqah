@@ -10,12 +10,13 @@ import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
 
 type AuthMode = "login" | "signup";
-type AccountType = "student" | "parent";
+type AccountType = "student" | "parent" | "teacher";
 type DevSwitchAccountType = "student" | "parent" | "teacher" | "admin";
 
 const accountTypes: Array<{ value: AccountType; label: string }> = [
   { value: "student", label: "Student" },
   { value: "parent", label: "Parent" },
+  { value: "teacher", label: "Teacher" },
 ];
 
 const devSwitchAccountsStorageKey = "tareeqah:dev-switch-accounts";
@@ -220,7 +221,7 @@ export function AuthPanel({ mode, slug }: { mode: AuthMode; slug: string }) {
         {isSignup ? (
           <fieldset>
             <legend className="text-sm font-medium text-[#26323A]">Account type</legend>
-            <div className="mt-2 grid grid-cols-2 border border-[#D6DCE0]">
+            <div className="mt-2 grid grid-cols-3 border border-[#D6DCE0]">
               {accountTypes.map((type) => (
                 <button
                   key={type.value}
@@ -236,6 +237,11 @@ export function AuthPanel({ mode, slug }: { mode: AuthMode; slug: string }) {
                 </button>
               ))}
             </div>
+            {accountType === "teacher" ? (
+              <p className="mt-2 border-l-4 border-[#DFAE3F] bg-[#FFF7E0] px-3 py-2 text-sm text-[#7A5416]">
+                Teacher accounts start with no teacher abilities. An organization admin must approve the account before you can access classes or tools.
+              </p>
+            ) : null}
           </fieldset>
         ) : null}
 

@@ -93,7 +93,7 @@ export function AuthStatusActions({ loginHref, mosqueSlug }: { loginHref: string
   const accountLabel = useMemo(() => (session ? getAccountLabel(access) : "Not signed in"), [access, session]);
 
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex shrink-0 items-center gap-2">
       {session ? (
         null
       ) : (
@@ -107,18 +107,18 @@ export function AuthStatusActions({ loginHref, mosqueSlug }: { loginHref: string
         </Link>
       )}
 
-      <div className="min-w-0 text-right" title={session?.user.email ?? "Not signed in"}>
+      <div className="w-[112px] min-w-0 text-right min-[390px]:w-36" title={session?.user.email ?? "Not signed in"}>
         {loading ? (
-          <div className="h-8 w-20 bg-[#F2F4F5]" />
+          <div className="ml-auto h-8 w-20 bg-[#F2F4F5]" />
         ) : session ? (
           <>
-            <p className="max-w-32 truncate text-sm font-medium leading-4 text-[#26323A]">{displayName}</p>
-            <p className="max-w-32 truncate text-[11px] leading-4 text-[#6B747B]">{accountLabel}</p>
+            <p className="line-clamp-2 overflow-hidden break-words text-[11px] font-medium leading-[13px] text-[#26323A] min-[390px]:text-xs">{displayName}</p>
+            <p className="mt-0.5 truncate text-[10px] leading-3 text-[#6B747B]">{accountLabel}</p>
           </>
         ) : (
           <>
-            <p className="text-sm font-medium leading-4 text-[#26323A]">Guest</p>
-            <p className="text-[11px] leading-4 text-[#6B747B]">Not signed in</p>
+            <p className="text-[11px] font-medium leading-[13px] text-[#26323A] min-[390px]:text-xs">Guest</p>
+            <p className="truncate text-[10px] leading-4 text-[#6B747B] min-[390px]:text-[11px]">Not signed in</p>
           </>
         )}
       </div>

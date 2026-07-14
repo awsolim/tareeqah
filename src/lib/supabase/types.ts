@@ -27,6 +27,7 @@ export type Database = {
           id: string;
           mosque_id: string;
           teacher_profile_id: string | null;
+          director_profile_id: string | null;
           title: string;
           description: string | null;
           is_active: boolean;
@@ -76,6 +77,9 @@ export type Database = {
           profile_id: string;
           role: string;
           status: string;
+          teacher_approval_status: string | null;
+          teacher_approval_reviewed_by: string | null;
+          teacher_approval_reviewed_at: string | null;
           created_at: string;
           updated_at: string;
         };
@@ -87,8 +91,10 @@ export type Database = {
         Row: {
           id: string;
           program_id: string;
-          teacher_profile_id: string;
+          teacher_profile_id: string | null;
           role: string;
+          invite_code: string | null;
+          invite_code_created_at: string | null;
           created_at: string;
         };
         Insert: Partial<Database["public"]["Tables"]["program_teachers"]["Row"]>;
@@ -102,6 +108,7 @@ export type Database = {
           program_id: string;
           student_profile_id: string;
           parent_profile_id: string | null;
+          program_track_id: string | null;
           status: string;
           requested_at: string;
           reviewed_by: string | null;
@@ -164,6 +171,7 @@ export type Database = {
           program_id: string | null;
           student_profile_id: string | null;
           parent_profile_id: string | null;
+          program_track_id: string | null;
           enrollment_request_id: string | null;
           stripe_account_id: string | null;
           stripe_customer_id: string | null;
@@ -185,6 +193,10 @@ export type Database = {
         Row: {
           program_id: string;
           learning_intro: string | null;
+          learning_title: string;
+          instructor_display_name: string | null;
+          instructor_credentials: string | null;
+          instructor_contact_phone: string | null;
           created_at: string;
           updated_at: string;
         };
@@ -203,6 +215,22 @@ export type Database = {
         };
         Insert: Partial<Database["public"]["Tables"]["program_outcomes"]["Row"]>;
         Update: Partial<Database["public"]["Tables"]["program_outcomes"]["Row"]>;
+        Relationships: [];
+      };
+      program_tracks: {
+        Row: {
+          id: string;
+          program_id: string;
+          name: string;
+          description: string | null;
+          schedule: Json | null;
+          sort_order: number;
+          is_active: boolean;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: Partial<Database["public"]["Tables"]["program_tracks"]["Row"]>;
+        Update: Partial<Database["public"]["Tables"]["program_tracks"]["Row"]>;
         Relationships: [];
       };
       program_content_sections: {
@@ -257,6 +285,7 @@ export type Database = {
           id: string;
           program_id: string;
           student_profile_id: string;
+          program_track_id: string | null;
           created_at: string;
         };
         Insert: Partial<Database["public"]["Tables"]["enrollments"]["Row"]>;
@@ -297,6 +326,22 @@ export type Database = {
       can_manage_program: {
         Args: { check_program_id: string; check_profile_id?: string };
         Returns: boolean;
+      };
+      is_platform_admin: {
+        Args: { check_profile_id?: string };
+        Returns: boolean;
+      };
+      is_program_director: {
+        Args: { check_program_id: string; check_profile_id?: string };
+        Returns: boolean;
+      };
+      approve_teacher_membership: {
+        Args: { target_membership_id: string; target_status: string };
+        Returns: void;
+      };
+      claim_program_instructor_code: {
+        Args: { invite: string };
+        Returns: string;
       };
     };
     Enums: Record<string, never>;

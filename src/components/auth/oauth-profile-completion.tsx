@@ -8,11 +8,12 @@ import { normalizePhoneNumber, phoneCountryCodes } from "@/lib/phone";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
 
-type AccountType = "student" | "parent";
+type AccountType = "student" | "parent" | "teacher";
 
 const accountTypes: Array<{ value: AccountType; label: string }> = [
   { value: "student", label: "Student" },
   { value: "parent", label: "Parent" },
+  { value: "teacher", label: "Teacher" },
 ];
 
 export function OAuthProfileCompletion({ slug }: { slug: string }) {
@@ -100,7 +101,7 @@ export function OAuthProfileCompletion({ slug }: { slug: string }) {
 
       <fieldset>
         <legend className="text-sm font-medium text-[#26323A]">Account type</legend>
-        <div className="mt-2 grid grid-cols-2 border border-[#D6DCE0]">
+        <div className="mt-2 grid grid-cols-3 border border-[#D6DCE0]">
           {accountTypes.map((type) => (
             <button
               key={type.value}
@@ -115,6 +116,11 @@ export function OAuthProfileCompletion({ slug }: { slug: string }) {
             </button>
           ))}
         </div>
+        {accountType === "teacher" ? (
+          <p className="mt-2 border-l-4 border-[#DFAE3F] bg-[#FFF7E0] px-3 py-2 text-sm text-[#7A5416]">
+            Teacher accounts start pending. You will not have teacher abilities until the organization approves you.
+          </p>
+        ) : null}
       </fieldset>
 
       <CompletionInput label="Full name" name="fullName" value={fullName} onChange={setFullName} autoComplete="name" required />

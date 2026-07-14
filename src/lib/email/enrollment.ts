@@ -76,7 +76,7 @@ async function loadEnrollmentEmailContexts(requestIds: string[]) {
     parentIds.length ? supabase.from("profiles").select("*").in("id", parentIds) : Promise.resolve({ data: [] as Profile[] }),
   ]);
 
-  const teacherIds = compactIds((programs ?? []).map((program) => program.teacher_profile_id));
+  const teacherIds = compactIds((programs ?? []).map((program) => program.director_profile_id ?? program.teacher_profile_id));
   const { data: teachers } = teacherIds.length
     ? await supabase.from("profiles").select("*").in("id", teacherIds)
     : { data: [] as Profile[] };
@@ -95,7 +95,9 @@ async function loadEnrollmentEmailContexts(requestIds: string[]) {
         mosque,
         student: (students ?? []).find((item) => item.id === request.student_profile_id) ?? null,
         parent: request.parent_profile_id ? (parents ?? []).find((item) => item.id === request.parent_profile_id) ?? null : null,
-        teacher: program.teacher_profile_id ? (teachers ?? []).find((item) => item.id === program.teacher_profile_id) ?? null : null,
+        teacher: (program.director_profile_id ?? program.teacher_profile_id)
+          ? (teachers ?? []).find((item) => item.id === (program.director_profile_id ?? program.teacher_profile_id)) ?? null
+          : null,
       };
     })
     .filter((context): context is EnrollmentEmailContext => Boolean(context));

@@ -6,6 +6,7 @@ export type UserAccess = {
   profileId: string | null;
   accountType: string | null;
   mosqueRoles: MosqueRole[];
+  teacherApprovalStatus: string | null;
   isMosqueAdmin: boolean;
   isTeacher: boolean;
   isStudent: boolean;
@@ -16,6 +17,7 @@ export const emptyUserAccess: UserAccess = {
   profileId: null,
   accountType: null,
   mosqueRoles: [],
+  teacherApprovalStatus: null,
   isMosqueAdmin: false,
   isTeacher: false,
   isStudent: false,
@@ -40,11 +42,18 @@ export async function loadUserAccessByMosqueSlug(slug: string): Promise<UserAcce
   const accountType = profile?.account_type ?? readMetadataAccountType(session.user.user_metadata);
 
   const membershipRows = mosque?.id
-    ? await supabase.from("mosque_memberships").select("role").eq("mosque_id", mosque.id).eq("profile_id", session.user.id).eq("status", "active")
+    ? await supabase
+        .from("mosque_memberships")
+        .select("role, status, teacher_approval_status")
+        .eq("mosque_id", mosque.id)
+        .eq("profile_id", session.user.id)
     : { data: [] };
 
-  const mosqueRoles = (membershipRows.data ?? []).map((row) => row.role).filter(isMosqueRole);
+  const activeVerifiedRows = (membershipRows.data ?? []).filter((row) => row.status === "active" && (row.role !== "teacher" || row.teacher_approval_status === "verified"));
+  const mosqueRoles = activeVerifiedRows.map((row) => row.role).filter(isMosqueRole);
   const allMosqueRoles = Array.from(new Set(mosqueRoles));
+  const teacherApprovalStatus =
+    (membershipRows.data ?? []).find((row) => row.role === "teacher")?.teacher_approval_status ?? null;
   const normalizedAccountType = accountType?.toLowerCase() ?? null;
   const useProfileAccountType = normalizedAccountType === "admin" || normalizedAccountType === "teacher" || normalizedAccountType === "parent" || normalizedAccountType === "student";
 
@@ -52,8 +61,9 @@ export async function loadUserAccessByMosqueSlug(slug: string): Promise<UserAcce
     profileId: session.user.id,
     accountType,
     mosqueRoles: allMosqueRoles,
+    teacherApprovalStatus,
     isMosqueAdmin: useProfileAccountType ? normalizedAccountType === "admin" : allMosqueRoles.includes("admin"),
-    isTeacher: useProfileAccountType ? normalizedAccountType === "teacher" : allMosqueRoles.includes("teacher"),
+    isTeacher: normalizedAccountType === "teacher" ? teacherApprovalStatus === "verified" : allMosqueRoles.includes("teacher"),
     isStudent: useProfileAccountType ? normalizedAccountType === "student" : allMosqueRoles.includes("student"),
     isParent: useProfileAccountType ? normalizedAccountType === "parent" : allMosqueRoles.includes("parent"),
   };

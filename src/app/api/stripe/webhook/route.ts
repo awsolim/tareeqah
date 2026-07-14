@@ -41,12 +41,19 @@ async function upsertPaidEnrollmentFromSession(session: Stripe.Checkout.Session,
   }
   const period = getSubscriptionPeriod(subscription);
 
+  const { data: enrollmentRequest } = await supabase
+    .from("enrollment_requests")
+    .select("program_track_id")
+    .eq("id", enrollmentRequestId)
+    .maybeSingle();
+
   await supabase.from("program_subscriptions").upsert(
     {
       mosque_id: mosqueId,
       program_id: programId,
       student_profile_id: studentProfileId,
       parent_profile_id: parentProfileId,
+      program_track_id: enrollmentRequest?.program_track_id ?? null,
       enrollment_request_id: enrollmentRequestId,
       stripe_account_id: stripeAccountId ?? metadata.stripe_account_id ?? null,
       stripe_customer_id: typeof session.customer === "string" ? session.customer : session.customer?.id ?? null,
@@ -66,6 +73,7 @@ async function upsertPaidEnrollmentFromSession(session: Stripe.Checkout.Session,
     {
       program_id: programId,
       student_profile_id: studentProfileId,
+      program_track_id: enrollmentRequest?.program_track_id ?? null,
     },
     { onConflict: "program_id,student_profile_id" },
   );
