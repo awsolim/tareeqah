@@ -7,12 +7,6 @@ type SwitchRequestBody = {
   slug?: string;
 };
 
-function assertDevMode() {
-  if (process.env.NODE_ENV === "production") {
-    throw new Error("Development account switching is disabled in production.");
-  }
-}
-
 function getOrigin(request: Request) {
   const requestOrigin = request.headers.get("origin");
   if (requestOrigin) {
@@ -29,7 +23,6 @@ function getOrigin(request: Request) {
 
 export async function GET() {
   try {
-    assertDevMode();
     const supabase = createSupabaseServiceClient();
     const { data, error } = await supabase
       .from("profiles")
@@ -58,7 +51,6 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    assertDevMode();
     const body = (await request.json()) as SwitchRequestBody;
     const profileId = typeof body.profileId === "string" ? body.profileId : "";
     const slug = typeof body.slug === "string" && body.slug.trim() ? body.slug.trim() : "assiddiq";
@@ -92,4 +84,3 @@ export async function POST(request: Request) {
     return Response.json({ error: message }, { status: 500 });
   }
 }
-

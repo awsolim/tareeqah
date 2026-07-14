@@ -114,6 +114,9 @@ export type Database = {
           reviewed_by: string | null;
           reviewed_at: string | null;
           review_note: string | null;
+          approved_price_monthly_cents: number | null;
+          payment_bypassed: boolean;
+          decision_note: string | null;
           student_dismissed_at: string | null;
         };
         Insert: Partial<Database["public"]["Tables"]["enrollment_requests"]["Row"]>;
@@ -145,6 +148,26 @@ export type Database = {
         };
         Insert: Partial<Database["public"]["Tables"]["program_announcement_receipts"]["Row"]>;
         Update: Partial<Database["public"]["Tables"]["program_announcement_receipts"]["Row"]>;
+        Relationships: [];
+      };
+      program_student_notes: {
+        Row: {
+          id: string;
+          mosque_id: string;
+          program_id: string;
+          student_profile_id: string;
+          recipient_profile_id: string;
+          parent_profile_id: string | null;
+          author_profile_id: string;
+          message: string;
+          category: string;
+          seen_at: string | null;
+          seen_by: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: Partial<Database["public"]["Tables"]["program_student_notes"]["Row"]>;
+        Update: Partial<Database["public"]["Tables"]["program_student_notes"]["Row"]>;
         Relationships: [];
       };
       program_session_cancellations: {
@@ -342,6 +365,10 @@ export type Database = {
       claim_program_instructor_code: {
         Args: { invite: string };
         Returns: string;
+      };
+      mark_program_student_notes_seen: {
+        Args: { note_ids: string[] };
+        Returns: void;
       };
     };
     Enums: Record<string, never>;

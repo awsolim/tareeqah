@@ -97,8 +97,13 @@ export async function POST(request: Request) {
       return Response.json({ error: "This class is not paid." }, { status: 409 });
     }
 
-    if (!program.stripe_price_id) {
-      return Response.json({ error: "Stripe is not configured for this class yet." }, { status: 409 });
+    if (enrollmentRequest.payment_bypassed) {
+      return Response.json({ error: "Payment is not required for this registration." }, { status: 409 });
+    }
+
+    const approvedAmount = enrollmentRequest.approved_price_monthly_cents ?? program.price_monthly_cents;
+    if (!approvedAmount || approvedAmount < 50) {
+      return Response.json({ error: "This approval does not have a valid monthly price." }, { status: 409 });
     }
 
     const stripeRequestOptions = shouldUseStripeConnect() && mosque.stripe_account_id ? { stripeAccount: mosque.stripe_account_id } : undefined;
@@ -106,10 +111,31 @@ export async function POST(request: Request) {
     const origin = getOrigin(request);
     const returnPath = isMasjidSubdomain(origin, mosque.slug) ? "/portal/announcements" : `/m/${mosque.slug}/portal/announcements`;
     const stripe = getStripe();
+    const productId = program.stripe_product_id;
+    if (!productId) {
+      return Response.json({ error: "Stripe is not configured for this class yet." }, { status: 409 });
+    }
+
+    const dynamicPrice = await stripe.prices.create(
+      {
+        product: productId,
+        currency: "usd",
+        unit_amount: approvedAmount,
+        recurring: { interval: "month" },
+        metadata: {
+          enrollment_request_id: enrollmentRequest.id,
+          mosque_id: enrollmentRequest.mosque_id,
+          program_id: enrollmentRequest.program_id,
+          student_profile_id: enrollmentRequest.student_profile_id,
+        },
+      },
+      stripeRequestOptions,
+    );
+
     const session = await stripe.checkout.sessions.create(
       {
         mode: "subscription",
-        line_items: [{ price: program.stripe_price_id, quantity: 1 }],
+        line_items: [{ price: dynamicPrice.id, quantity: 1 }],
         customer_email: profile?.email ?? user.email ?? undefined,
         client_reference_id: enrollmentRequest.id,
         success_url: `${origin}${returnPath}?payment=success&session_id={CHECKOUT_SESSION_ID}`,
@@ -145,7 +171,7 @@ export async function POST(request: Request) {
         enrollment_request_id: enrollmentRequest.id,
         stripe_account_id: mosque.stripe_account_id,
         stripe_checkout_session_id: session.id,
-        stripe_price_id: program.stripe_price_id,
+        stripe_price_id: dynamicPrice.id,
         status: "checkout_started",
         updated_at: new Date().toISOString(),
       },

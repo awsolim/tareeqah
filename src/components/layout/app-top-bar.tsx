@@ -264,11 +264,11 @@ export function AppTopBar({
 
 function TopBarLogo({ src, name }: { src: string | null; name: string }) {
   if (src) {
-    return <Image src={src} alt="" width={40} height={40} className="h-10 w-10 shrink-0 rounded-sm border border-[#D6DCE0] object-contain" />;
+    return <Image src={src} alt="" width={40} height={40} className="h-10 w-10 shrink-0 object-contain" />;
   }
 
   return (
-    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-sm border border-[#D6DCE0] bg-[#F7F8F9] text-sm font-medium text-[#2E8F7D]">
+    <span className="flex h-10 w-10 shrink-0 items-center justify-center bg-[#F7F8F9] text-sm font-medium text-[#2E8F7D]">
       {name
         .split(" ")
         .map((part) => part[0])

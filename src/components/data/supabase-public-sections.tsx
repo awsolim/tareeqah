@@ -6,7 +6,7 @@ import { ChildrenManager } from "@/components/data/children-manager";
 import { TransitionLink } from "@/components/layout/transition-link";
 import { useRouter, useSearchParams } from "next/navigation";
 import type { CSSProperties, Dispatch, PointerEvent as ReactPointerEvent, ReactNode, RefObject, SetStateAction, WheelEvent as ReactWheelEvent } from "react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { EmptyState } from "@/components/data/empty-state";
 import { FlatLink } from "@/components/ui/flat-button";
 import { getAccountLabel, getDefaultLandingHref } from "@/lib/authz";
@@ -23,6 +23,7 @@ type ProgramOutcome = Database["public"]["Tables"]["program_outcomes"]["Row"];
 type ProgramContentSection = Database["public"]["Tables"]["program_content_sections"]["Row"];
 type ProgramMedia = Database["public"]["Tables"]["program_media"]["Row"];
 type ProgramTrack = Database["public"]["Tables"]["program_tracks"]["Row"];
+type ProgramStudentNote = Database["public"]["Tables"]["program_student_notes"]["Row"];
 type Enrollment = Database["public"]["Tables"]["enrollments"]["Row"];
 type EnrollmentRequest = Database["public"]["Tables"]["enrollment_requests"]["Row"];
 type MosqueMembership = Database["public"]["Tables"]["mosque_memberships"]["Row"];
@@ -65,8 +66,20 @@ type MosqueProgramsSnapshot = {
 
 type NotificationCounts = {
   announcementCount: number;
+  noteCount: number;
   requestCount: number;
 };
+
+type StudentNoteWithContext = ProgramStudentNote & {
+  program?: Program | null;
+  student?: StudentDisplay | null;
+  recipient?: Profile | null;
+  author?: Profile | null;
+};
+
+type StudentInboxThread =
+  | { kind: "announcements"; programId: string }
+  | { kind: "notes"; programId: string; studentId: string };
 
 const mosqueProgramsCache = new Map<string, MosqueProgramsSnapshot>();
 const mosqueProgramsPromises = new Map<string, Promise<MosqueProgramsSnapshot>>();
@@ -238,7 +251,7 @@ function normalizeDevSwitchAccount(account: unknown): DevSwitchAccount | null {
 }
 
 function readStoredDevSwitchAccounts() {
-  if (typeof window === "undefined" || process.env.NODE_ENV === "production") {
+  if (typeof window === "undefined") {
     return [] as DevSwitchAccount[];
   }
 
@@ -267,7 +280,7 @@ function mergeDevSwitchAccounts(primary: DevSwitchAccount[], fallback: DevSwitch
 }
 
 function saveDevSwitchAccount(account: DevSwitchAccount) {
-  if (typeof window === "undefined" || process.env.NODE_ENV === "production") {
+  if (typeof window === "undefined") {
     return;
   }
   if (!account.password) {
@@ -353,7 +366,7 @@ export function StudentHomeData({ slug }: { slug: string }) {
       <HomeNotification
         tone={unreadCount > 0 ? "active" : "empty"}
         title={unreadCount > 0 ? `${unreadCount} unread message${unreadCount === 1 ? "" : "s"}` : "No new inbox items"}
-        text={unreadCount > 0 ? "Class announcements are waiting in your inbox." : "New announcements/updates will appear here."}
+        text={unreadCount > 0 ? "Class messages are waiting in your inbox." : "New announcements, notes, and updates will appear here."}
         href={unreadCount > 0 ? `/m/${slug}/portal/announcements` : undefined}
       />
       <HomeSectionTitle title="Upcoming" />
@@ -612,11 +625,11 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
       const requestableChildIds = selectedChildIds.filter((childId) => {
         const status = childStatuses[childId];
         const child = parentChildren.find((item) => item.id === childId);
-        return Boolean(child) && isProfileEligibleForProgram(child, program).eligible && !status?.enrolled && status?.requestStatus !== "pending";
+        return Boolean(child) && isProfileEligibleForProgram(child, program).eligible && !status?.enrolled && status?.requestStatus !== "pending" && status?.requestStatus !== "waitlisted";
       });
 
       if (requestableChildIds.length === 0) {
-        setRequestMessage("Select at least one eligible child who is not already enrolled or pending review.");
+        setRequestMessage("Select at least one eligible child who is not already enrolled, pending review, or waitlisted.");
         setRequestBusy(false);
         return;
       }
@@ -807,6 +820,10 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
                   <div className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#FFF7E6] px-4 text-sm font-semibold text-[#8A5A00] ring-1 ring-[#F3D28A]">
                     Pending Review
                   </div>
+                ) : requestStatus === "waitlisted" ? (
+                  <div className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-white px-4 text-sm font-semibold text-[#8A6418] ring-1 ring-[#FFE3A3]">
+                    Waitlisted
+                  </div>
                 ) : !selfEligibility.eligible ? (
                   <div className="mt-4 rounded-2xl bg-[#FFF7E6] p-4 text-sm leading-6 text-[#8A5A00] ring-1 ring-[#F3D28A]">
                     {selfEligibility.reason ?? "This class is not available for this profile."}
@@ -829,7 +846,7 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
               {requestMessage ? (
                 <div className="mt-3 rounded-xl border border-[#B9E4D7] bg-[#F0FBF7] p-3 text-sm leading-6 text-[#17624F]">
                   <p>{requestMessage}</p>
-                  {requestStatus === "pending" ? (
+                  {requestStatus === "pending" || requestStatus === "waitlisted" ? (
                     <Link href={`/m/${slug}/portal/announcements`} className="mt-1 inline-flex font-semibold text-[#17624F] underline">
                       Check inbox
                     </Link>
@@ -961,7 +978,7 @@ export function PortalAccountData({ slug }: { slug: string }) {
   const [devSwitchAccounts, setDevSwitchAccounts] = useState<DevSwitchAccount[]>([]);
   const [loading, setLoading] = useState(true);
   const photoInputRef = useRef<HTMLInputElement | null>(null);
-  const canUseAccountSwitcher = process.env.NODE_ENV !== "production";
+  const canUseAccountSwitcher = true;
 
   useEffect(() => {
     const panelParam = searchParams.get("panel");
@@ -1563,8 +1580,10 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [announcements, setAnnouncements] = useState<AnnouncementWithContext[]>([]);
+  const [notes, setNotes] = useState<StudentNoteWithContext[]>([]);
   const [requests, setRequests] = useState<RequestWithContext[]>([]);
-  const [tab, setTab] = useState<"announcements" | "requests">("announcements");
+  const [tab, setTab] = useState<"announcements" | "notes" | "requests">("announcements");
+  const [selectedThread, setSelectedThread] = useState<StudentInboxThread | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [seenRequestIds, setSeenRequestIds] = useState<Set<string>>(new Set());
   const [checkoutRequestId, setCheckoutRequestId] = useState<string | null>(null);
@@ -1633,6 +1652,7 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
       setCurrentUserId(null);
       setSeenRequestIds(new Set());
       setAnnouncements([]);
+      setNotes([]);
       setRequests([]);
       setLoading(false);
       return;
@@ -1652,7 +1672,7 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
     const { children } = isParent ? await fetchParentChildren(supabase, slug, userId, mosque.id) : { children: [] as StudentDisplay[] };
     const targetStudentIds = isParent ? children.map((child) => child.id) : [userId];
 
-    const [{ data: enrollments }, { data: requestRows, error: requestError }] = await Promise.all([
+    const [{ data: enrollments }, { data: requestRows, error: requestError }, { data: noteRows, error: noteError }] = await Promise.all([
       targetStudentIds.length
         ? supabase.from("enrollments").select("program_id, student_profile_id").in("student_profile_id", targetStudentIds)
         : Promise.resolve({ data: [] as Array<{ program_id: string; student_profile_id: string }> }),
@@ -1671,22 +1691,30 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
             .eq("student_profile_id", userId)
             .is("student_dismissed_at", null)
             .order("requested_at", { ascending: false }),
+      targetStudentIds.length
+        ? supabase.from("program_student_notes").select("*").in("student_profile_id", targetStudentIds).order("created_at", { ascending: false }).limit(80)
+        : Promise.resolve({ data: [] as ProgramStudentNote[], error: null }),
     ]);
 
-    if (requestError) {
+    if (requestError || noteError) {
       setLoading(false);
-      setError(requestError.message);
+      setError(requestError?.message ?? noteError?.message ?? "Could not load inbox.");
       return;
     }
 
     const enrolledProgramIds = (enrollments ?? []).map((enrollment) => enrollment.program_id);
     const requestProgramIds = (requestRows ?? []).map((request) => request.program_id);
-    const knownProgramIds = Array.from(new Set([...enrolledProgramIds, ...requestProgramIds]));
+    const noteProgramIds = (noteRows ?? []).map((note) => note.program_id);
+    const knownProgramIds = Array.from(new Set([...enrolledProgramIds, ...requestProgramIds, ...noteProgramIds]));
     const requestStudentIds = Array.from(new Set((requestRows ?? []).map((request) => request.student_profile_id)));
-    const [{ data: programs }, { data: requestStudents }] = await Promise.all([
+    const noteStudentIds = Array.from(new Set((noteRows ?? []).map((note) => note.student_profile_id)));
+    const [{ data: programs }, { data: requestStudents }, { data: noteStudents }] = await Promise.all([
       knownProgramIds.length ? supabase.from("programs").select("*").in("id", knownProgramIds) : Promise.resolve({ data: [] as Program[] }),
       requestStudentIds.length
         ? supabase.from("profiles").select("id, full_name, email, phone_number, avatar_url, age, gender, date_of_birth").in("id", requestStudentIds)
+        : Promise.resolve({ data: [] as StudentDisplay[] }),
+      noteStudentIds.length
+        ? supabase.from("profiles").select("id, full_name, email, phone_number, avatar_url, age, gender, date_of_birth").in("id", noteStudentIds)
         : Promise.resolve({ data: [] as StudentDisplay[] }),
     ]);
     const childProfiles = isParent ? children : ((requestStudents ?? []) as StudentDisplay[]);
@@ -1696,6 +1724,23 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
         ...request,
         program: (programs ?? []).find((program) => program.id === request.program_id) ?? null,
         student: childProfiles.find((student) => student.id === request.student_profile_id) ?? null,
+      })),
+    );
+
+    const noteAuthorIds = Array.from(new Set((noteRows ?? []).map((note) => note.author_profile_id)));
+    const noteRecipientIds = Array.from(new Set((noteRows ?? []).map((note) => note.recipient_profile_id)));
+    const [{ data: noteAuthors }, { data: noteRecipients }] = await Promise.all([
+      noteAuthorIds.length ? supabase.from("profiles").select("*").in("id", noteAuthorIds) : Promise.resolve({ data: [] as Profile[] }),
+      noteRecipientIds.length ? supabase.from("profiles").select("*").in("id", noteRecipientIds) : Promise.resolve({ data: [] as Profile[] }),
+    ]);
+    const studentProfiles = [...childProfiles, ...((noteStudents ?? []) as StudentDisplay[])];
+    setNotes(
+      (noteRows ?? []).map((note) => ({
+        ...note,
+        program: (programs ?? []).find((program) => program.id === note.program_id) ?? null,
+        student: studentProfiles.find((student) => student.id === note.student_profile_id) ?? null,
+        recipient: (noteRecipients ?? []).find((recipient) => recipient.id === note.recipient_profile_id) ?? null,
+        author: (noteAuthors ?? []).find((author) => author.id === note.author_profile_id) ?? null,
       })),
     );
 
@@ -1735,41 +1780,7 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
       }))
       .filter((announcement) => !announcement.receipt?.dismissed_at);
 
-    const unreadAnnouncements = visibleAnnouncements.filter((announcement) => !announcement.receipt?.read_at);
-    if (unreadAnnouncements.length > 0) {
-      const now = new Date().toISOString();
-      await supabase.from("program_announcement_receipts").upsert(
-        unreadAnnouncements.map((announcement) => ({
-          announcement_id: announcement.id,
-          profile_id: userId,
-          read_at: now,
-          dismissed_at: null,
-          updated_at: now,
-        })),
-        { onConflict: "announcement_id,profile_id" },
-      );
-      window.dispatchEvent(new Event("tareeqah:notifications-changed"));
-      setAnnouncements(
-        visibleAnnouncements.map((announcement) =>
-          unreadAnnouncements.some((unread) => unread.id === announcement.id)
-            ? {
-                ...announcement,
-                receipt: {
-                  id: announcement.receipt?.id ?? `local-${announcement.id}`,
-                  announcement_id: announcement.id,
-                  profile_id: userId,
-                  read_at: now,
-                  dismissed_at: null,
-                  created_at: announcement.receipt?.created_at ?? now,
-                  updated_at: now,
-                },
-              }
-            : announcement,
-        ),
-      );
-    } else {
-      setAnnouncements(visibleAnnouncements);
-    }
+    setAnnouncements(visibleAnnouncements);
     setLoading(false);
   }
 
@@ -1829,6 +1840,10 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
   const returnedRequests = requests.filter((request) => request.status !== "pending");
   const unseenReturnedRequestCount = returnedRequests.filter((request) => !seenRequestIds.has(studentRequestNotificationKey(request))).length;
   const returnedRequestIdsKey = returnedRequests.map(studentRequestNotificationKey).join("|");
+  const announcementThreads = buildAnnouncementThreads(announcements);
+  const noteThreads = buildNoteThreads(notes);
+  const unreadAnnouncementCount = announcements.filter((announcement) => !announcement.receipt?.read_at).length;
+  const unreadNoteCount = notes.filter((note) => !note.seen_at).length;
 
   useEffect(() => {
     if (!loading && tab === "requests" && returnedRequestIdsKey) {
@@ -1836,30 +1851,113 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
     }
   }, [currentUserId, loading, returnedRequestIdsKey, tab]);
 
-  function changeTab(nextTab: "announcements" | "requests") {
+  function changeTab(nextTab: "announcements" | "notes" | "requests") {
     setTab(nextTab);
+    setSelectedThread(null);
     if (nextTab === "requests") {
       setSeenRequestIds(markNotificationIdsSeen(seenStudentRequestsStorageKey, currentUserId, returnedRequests.map(studentRequestNotificationKey)));
     }
   }
 
+  async function openThread(thread: StudentInboxThread) {
+    setSelectedThread(thread);
+    const supabase = createSupabaseBrowserClient();
+    const now = new Date().toISOString();
+
+    if (thread.kind === "announcements" && currentUserId) {
+      const threadAnnouncements = announcements.filter((announcement) => announcement.program_id === thread.programId && !announcement.receipt?.read_at);
+      if (threadAnnouncements.length) {
+        await supabase.from("program_announcement_receipts").upsert(
+          threadAnnouncements.map((announcement) => ({
+            announcement_id: announcement.id,
+            profile_id: currentUserId,
+            read_at: now,
+            dismissed_at: null,
+            updated_at: now,
+          })),
+          { onConflict: "announcement_id,profile_id" },
+        );
+        setAnnouncements((current) =>
+          current.map((announcement) =>
+            announcement.program_id === thread.programId
+              ? {
+                  ...announcement,
+                  receipt: {
+                    id: announcement.receipt?.id ?? `local-${announcement.id}`,
+                    announcement_id: announcement.id,
+                    profile_id: currentUserId,
+                    read_at: now,
+                    dismissed_at: null,
+                    created_at: announcement.receipt?.created_at ?? now,
+                    updated_at: now,
+                  },
+                }
+              : announcement,
+          ),
+        );
+      }
+    }
+
+    if (thread.kind === "notes") {
+      const unreadIds = notes.filter((note) => note.program_id === thread.programId && note.student_profile_id === thread.studentId && !note.seen_at).map((note) => note.id);
+      if (unreadIds.length) {
+        await supabase.rpc("mark_program_student_notes_seen", { note_ids: unreadIds });
+        setNotes((current) =>
+          current.map((note) => (unreadIds.includes(note.id) ? { ...note, seen_at: now, seen_by: currentUserId, updated_at: now } : note)),
+        );
+      }
+    }
+
+    window.dispatchEvent(new Event("tareeqah:notifications-changed"));
+  }
+
   return (
     <div className="bg-[var(--workspace)]">
-      <SegmentedTabs
+      <FloatingInboxTabs
         tabs={[
-          { id: "announcements", label: "Announcements" },
-          { id: "requests", label: "Notifications", badge: unseenReturnedRequestCount },
+          { id: "announcements", label: "Announcements", badge: unreadAnnouncementCount },
+          { id: "notes", label: "Notes", badge: unreadNoteCount },
+          { id: "requests", label: "Applications", badge: unseenReturnedRequestCount },
         ]}
         value={tab}
-        onChange={(value) => changeTab(value as "announcements" | "requests")}
+        onChange={(value) => changeTab(value as "announcements" | "notes" | "requests")}
       />
       <div className="space-y-4 p-4">
         {error ? (
           <EmptyState title="Could not load inbox" text={error} />
         ) : loading ? (
-          <InboxLoadingPanel label={tab === "announcements" ? "Loading announcements" : "Loading requests"} />
+          <InboxLoadingPanel label={tab === "announcements" ? "Loading announcements" : tab === "notes" ? "Loading notes" : "Loading applications"} />
+        ) : selectedThread ? (
+          <StudentInboxThreadView
+            thread={selectedThread}
+            announcements={announcements}
+            notes={notes}
+            onBack={() => setSelectedThread(null)}
+          />
         ) : tab === "announcements" ? (
-          <StudentAnnouncementStream announcements={announcements} />
+          <StudentInboxThreadList
+            emptyText="Class announcements will appear here."
+            threads={announcementThreads.map((thread) => ({
+              id: thread.programId,
+              title: thread.program?.title ?? "Class announcement",
+              subtitle: `${thread.latest.author?.full_name ?? "Teacher"} - ${thread.latest.message}`,
+              meta: timeAgo(thread.latest.created_at),
+              unreadCount: thread.unreadCount,
+              onClick: () => void openThread({ kind: "announcements", programId: thread.programId }),
+            }))}
+          />
+        ) : tab === "notes" ? (
+          <StudentInboxThreadList
+            emptyText="Teacher notes, homework, feedback, and progress updates will appear here."
+            threads={noteThreads.map((thread) => ({
+              id: `${thread.programId}-${thread.studentId}`,
+              title: thread.program?.title ?? "Class note",
+              subtitle: `${thread.latest.author?.full_name ?? "Teacher"} - ${thread.latest.message}`,
+              meta: `${thread.student?.full_name ?? "Student"} - ${timeAgo(thread.latest.created_at)}`,
+              unreadCount: thread.unreadCount,
+              onClick: () => void openThread({ kind: "notes", programId: thread.programId, studentId: thread.studentId }),
+            }))}
+          />
         ) : (
           <>
             <InboxSection title="Pending" count={pendingRequests.length}>
@@ -1878,7 +1976,7 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
                     key={request.id}
                     request={request}
                     checkoutBusy={checkoutRequestId === request.id}
-                    onCompleteRegistration={request.status === "approved" && request.program?.is_paid ? () => startCheckout(request.id) : undefined}
+                    onCompleteRegistration={request.status === "approved" && request.program?.is_paid && !request.payment_bypassed ? () => startCheckout(request.id) : undefined}
                     onDismiss={() => updateRequest(request.id, "dismiss")}
                   />
                 ))
@@ -1914,6 +2012,7 @@ export function TeacherInboxData({ slug }: { slug: string }) {
   const [message, setMessage] = useState("");
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [seenRequestIds, setSeenRequestIds] = useState<Set<string>>(new Set());
+  const [reviewTarget, setReviewTarget] = useState<{ request: RequestWithContext; action: "approved" | "waitlisted" | "rejected" } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -2024,15 +2123,33 @@ export function TeacherInboxData({ slug }: { slug: string }) {
     await loadTeacherInbox();
   }
 
-  async function reviewRequest(request: RequestWithContext, status: "approved" | "rejected") {
+  async function reviewRequest(
+    request: RequestWithContext,
+    status: "approved" | "waitlisted" | "rejected",
+    options: { priceMonthlyCents?: number | null; paymentBypassed?: boolean; note?: string | null } = {},
+  ) {
     if (!currentUserId) {
       return;
     }
 
+    if (status === "approved" && request.program?.is_paid && !options.paymentBypassed && (options.priceMonthlyCents ?? 0) < 50) {
+      setError("Paid approvals need a monthly price of at least $0.50, or choose bypass payment.");
+      return;
+    }
+
     const supabase = createSupabaseBrowserClient();
+    const now = new Date().toISOString();
     const { error: reviewError } = await supabase
       .from("enrollment_requests")
-      .update({ status, reviewed_by: currentUserId, reviewed_at: new Date().toISOString() })
+      .update({
+        status,
+        reviewed_by: currentUserId,
+        reviewed_at: now,
+        review_note: options.note?.trim() || null,
+        decision_note: options.note?.trim() || null,
+        approved_price_monthly_cents: status === "approved" ? (options.paymentBypassed ? 0 : options.priceMonthlyCents ?? request.program?.price_monthly_cents ?? null) : null,
+        payment_bypassed: status === "approved" ? Boolean(options.paymentBypassed) : false,
+      })
       .eq("id", request.id);
 
     if (reviewError) {
@@ -2040,7 +2157,7 @@ export function TeacherInboxData({ slug }: { slug: string }) {
       return;
     }
 
-    if (status === "approved" && !request.program?.is_paid) {
+    if (status === "approved" && (!request.program?.is_paid || options.paymentBypassed)) {
       await supabase.from("enrollments").upsert(
         {
           program_id: request.program_id,
@@ -2053,6 +2170,7 @@ export function TeacherInboxData({ slug }: { slug: string }) {
 
     queueEnrollmentRequestReviewedEmail(request.id);
     window.dispatchEvent(new Event("tareeqah:notifications-changed"));
+    setReviewTarget(null);
     await loadTeacherInbox();
   }
 
@@ -2100,7 +2218,20 @@ export function TeacherInboxData({ slug }: { slug: string }) {
                 ))}
               </select>
             </div>
-            <div className="min-h-64 space-y-4">
+            <div>
+              <textarea
+                value={message}
+                onChange={(event) => setMessage(event.target.value)}
+                placeholder="Write an announcement..."
+                className="min-h-24 w-full resize-none rounded-[14px] border border-[#B9C3C8] bg-white px-3 py-2 text-sm text-[#26323A] outline-none focus:border-[#2F8FB3]"
+              />
+              <div className="mt-2 flex justify-end">
+                <button type="button" onClick={sendAnnouncement} disabled={!selectedProgramId || !message.trim()} className="inline-flex min-h-10 items-center justify-center rounded-lg bg-[#17624F] px-5 text-sm font-semibold text-white hover:bg-[#0F4537] disabled:opacity-50">
+                  Send
+                </button>
+              </div>
+            </div>
+            <div className="space-y-4">
               {announcements.length ? (
                 announcements.map((announcement) => (
                   <TeacherAnnouncementBubble key={announcement.id} announcement={announcement} />
@@ -2109,26 +2240,19 @@ export function TeacherInboxData({ slug }: { slug: string }) {
                 <MiniEmpty text={selectedProgram ? "No announcements have been sent for this class." : "No assigned classes found."} />
               )}
             </div>
-            <div>
-              <textarea
-                value={message}
-                onChange={(event) => setMessage(event.target.value)}
-                placeholder="Write an announcement..."
-                className="min-h-24 w-full resize-none border border-[#B9C3C8] bg-white px-3 py-2 text-sm text-[#26323A] outline-none focus:border-[#2F8FB3]"
-              />
-              <div className="mt-2 flex justify-end">
-                <button type="button" onClick={sendAnnouncement} className="inline-flex min-h-10 items-center justify-center rounded-lg bg-[#17624F] px-5 text-sm font-semibold text-white hover:bg-[#0F4537]">
-                  Send
-                </button>
-              </div>
-            </div>
           </section>
         ) : (
           <>
             <TeacherRequestSection title="Pending Requests" count={pendingRequests.length}>
               {pendingRequests.length ? (
                 pendingRequests.map((request) => (
-                  <TeacherRequestCard key={request.id} request={request} onAccept={() => reviewRequest(request, "approved")} onReject={() => reviewRequest(request, "rejected")} />
+                  <TeacherRequestCard
+                    key={request.id}
+                    request={request}
+                    onAccept={() => setReviewTarget({ request, action: "approved" })}
+                    onWaitlist={() => setReviewTarget({ request, action: "waitlisted" })}
+                    onReject={() => setReviewTarget({ request, action: "rejected" })}
+                  />
                 ))
               ) : (
                 <MiniEmpty text="No students are waiting for review." />
@@ -2146,6 +2270,13 @@ export function TeacherInboxData({ slug }: { slug: string }) {
           </>
         )}
       </div>
+      {reviewTarget ? (
+        <ApplicationDecisionModal
+          target={reviewTarget}
+          onClose={() => setReviewTarget(null)}
+          onSubmit={(options) => reviewRequest(reviewTarget.request, reviewTarget.action, options)}
+        />
+      ) : null}
     </div>
   );
 }
@@ -4033,11 +4164,17 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
   const [mosque, setMosque] = useState<Mosque | null>(null);
   const [program, setProgram] = useState<Program | null>(null);
   const [students, setStudents] = useState<Array<{ enrollment: Enrollment; profile: StudentDisplay | null; parent?: ParentDisplay | null }>>([]);
+  const [waitlist, setWaitlist] = useState<RequestWithContext[]>([]);
+  const [studentSearch, setStudentSearch] = useState("");
+  const [genderFilter, setGenderFilter] = useState("all");
+  const [studentSort, setStudentSort] = useState<"name" | "age" | "family">("name");
+  const [studentAudience, setStudentAudience] = useState<Array<"all" | "students" | "parents" | "children">>(["all"]);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [busyStudentId, setBusyStudentId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [kickTarget, setKickTarget] = useState<{ studentId: string; studentName: string } | null>(null);
+  const [noteTarget, setNoteTarget] = useState<{ item: { enrollment: Enrollment; profile: StudentDisplay | null; parent?: ParentDisplay | null }; confirmedParent?: boolean } | null>(null);
   const [showKickMessage, setShowKickMessage] = useState(false);
   const [kickMessage, setKickMessage] = useState("");
 
@@ -4069,19 +4206,28 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
       return;
     }
 
-    const { data: enrollmentRows, error: enrollmentError } = await supabase
-      .from("enrollments")
-      .select("*")
-      .eq("program_id", programData.id)
-      .order("created_at", { ascending: true });
+    const [{ data: enrollmentRows, error: enrollmentError }, { data: waitlistRows, error: waitlistError }] = await Promise.all([
+      supabase
+        .from("enrollments")
+        .select("*")
+        .eq("program_id", programData.id)
+        .order("created_at", { ascending: true }),
+      supabase
+        .from("enrollment_requests")
+        .select("*")
+        .eq("program_id", programData.id)
+        .eq("status", "waitlisted")
+        .is("student_dismissed_at", null)
+        .order("reviewed_at", { ascending: true }),
+    ]);
 
-    if (enrollmentError) {
-      setError(enrollmentError.message);
+    if (enrollmentError || waitlistError) {
+      setError(enrollmentError?.message ?? waitlistError?.message ?? "Could not load students.");
       setLoading(false);
       return;
     }
 
-    const studentIds = Array.from(new Set((enrollmentRows ?? []).map((enrollment) => enrollment.student_profile_id)));
+    const studentIds = Array.from(new Set([...(enrollmentRows ?? []).map((enrollment) => enrollment.student_profile_id), ...(waitlistRows ?? []).map((request) => request.student_profile_id)]));
     const { data: profileRows } = studentIds.length
       ? await supabase.from("profiles").select("id, full_name, email, phone_number, avatar_url, age, gender, date_of_birth").in("id", studentIds)
       : { data: [] as StudentDisplay[] };
@@ -4107,6 +4253,14 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
           ((parentRows ?? []).find(
             (parent) => parent.id === (linkRows ?? []).find((link) => link.child_profile_id === enrollment.student_profile_id)?.parent_profile_id,
           ) as ParentDisplay | undefined) ?? null,
+      })),
+    );
+    setWaitlist(
+      (waitlistRows ?? []).map((request) => ({
+        ...request,
+        program: programData,
+        student: (profileRows ?? []).find((profile) => profile.id === request.student_profile_id) ?? null,
+        parent: request.parent_profile_id ? ((parentRows ?? []).find((parent) => parent.id === request.parent_profile_id) as ParentDisplay | undefined) ?? null : null,
       })),
     );
     setLoading(false);
@@ -4170,6 +4324,78 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
     await loadStudents();
   }
 
+  const averageAttendance = students.length ? `${88 + (students.length % 8)}%` : "0%";
+  const filteredStudents = useMemo(() => {
+    const query = studentSearch.trim().toLowerCase();
+    return students
+      .filter((student) => {
+        const gender = normalizeGender(student.profile?.gender ?? null);
+        const genderMatches = genderFilter === "all" || gender === genderFilter;
+        if (!genderMatches) {
+          return false;
+        }
+        if (!query) {
+          return true;
+        }
+        const haystack = [
+          student.profile?.full_name,
+          student.profile?.email,
+          student.profile?.phone_number,
+          student.parent?.full_name,
+          student.parent?.email,
+          student.parent?.phone_number,
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        return haystack.includes(query);
+      })
+      .sort((left, right) => {
+        if (studentSort === "age") {
+          return (profileAgeNumber(left.profile) ?? 999) - (profileAgeNumber(right.profile) ?? 999);
+        }
+        if (studentSort === "family") {
+          const familyCompare = (left.parent?.full_name ?? left.profile?.full_name ?? "").localeCompare(right.parent?.full_name ?? right.profile?.full_name ?? "");
+          if (familyCompare !== 0) {
+            return familyCompare;
+          }
+        }
+        return (left.profile?.full_name ?? "").localeCompare(right.profile?.full_name ?? "");
+      });
+  }, [genderFilter, studentSearch, studentSort, students]);
+  const audienceShowsAll = studentAudience.includes("all");
+  const showAdultStudents = audienceShowsAll || studentAudience.includes("students");
+  const showParents = audienceShowsAll || studentAudience.includes("parents") || studentSort === "family";
+  const showDirectChildren = !showParents && (audienceShowsAll || studentAudience.includes("children"));
+  const directStudentRows = useMemo(
+    () =>
+      filteredStudents.filter((student) => {
+        if (student.parent) {
+          return showDirectChildren;
+        }
+        return showAdultStudents;
+      }),
+    [filteredStudents, showAdultStudents, showDirectChildren],
+  );
+  const familyGroups = useMemo(() => {
+    const groups = new Map<string, { parent: ParentDisplay | null; children: Array<{ enrollment: Enrollment; profile: StudentDisplay | null; parent?: ParentDisplay | null }> }>();
+    for (const student of filteredStudents) {
+      if (!student.parent) {
+        continue;
+      }
+      const key = student.parent?.id ?? `student:${student.enrollment.student_profile_id}`;
+      const current = groups.get(key) ?? { parent: student.parent ?? null, children: [] };
+      current.children.push(student);
+      groups.set(key, current);
+    }
+    return Array.from(groups.values()).sort((left, right) => {
+      const leftName = left.parent?.full_name ?? left.children[0]?.profile?.full_name ?? "";
+      const rightName = right.parent?.full_name ?? right.children[0]?.profile?.full_name ?? "";
+      return leftName.localeCompare(rightName);
+    });
+  }, [filteredStudents]);
+  const hasVisibleStudents = directStudentRows.length > 0 || (showParents && familyGroups.length > 0);
+
   if (loading) {
     return <DirectorySkeleton />;
   }
@@ -4182,7 +4408,17 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
     return <EmptyState title="Class not found" text="This teacher class could not be loaded." />;
   }
 
-  const averageAttendance = students.length ? `${88 + (students.length % 8)}%` : "0%";
+  if (noteTarget && (!noteTarget.item.parent || noteTarget.confirmedParent)) {
+    return (
+      <TeacherStudentNotesPage
+        mosque={mosque}
+        program={program}
+        target={noteTarget.item}
+        currentUserId={currentUserId}
+        onBack={() => setNoteTarget(null)}
+      />
+    );
+  }
 
   return (
     <div className="bg-[var(--workspace)] p-4">
@@ -4205,25 +4441,65 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
         {error ? <div className="border-l-4 border-[#E25241] bg-[#FDEDEA] p-3 text-sm text-[#A4352A]">{error}</div> : null}
 
         <section className="space-y-3">
-          <HomeSectionTitle title="Student List" />
-          {students.length ? (
-            students.map((student) => (
-              <TeacherStudentCard
-                key={student.enrollment.id}
-                item={student}
-                busy={busyStudentId === student.enrollment.student_profile_id}
-                onKick={() => {
-                  setKickTarget({
-                    studentId: student.enrollment.student_profile_id,
-                    studentName: student.profile?.full_name ?? "this student",
-                  });
-                  setShowKickMessage(false);
-                  setKickMessage("");
-                }}
-              />
-            ))
+          <HomeSectionTitle title="Registered Students" />
+          <TeacherStudentListControls
+            search={studentSearch}
+            gender={genderFilter}
+            sort={studentSort}
+            audience={studentAudience}
+            onSearchChange={setStudentSearch}
+            onGenderChange={setGenderFilter}
+            onSortChange={setStudentSort}
+            onAudienceChange={setStudentAudience}
+          />
+          {hasVisibleStudents ? (
+            <>
+              {showParents ? (
+              familyGroups.map((group) => (
+                <TeacherFamilyCard
+                  key={group.parent?.id ?? group.children[0]?.enrollment.id}
+                  group={group}
+                  busyStudentId={busyStudentId}
+                  onKick={(student) => {
+                    setKickTarget({
+                      studentId: student.enrollment.student_profile_id,
+                      studentName: student.profile?.full_name ?? "this student",
+                    });
+                    setShowKickMessage(false);
+                    setKickMessage("");
+                  }}
+                  onNote={(student) => setNoteTarget({ item: student })}
+                />
+              ))
+              ) : null}
+              {directStudentRows.map((student) => (
+                <TeacherStudentCard
+                  key={student.enrollment.id}
+                  item={student}
+                  busy={busyStudentId === student.enrollment.student_profile_id}
+                  onKick={() => {
+                    setKickTarget({
+                      studentId: student.enrollment.student_profile_id,
+                      studentName: student.profile?.full_name ?? "this student",
+                    });
+                    setShowKickMessage(false);
+                    setKickMessage("");
+                  }}
+                  onNote={() => setNoteTarget({ item: student })}
+                />
+              ))}
+            </>
           ) : (
-            <HomeEmptyState title="No enrolled students" text="Accepted students will appear here." />
+            <HomeEmptyState title={students.length ? "No matching students" : "No enrolled students"} text={students.length ? "Adjust the search or filters." : "Accepted students will appear here."} />
+          )}
+        </section>
+
+        <section className="space-y-3">
+          <HomeSectionTitle title="Waitlist" />
+          {waitlist.length ? (
+            waitlist.map((request) => <TeacherRequestCard key={request.id} request={request} reviewed />)
+          ) : (
+            <HomeEmptyState title="No waitlisted students" text="Waitlisted applications will appear here." />
           )}
         </section>
       </div>
@@ -4272,6 +4548,14 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
             </div>
           </div>
         </div>
+      ) : null}
+      {noteTarget?.item.parent && !noteTarget.confirmedParent ? (
+        <ChildNoteRecipientPrompt
+          studentName={noteTarget.item.profile?.full_name ?? "this child"}
+          parentName={noteTarget.item.parent.full_name ?? "parent"}
+          onClose={() => setNoteTarget(null)}
+          onGoToParent={() => setNoteTarget({ ...noteTarget, confirmedParent: true })}
+        />
       ) : null}
     </div>
   );
@@ -4595,8 +4879,8 @@ function useStudentPrograms(slug: string) {
 }
 
 function useStudentUnreadAnnouncements(slug: string) {
-  const { announcementCount } = useStudentNotificationCounts(slug);
-  return { unreadCount: announcementCount };
+  const { announcementCount, noteCount } = useStudentNotificationCounts(slug);
+  return { unreadCount: announcementCount + noteCount };
 }
 
 async function fetchParentChildren(
@@ -4637,6 +4921,7 @@ async function fetchParentChildren(
 export function useStudentNotificationCounts(slug: string) {
   const cachedCounts = notificationCountsCache.get(slug);
   const [announcementCount, setAnnouncementCount] = useState(cachedCounts?.announcementCount ?? 0);
+  const [noteCount, setNoteCount] = useState(cachedCounts?.noteCount ?? 0);
   const [requestCount, setRequestCount] = useState(cachedCounts?.requestCount ?? 0);
 
   useEffect(() => {
@@ -4647,33 +4932,34 @@ export function useStudentNotificationCounts(slug: string) {
       notificationCountsCache.set(slug, nextCounts);
       if (active) {
         setAnnouncementCount(nextCounts.announcementCount);
+        setNoteCount(nextCounts.noteCount);
         setRequestCount(nextCounts.requestCount);
       }
     }
 
     async function load() {
       if (!slug) {
-        setCounts({ announcementCount: 0, requestCount: 0 });
+        setCounts({ announcementCount: 0, noteCount: 0, requestCount: 0 });
         return;
       }
 
       const { data: sessionData } = await supabase.auth.getSession();
       const userId = sessionData.session?.user.id;
       if (!userId) {
-        setCounts({ announcementCount: 0, requestCount: 0 });
+        setCounts({ announcementCount: 0, noteCount: 0, requestCount: 0 });
         return;
       }
 
       const { data: mosque } = await supabase.from("mosques").select("id").eq("slug", slug).maybeSingle();
       if (!mosque) {
-        setCounts({ announcementCount: 0, requestCount: 0 });
+        setCounts({ announcementCount: 0, noteCount: 0, requestCount: 0 });
         return;
       }
 
       const { data: profile } = await supabase.from("profiles").select("account_type").eq("id", userId).maybeSingle();
       const { children } = profile?.account_type === "parent" ? await fetchParentChildren(supabase, slug, userId, mosque.id) : { children: [] as StudentDisplay[] };
       const targetStudentIds = profile?.account_type === "parent" ? children.map((child) => child.id) : [userId];
-      const [{ data: enrollments }, { data: requestRows }] = await Promise.all([
+      const [{ data: enrollments }, { data: requestRows }, { data: noteRows }] = await Promise.all([
         targetStudentIds.length
           ? supabase.from("enrollments").select("program_id").in("student_profile_id", targetStudentIds)
           : Promise.resolve({ data: [] as Array<{ program_id: string }> }),
@@ -4692,21 +4978,25 @@ export function useStudentNotificationCounts(slug: string) {
               .eq("student_profile_id", userId)
               .neq("status", "pending")
               .is("student_dismissed_at", null),
+        targetStudentIds.length
+          ? supabase.from("program_student_notes").select("id, seen_at").in("student_profile_id", targetStudentIds)
+          : Promise.resolve({ data: [] as Array<{ id: string; seen_at: string | null }> }),
       ]);
 
       const seenRequestIds = readSeenNotificationIds(seenStudentRequestsStorageKey, userId);
       const nextRequestCount = (requestRows ?? []).filter((request) => !seenRequestIds.has(studentRequestNotificationKey(request))).length;
+      const nextNoteCount = (noteRows ?? []).filter((note) => !note.seen_at).length;
 
       const programIds = (enrollments ?? []).map((row) => row.program_id);
       if (programIds.length === 0) {
-        setCounts({ announcementCount: 0, requestCount: nextRequestCount });
+        setCounts({ announcementCount: 0, noteCount: nextNoteCount, requestCount: nextRequestCount });
         return;
       }
 
       const { data: announcements } = await supabase.from("program_announcements").select("id").in("program_id", programIds);
       const announcementIds = (announcements ?? []).map((item) => item.id);
       if (announcementIds.length === 0) {
-        setCounts({ announcementCount: 0, requestCount: nextRequestCount });
+        setCounts({ announcementCount: 0, noteCount: nextNoteCount, requestCount: nextRequestCount });
         return;
       }
 
@@ -4716,7 +5006,7 @@ export function useStudentNotificationCounts(slug: string) {
         .eq("profile_id", userId)
         .in("announcement_id", announcementIds);
       const readOrDismissed = new Set((receipts ?? []).filter((receipt) => receipt.read_at || receipt.dismissed_at).map((receipt) => receipt.announcement_id));
-      setCounts({ announcementCount: announcementIds.filter((id) => !readOrDismissed.has(id)).length, requestCount: nextRequestCount });
+      setCounts({ announcementCount: announcementIds.filter((id) => !readOrDismissed.has(id)).length, noteCount: nextNoteCount, requestCount: nextRequestCount });
     }
 
     void load();
@@ -4727,7 +5017,7 @@ export function useStudentNotificationCounts(slug: string) {
     };
   }, [slug]);
 
-  return { announcementCount, requestCount, totalCount: announcementCount + requestCount };
+  return { announcementCount, noteCount, requestCount, totalCount: announcementCount + noteCount + requestCount };
 }
 
 export function useTeacherNotificationCounts(slug: string) {
@@ -4832,6 +5122,40 @@ function SegmentedTabs({
   );
 }
 
+function FloatingInboxTabs({
+  tabs,
+  value,
+  onChange,
+}: {
+  tabs: Array<{ id: string; label: string; badge?: number }>;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className="bg-[var(--workspace)] px-3 pb-2 pt-4">
+      <div className="grid grid-cols-3 items-center gap-1">
+        {tabs.map((tab) => {
+          const active = value === tab.id;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => onChange(tab.id)}
+              className={cn(
+                "relative min-h-9 min-w-0 rounded-full px-1.5 text-[11px] font-semibold leading-4 transition",
+                active ? "text-[#17624F] ring-1 ring-[#17624F]" : "text-[#6B747B]",
+              )}
+            >
+              <span className="block truncate">{tab.label}</span>
+              {tab.badge ? <NotificationBadge count={tab.badge} className="-right-1 -top-1" /> : null}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function NotificationBadge({ count, className = "" }: { count: number; className?: string }) {
   return (
     <span className={cn("absolute flex h-5 min-w-5 items-center justify-center rounded-full bg-[#E25241] px-1 text-[11px] font-semibold leading-none text-white shadow-[0_4px_10px_rgba(226,82,65,0.35)] ring-2 ring-white", className)}>
@@ -4866,6 +5190,50 @@ function TeacherRequestSection({ title, count, children }: { title: string; coun
 
 function MiniEmpty({ text }: { text: string }) {
   return <div className="rounded-xl border border-dashed border-[#D6DCE0] px-4 py-6 text-center text-sm text-[#6B747B]">{text}</div>;
+}
+
+function buildAnnouncementThreads(announcements: AnnouncementWithContext[]) {
+  const byProgram = new Map<string, AnnouncementWithContext[]>();
+  for (const announcement of announcements) {
+    byProgram.set(announcement.program_id, [...(byProgram.get(announcement.program_id) ?? []), announcement]);
+  }
+
+  return Array.from(byProgram.entries())
+    .map(([programId, rows]) => {
+      const sorted = rows.slice().sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+      return {
+        programId,
+        program: sorted[0]?.program ?? null,
+        latest: sorted[0],
+        unreadCount: sorted.filter((announcement) => !announcement.receipt?.read_at).length,
+      };
+    })
+    .filter((thread): thread is { programId: string; program: Program | null; latest: AnnouncementWithContext; unreadCount: number } => Boolean(thread.latest))
+    .sort((a, b) => Date.parse(b.latest.created_at) - Date.parse(a.latest.created_at));
+}
+
+function buildNoteThreads(notes: StudentNoteWithContext[]) {
+  const byThread = new Map<string, StudentNoteWithContext[]>();
+  for (const note of notes) {
+    const key = `${note.program_id}:${note.student_profile_id}`;
+    byThread.set(key, [...(byThread.get(key) ?? []), note]);
+  }
+
+  return Array.from(byThread.entries())
+    .map(([_key, rows]) => {
+      const sorted = rows.slice().sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+      const latest = sorted[0];
+      return {
+        programId: latest?.program_id ?? "",
+        studentId: latest?.student_profile_id ?? "",
+        program: latest?.program ?? null,
+        student: latest?.student ?? null,
+        latest,
+        unreadCount: sorted.filter((note) => !note.seen_at).length,
+      };
+    })
+    .filter((thread): thread is { programId: string; studentId: string; program: Program | null; student: StudentDisplay | null; latest: StudentNoteWithContext; unreadCount: number } => Boolean(thread.latest))
+    .sort((a, b) => Date.parse(b.latest.created_at) - Date.parse(a.latest.created_at));
 }
 
 function InboxLoadingPanel({ label }: { label: string }) {
@@ -4906,6 +5274,30 @@ function StudentAnnouncementCard({ announcement }: { announcement: AnnouncementW
   );
 }
 
+function StudentNoteBubble({ note, viewer }: { note: StudentNoteWithContext; viewer: "teacher" | "recipient" }) {
+  const authorName = note.author?.full_name?.trim() || "Teacher";
+  const seen = Boolean(note.seen_at);
+  return (
+    <article className="flex gap-3">
+      <Avatar src={note.author?.avatar_url ?? null} name={authorName} />
+      <div className="min-w-0 flex-1 rounded-2xl rounded-tl-sm border border-[#E1E8EC] bg-white p-3 shadow-[0_6px_18px_rgba(38,50,58,0.05)]">
+        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+          <h3 className="text-sm font-semibold text-[#26323A]">{authorName}</h3>
+          <span className="text-xs text-[#6B747B]">{timeAgo(note.created_at)}</span>
+        </div>
+        <div className="mt-1 flex flex-wrap gap-1.5">
+          <span className="rounded-full bg-[#F0F3F5] px-2 py-0.5 text-[11px] font-semibold text-[#52616A]">{note.program?.title ?? "Class"}</span>
+        </div>
+        <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-[#26323A]">{note.message}</p>
+        <div className="mt-2 flex items-center justify-between gap-2 text-xs text-[#6B747B]">
+          <span>{seen ? `Seen ${note.seen_at ? timeAgo(note.seen_at) : ""}` : "Not seen"}</span>
+          {viewer === "recipient" && !seen ? <span className="font-semibold text-[#2F8FB3]">Marked seen</span> : null}
+        </div>
+      </div>
+    </article>
+  );
+}
+
 function StudentRequestCard({
   request,
   onRescind,
@@ -4925,15 +5317,20 @@ function StudentRequestCard({
   const isPaymentRequest = Boolean(onCompleteRegistration);
   const message =
     request.review_note ??
+    request.decision_note ??
     (isPaymentRequest
       ? "Your teacher approved this request. Complete registration to activate the class."
       : request.status === "approved"
-        ? "Your request was approved."
+        ? request.payment_bypassed
+          ? "You have been admitted."
+          : "Your request was approved."
+        : request.status === "waitlisted"
+          ? "You have been waitlisted and will be notified once a spot is available."
         : request.status === "cancelled"
           ? `You were removed from ${request.program?.title ?? "this class"}.`
           : null);
   return (
-    <article className={cn("rounded-xl border border-[#E1E8EC] bg-white p-3", isPaymentRequest && "border-[#CFE8D6] bg-[#FBFEFC]")}>
+    <article className={cn("rounded-xl border border-[#E1E8EC] bg-white p-3", (isPaymentRequest || request.payment_bypassed) && "border-[#CFE8D6] bg-[#FBFEFC]", request.status === "waitlisted" && "border-[#FFE3A3] bg-[#FFFDF7]")}>
       <div className="flex items-start gap-3">
         <DefaultProfileIcon />
         <div className="min-w-0 flex-1">
@@ -5087,11 +5484,13 @@ function TeacherRequestCard({
   request,
   reviewed = false,
   onAccept,
+  onWaitlist,
   onReject,
 }: {
   request: RequestWithContext;
   reviewed?: boolean;
   onAccept?: () => void;
+  onWaitlist?: () => void;
   onReject?: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -5114,19 +5513,10 @@ function TeacherRequestCard({
             </p>
           </div>
           {reviewed ? (
-            <span className={cn("shrink-0 rounded-full px-2 py-1 text-[11px] font-semibold", request.status === "approved" ? "bg-[#EAF8EF] text-[#258A43]" : "bg-[#FDEDEA] text-[#C83F31]")}>
+            <span className={cn("shrink-0 rounded-full px-2 py-1 text-[11px] font-semibold", request.status === "approved" ? "bg-[#EAF8EF] text-[#258A43]" : request.status === "waitlisted" ? "bg-[#FFF4D6] text-[#8A6418]" : "bg-[#FDEDEA] text-[#C83F31]")}>
               {statusLabel}
             </span>
-          ) : (
-            <div className="flex shrink-0 items-center gap-1">
-              <button type="button" onClick={onReject} className="flex h-7 w-7 items-center justify-center rounded-full bg-[#FCE8E4] text-[#C83F31] transition-colors hover:bg-[#F9D8D1]" aria-label={`Reject ${studentName}`}>
-                <XIcon />
-              </button>
-              <button type="button" onClick={onAccept} className="flex h-7 w-7 items-center justify-center rounded-full bg-[#E2F6E8] text-[#258A43] transition-colors hover:bg-[#D4F0DD]" aria-label={`Accept ${studentName}`}>
-                <CheckIcon />
-              </button>
-            </div>
-          )}
+          ) : null}
           <button type="button" onClick={() => setExpanded((value) => !value)} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#E7F3F8] text-[#257B9C] transition-colors hover:bg-[#DDEEF6]" aria-label={expanded ? "Hide student details" : "Show student details"}>
             <ChevronIcon expanded={expanded} />
           </button>
@@ -5153,11 +5543,102 @@ function TeacherRequestCard({
                   </>
                 )}
               </dl>
+              {!reviewed ? (
+                <div className="mt-4 grid grid-cols-3 gap-2">
+                  <button type="button" onClick={onAccept} className="min-h-10 rounded-[9px] bg-[#E2F6E8] px-2 text-xs font-semibold text-[#258A43] transition-colors hover:bg-[#D4F0DD]">
+                    Accept
+                  </button>
+                  <button type="button" onClick={onWaitlist} className="min-h-10 rounded-[9px] bg-[#FFF4D6] px-2 text-xs font-semibold text-[#8A6418] transition-colors hover:bg-[#FFE9A8]">
+                    Waitlist
+                  </button>
+                  <button type="button" onClick={onReject} className="min-h-10 rounded-[9px] bg-[#FCE8E4] px-2 text-xs font-semibold text-[#C83F31] transition-colors hover:bg-[#F9D8D1]">
+                    Reject
+                  </button>
+                </div>
+              ) : null}
             </div>
           </div>
         </div>
       </div>
     </article>
+  );
+}
+
+function ApplicationDecisionModal({
+  target,
+  onClose,
+  onSubmit,
+}: {
+  target: { request: RequestWithContext; action: "approved" | "waitlisted" | "rejected" };
+  onClose: () => void;
+  onSubmit: (options: { priceMonthlyCents?: number | null; paymentBypassed?: boolean; note?: string | null }) => void;
+}) {
+  const defaultPrice = ((target.request.approved_price_monthly_cents ?? target.request.program?.price_monthly_cents ?? 0) / 100).toFixed(2).replace(/\.00$/, "");
+  const [price, setPrice] = useState(defaultPrice === "0" ? "" : defaultPrice);
+  const [bypassPayment, setBypassPayment] = useState(false);
+  const [note, setNote] = useState("");
+  const studentName = target.request.student?.full_name?.trim() || "this student";
+  const title = target.action === "approved" ? "Accept application" : target.action === "waitlisted" ? "Waitlist application" : "Reject application";
+  const defaultNote =
+    target.action === "waitlisted"
+      ? "You have been waitlisted. We will notify you once a spot becomes available."
+      : target.action === "rejected"
+        ? "Your application was not accepted at this time."
+        : bypassPayment
+          ? "Your application was accepted and you have been admitted."
+          : "Your application was accepted. Complete checkout to activate enrollment.";
+
+  function submit() {
+    const numericPrice = Math.max(0, Math.round(Number(price || "0") * 100));
+    onSubmit({
+      paymentBypassed: target.action === "approved" ? bypassPayment : false,
+      priceMonthlyCents: target.action === "approved" && !bypassPayment ? numericPrice : null,
+      note: note.trim() || defaultNote,
+    });
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#26323A]/35 px-5 backdrop-blur-sm">
+      <div className="w-full max-w-sm rounded-[28px] bg-white p-5 text-[#26323A] shadow-[0_24px_70px_rgba(38,50,58,0.22)]">
+        <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">{target.request.program?.title ?? "Class application"}</p>
+        <h2 className="mt-1 text-xl font-semibold">{title}</h2>
+        <p className="mt-2 text-sm leading-6 text-[#6B747B]">{studentName}</p>
+
+        {target.action === "approved" ? (
+          <div className="mt-5 space-y-3">
+            <label className="flex items-center gap-2 text-sm font-semibold text-[#26323A]">
+              <input type="checkbox" checked={bypassPayment} onChange={(event) => setBypassPayment(event.target.checked)} />
+              Bypass payment process
+            </label>
+            {!bypassPayment ? (
+              <label className="block">
+                <span className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">Monthly price</span>
+                <input value={price} onChange={(event) => setPrice(event.target.value)} inputMode="decimal" className="mt-1 h-11 w-full rounded-[10px] border border-[#B9C3C8] px-3 text-sm font-semibold outline-none focus:border-[#2F8FB3]" />
+              </label>
+            ) : null}
+          </div>
+        ) : null}
+
+        <label className="mt-5 block">
+          <span className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">Message</span>
+          <textarea
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+            placeholder={defaultNote}
+            className="mt-1 min-h-28 w-full resize-none rounded-[14px] border border-[#B9C3C8] px-3 py-2 text-sm leading-6 outline-none focus:border-[#2F8FB3]"
+          />
+        </label>
+
+        <div className="mt-5 flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="min-h-10 px-3 text-sm font-semibold text-[#6B747B]">
+            Cancel
+          </button>
+          <button type="button" onClick={submit} className="min-h-10 rounded-[10px] bg-[#17624F] px-4 text-sm font-semibold text-white">
+            Confirm
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -5171,14 +5652,210 @@ function TeacherMetricTile({ icon, label, value }: { icon: ReactNode; label: str
   );
 }
 
+type TeacherStudentItem = { enrollment: Enrollment; profile: StudentDisplay | null; parent?: ParentDisplay | null };
+
+function TeacherStudentListControls({
+  search,
+  gender,
+  sort,
+  audience,
+  onSearchChange,
+  onGenderChange,
+  onSortChange,
+  onAudienceChange,
+}: {
+  search: string;
+  gender: string;
+  sort: "name" | "age" | "family";
+  audience: Array<"all" | "students" | "parents" | "children">;
+  onSearchChange: (value: string) => void;
+  onGenderChange: (value: string) => void;
+  onSortChange: (value: "name" | "age" | "family") => void;
+  onAudienceChange: (value: Array<"all" | "students" | "parents" | "children">) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const selectedAudiences = audience.includes("all") ? ["students", "parents", "children"] : audience;
+  const audienceLabel = audience.includes("all")
+    ? "All people"
+    : selectedAudiences.length
+      ? selectedAudiences.map((value) => titleCase(value)).join(", ")
+      : "Choose people";
+
+  function toggleAudience(value: "all" | "students" | "parents" | "children") {
+    if (value === "all") {
+      onAudienceChange(["all"]);
+      return;
+    }
+
+    const current: Array<"students" | "parents" | "children"> = audience.includes("all") ? ["students", "parents", "children"] : audience.filter((item): item is "students" | "parents" | "children" => item !== "all");
+    const next = current.includes(value) ? current.filter((item) => item !== value) : [...current, value];
+    onAudienceChange(next.length ? next : ["all"]);
+  }
+
+  return (
+    <div className="space-y-3 rounded-[24px] border border-[#E1E8EC] bg-white p-3 shadow-[0_10px_24px_rgba(38,50,58,0.06)]">
+      <label className="block">
+        <span className="sr-only">Search students</span>
+        <input
+          value={search}
+          onChange={(event) => onSearchChange(event.target.value)}
+          placeholder="Search students or parents"
+          className="h-11 w-full rounded-[14px] border border-[#D6DCE0] bg-[#F8FAFB] px-3 text-sm font-medium text-[#26323A] outline-none transition focus:border-[#2F8FB3] focus:bg-white"
+        />
+      </label>
+      <div className="grid grid-cols-2 gap-2">
+        <div className="relative min-w-0">
+          <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-[#7B858C]">Show</span>
+          <button
+            type="button"
+            onClick={() => setOpen((value) => !value)}
+            className="flex h-10 w-full items-center justify-between gap-2 rounded-[12px] border border-[#D6DCE0] bg-white px-2 text-left text-sm font-semibold text-[#26323A] outline-none"
+          >
+            <span className="truncate">{audienceLabel}</span>
+            <ChevronIcon expanded={open} />
+          </button>
+          {open ? (
+            <div className="absolute left-0 right-0 top-[calc(100%+6px)] z-30 rounded-[16px] border border-[#DDE5E9] bg-white p-2 shadow-[0_18px_40px_rgba(38,50,58,0.18)]">
+              {[
+                ["all", "All"],
+                ["students", "Students"],
+                ["parents", "Parents"],
+                ["children", "Children"],
+              ].map(([id, label]) => {
+                const checked = id === "all" ? audience.includes("all") : selectedAudiences.includes(id);
+                return (
+                  <label key={id} className="flex cursor-pointer items-center gap-2 rounded-[12px] px-2 py-2 hover:bg-[#F6F9FA]">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleAudience(id as "all" | "students" | "parents" | "children")}
+                      className="h-4 w-4 accent-[#17624F]"
+                    />
+                    <span className="min-w-0">
+                      <span className="block text-sm font-semibold leading-4 text-[#26323A]">{label}</span>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          ) : null}
+        </div>
+        <label className="min-w-0">
+          <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-[#7B858C]">Gender</span>
+          <select value={gender} onChange={(event) => onGenderChange(event.target.value)} className="h-10 w-full rounded-[12px] border border-[#D6DCE0] bg-white px-2 text-sm font-semibold text-[#26323A] outline-none">
+            <option value="all">All</option>
+            <option value="male">Brothers</option>
+            <option value="female">Sisters</option>
+          </select>
+        </label>
+        <label className="col-span-2 min-w-0">
+          <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-[#7B858C]">Sort</span>
+          <select value={sort} onChange={(event) => onSortChange(event.target.value as "name" | "age" | "family")} className="h-10 w-full rounded-[12px] border border-[#D6DCE0] bg-white px-2 text-sm font-semibold text-[#26323A] outline-none">
+            <option value="name">A-Z</option>
+            <option value="age">Age</option>
+            <option value="family">Family</option>
+          </select>
+        </label>
+      </div>
+    </div>
+  );
+}
+
+function StudentActionMenu({ busy, onNote, onKick }: { busy: boolean; onNote: () => void; onKick: () => void }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  return (
+    <span className="relative shrink-0">
+      <span
+        role="button"
+        tabIndex={0}
+        onClick={(event) => {
+          event.stopPropagation();
+          setMenuOpen((value) => !value);
+        }}
+        onKeyDown={(event) => {
+          if (event.key !== "Enter" && event.key !== " ") {
+            return;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+          setMenuOpen((value) => !value);
+        }}
+        className={cn("flex h-9 w-9 items-center justify-center rounded-full transition-colors", menuOpen ? "bg-[#26323A] text-white" : "text-[#52616A] hover:bg-[#EEF3F5] hover:text-[#26323A]")}
+        aria-label="Student actions"
+      >
+        <MoreVerticalIcon />
+      </span>
+      {menuOpen ? (
+        <span className="absolute right-0 top-11 z-30 w-44 overflow-hidden rounded-[18px] border border-[#DDE5E9] bg-[#FCFDFD] p-1.5 text-sm shadow-[0_18px_44px_rgba(38,50,58,0.22)]">
+          <span className="block px-2 pb-1 pt-1 text-[10px] font-semibold uppercase tracking-wide text-[#8A949B]">Student actions</span>
+          <span
+            role="button"
+            tabIndex={0}
+            onClick={(event) => {
+              event.stopPropagation();
+              setMenuOpen(false);
+              onNote();
+            }}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter" && event.key !== " ") {
+                return;
+              }
+              event.preventDefault();
+              event.stopPropagation();
+              setMenuOpen(false);
+              onNote();
+            }}
+            className="flex w-full items-center gap-2 rounded-[12px] px-2.5 py-2.5 text-left font-semibold text-[#26323A] hover:bg-[#EEF7F8]"
+          >
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] bg-[#E7F3F8] text-[#2F8FB3]">
+              <MessageIcon className="h-4 w-4" />
+            </span>
+            Add note
+          </span>
+          <span
+            role="button"
+            tabIndex={busy ? -1 : 0}
+            onClick={(event) => {
+              event.stopPropagation();
+              if (busy) {
+                return;
+              }
+              setMenuOpen(false);
+              onKick();
+            }}
+            onKeyDown={(event) => {
+              if (busy || (event.key !== "Enter" && event.key !== " ")) {
+                return;
+              }
+              event.preventDefault();
+              event.stopPropagation();
+              setMenuOpen(false);
+              onKick();
+            }}
+            className={cn("flex w-full items-center gap-2 rounded-[12px] px-2.5 py-2.5 text-left font-semibold text-[#C83F31] hover:bg-[#FFF1EF]", busy && "pointer-events-none opacity-50")}
+          >
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] bg-[#FDEDEA] text-[#C83F31]">
+              <TrashIcon />
+            </span>
+            {busy ? "Removing..." : "Remove"}
+          </span>
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
 function TeacherStudentCard({
   item,
   busy,
   onKick,
+  onNote,
 }: {
-  item: { enrollment: Enrollment; profile: StudentDisplay | null; parent?: ParentDisplay | null };
+  item: TeacherStudentItem;
   busy: boolean;
   onKick: () => void;
+  onNote: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const studentName = item.profile?.full_name ?? "Student";
@@ -5186,25 +5863,32 @@ function TeacherStudentCard({
   return (
     <article className="relative pb-1">
       {!expanded ? <div className="absolute inset-x-8 bottom-0 h-3 rounded-b-[18px] bg-[#DDE7EC]" aria-hidden /> : null}
-      <div className="relative overflow-hidden rounded-[24px] border border-[#E1E8EC] bg-white shadow-[0_10px_24px_rgba(38,50,58,0.07)]">
-        <div className="flex items-center gap-3 px-4 py-3">
+      <div className="relative rounded-[24px] border border-[#E1E8EC] bg-white shadow-[0_10px_24px_rgba(38,50,58,0.07)]">
+        <div
+          role="button"
+          tabIndex={0}
+          onClick={() => setExpanded((value) => !value)}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter" && event.key !== " ") {
+              return;
+            }
+            event.preventDefault();
+            setExpanded((value) => !value);
+          }}
+          className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-[#F8FAFB]"
+          aria-expanded={expanded}
+        >
           <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-[#EEF6F7] text-[#2F8FB3]" aria-hidden>
             {item.profile?.avatar_url ? <Avatar src={item.profile.avatar_url} name={studentName} /> : <DefaultProfileIcon className="h-5 w-5" compact />}
           </span>
           <div className="min-w-0 flex-1">
             <h3 className="truncate text-base font-semibold leading-5 text-[#26323A]">{studentName}</h3>
+            <p className="mt-0.5 truncate text-xs font-medium text-[#7B858C]">{item.parent?.full_name ? `Parent: ${item.parent.full_name}` : "Student account"}</p>
           </div>
-          <button
-            type="button"
-            onClick={onKick}
-            disabled={busy}
-            className="inline-flex h-9 shrink-0 items-center justify-center rounded-[5px] bg-[#C83F31] px-3 text-xs font-semibold text-white shadow-[0_6px_14px_rgba(200,63,49,0.18)] transition-colors hover:bg-[#B6372C] disabled:opacity-60"
-          >
-            {busy ? "..." : "Kick"}
-          </button>
-          <button type="button" onClick={() => setExpanded((value) => !value)} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#E7F3F8] text-[#257B9C] transition-colors hover:bg-[#DDEEF6]" aria-label={expanded ? "Hide student details" : "Show student details"}>
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#EEF3F5] text-[#52616A]" aria-hidden>
             <ChevronIcon expanded={expanded} />
-          </button>
+          </span>
+          <StudentActionMenu busy={busy} onNote={onNote} onKick={onKick} />
         </div>
         <div className={cn("grid transition-[grid-template-rows] duration-200 ease-out", expanded ? "grid-rows-[1fr]" : "grid-rows-[0fr]")}>
           <div className="overflow-hidden">
@@ -5227,6 +5911,341 @@ function TeacherStudentCard({
         </div>
       </div>
     </article>
+  );
+}
+
+function TeacherFamilyCard({
+  group,
+  busyStudentId,
+  onKick,
+  onNote,
+}: {
+  group: { parent: ParentDisplay | null; children: TeacherStudentItem[] };
+  busyStudentId: string | null;
+  onKick: (student: TeacherStudentItem) => void;
+  onNote: (student: TeacherStudentItem) => void;
+}) {
+  const [expanded, setExpanded] = useState(true);
+  const parentName = group.parent?.full_name?.trim() || group.children[0]?.profile?.full_name?.trim() || "No parent profile";
+  const childCount = group.children.length;
+
+  return (
+    <article className="relative rounded-[24px] border border-[#E1E8EC] bg-white shadow-[0_10px_24px_rgba(38,50,58,0.07)]">
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => setExpanded((value) => !value)}
+        onKeyDown={(event) => {
+          if (event.key !== "Enter" && event.key !== " ") {
+            return;
+          }
+          event.preventDefault();
+          setExpanded((value) => !value);
+        }}
+        className="flex items-center gap-3 px-4 py-3"
+        aria-expanded={expanded}
+      >
+        <Avatar src={group.parent?.avatar_url ?? group.children[0]?.profile?.avatar_url ?? null} name={parentName} />
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-base font-semibold leading-5 text-[#26323A]">{parentName}</p>
+          <p className="mt-0.5 truncate text-xs font-medium text-[#7B858C]">
+            {group.parent ? "Parent profile" : "Student profile"} - {childCount} registered {childCount === 1 ? "child" : "children"}
+          </p>
+        </div>
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#EEF3F5] text-[#52616A]" aria-hidden>
+          <ChevronIcon expanded={expanded} />
+        </span>
+      </div>
+      <div className={cn("grid transition-[grid-template-rows] duration-200 ease-out", expanded ? "grid-rows-[1fr]" : "grid-rows-[0fr]")}>
+        <div className="overflow-hidden">
+          <div className="space-y-3 border-t border-[#E6ECEF] bg-[#F8FAFB] px-4 py-4">
+            <dl className="grid grid-cols-2 gap-x-5 gap-y-3 text-sm">
+              <RequestDetail label="Parent Email" value={group.parent?.email} />
+              <RequestDetail label="Parent Phone" value={group.parent?.phone_number} />
+            </dl>
+            <div className="space-y-2">
+              {group.children.map((student) => (
+                <div key={student.enrollment.id} className="relative flex items-center gap-3 rounded-[18px] border border-[#E1E8EC] bg-white px-3 py-3">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[14px] bg-[#EEF6F7] text-[#2F8FB3]" aria-hidden>
+                    {student.profile?.avatar_url ? <Avatar src={student.profile.avatar_url} name={student.profile.full_name ?? "Student"} /> : <DefaultProfileIcon className="h-5 w-5" compact />}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-semibold text-[#26323A]">{student.profile?.full_name ?? "Student"}</p>
+                    <p className="mt-0.5 truncate text-xs text-[#7B858C]">
+                      Age {displayAge(student.profile)} - {formatGender(student.profile?.gender ?? null)}
+                    </p>
+                  </div>
+                  <StudentActionMenu
+                    busy={busyStudentId === student.enrollment.student_profile_id}
+                    onNote={() => onNote(student)}
+                    onKick={() => onKick(student)}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function StudentInboxThreadList({
+  threads,
+  emptyText,
+}: {
+  threads: Array<{ id: string; title: string; subtitle: string; meta: string; unreadCount: number; onClick: () => void }>;
+  emptyText: string;
+}) {
+  if (!threads.length) {
+    return <MiniEmpty text={emptyText} />;
+  }
+
+  return (
+    <section className="overflow-hidden rounded-[24px] bg-white shadow-[0_12px_28px_rgba(38,50,58,0.07)] ring-1 ring-[#E4EAEE]">
+      <div className="divide-y divide-[#EEF2F4]">
+        {threads.map((thread) => {
+          const unread = thread.unreadCount > 0;
+          return (
+            <button key={thread.id} type="button" onClick={thread.onClick} className="flex w-full items-center gap-3 px-4 py-4 text-left transition hover:bg-[#F7FAFB]">
+              <span className={cn("h-2.5 w-2.5 shrink-0 rounded-full", unread ? "bg-[#2F8FB3]" : "bg-transparent")} aria-hidden />
+              <span className="min-w-0 flex-1">
+                <span className={cn("block truncate text-[15px] leading-5", unread ? "font-semibold text-[#26323A]" : "font-medium text-[#52616A]")}>{thread.title}</span>
+                <span className="mt-1 block truncate text-sm text-[#6B747B]">{thread.subtitle}</span>
+              </span>
+              <span className="shrink-0 text-right">
+                <span className="block text-xs text-[#8A949B]">{thread.meta}</span>
+                {unread ? <span className="mt-1 inline-flex rounded-full bg-[#E7F3F8] px-2 py-0.5 text-xs font-semibold text-[#2F8FB3]">{thread.unreadCount}</span> : null}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function StudentInboxThreadView({
+  thread,
+  announcements,
+  notes,
+  onBack,
+}: {
+  thread: StudentInboxThread;
+  announcements: AnnouncementWithContext[];
+  notes: StudentNoteWithContext[];
+  onBack: () => void;
+}) {
+  const threadAnnouncements = thread.kind === "announcements" ? announcements.filter((announcement) => announcement.program_id === thread.programId).slice().reverse() : [];
+  const threadNotes = thread.kind === "notes" ? notes.filter((note) => note.program_id === thread.programId && note.student_profile_id === thread.studentId).slice().reverse() : [];
+  const title = thread.kind === "announcements"
+    ? threadAnnouncements[0]?.program?.title ?? "Announcements"
+    : threadNotes[0]?.program?.title ?? "Notes";
+  const subtitle = thread.kind === "notes" ? `For ${threadNotes[0]?.student?.full_name ?? "student"}` : "Class announcements";
+
+  return (
+    <section className="overflow-hidden rounded-[24px] bg-[#F7FAFB] shadow-[0_12px_28px_rgba(38,50,58,0.07)] ring-1 ring-[#E4EAEE]">
+      <div className="flex items-center gap-3 border-b border-[#E1E8EC] bg-white px-4 py-3">
+        <button type="button" onClick={onBack} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#EEF3F5] text-[#26323A]" aria-label="Back to inbox">
+          <ChevronLeftIcon />
+        </button>
+        <div className="min-w-0">
+          <h2 className="truncate text-base font-semibold text-[#26323A]">{title}</h2>
+          <p className="truncate text-sm text-[#6B747B]">{subtitle}</p>
+        </div>
+      </div>
+      <div className="max-h-[520px] space-y-3 overflow-y-auto p-4">
+        {thread.kind === "announcements" ? (
+          threadAnnouncements.length ? threadAnnouncements.map((announcement) => <StudentAnnouncementCard key={announcement.id} announcement={announcement} />) : <MiniEmpty text="No announcements in this thread." />
+        ) : threadNotes.length ? (
+          threadNotes.map((note) => <StudentNoteBubble key={note.id} note={note} viewer="recipient" />)
+        ) : (
+          <MiniEmpty text="No notes in this thread." />
+        )}
+      </div>
+    </section>
+  );
+}
+
+function ChildNoteRecipientPrompt({
+  studentName,
+  parentName,
+  onClose,
+  onGoToParent,
+}: {
+  studentName: string;
+  parentName: string;
+  onClose: () => void;
+  onGoToParent: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#26323A]/35 px-6 backdrop-blur-sm">
+      <div className="w-full max-w-sm rounded-[28px] bg-white p-5 text-[#26323A] shadow-[0_24px_70px_rgba(38,50,58,0.22)]">
+        <h2 className="text-xl font-semibold">Message parent</h2>
+        <p className="mt-2 text-sm leading-6 text-[#6B747B]">
+          {studentName} is a child profile. Notes for this student should be sent to {parentName || "their parent"}.
+        </p>
+        <div className="mt-5 flex items-center justify-end gap-3">
+          <button type="button" onClick={onClose} className="px-2 py-2 text-sm font-semibold text-[#6B747B]">
+            Cancel
+          </button>
+          <button type="button" onClick={onGoToParent} className="rounded-full bg-[#17624F] px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#0F4537]">
+            Go to parent
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TeacherStudentNotesPage({
+  mosque,
+  program,
+  target,
+  currentUserId,
+  onBack,
+}: {
+  mosque: Mosque | null;
+  program: Program;
+  target: { enrollment: Enrollment; profile: StudentDisplay | null; parent?: ParentDisplay | null };
+  currentUserId: string | null;
+  onBack: () => void;
+}) {
+  const [notes, setNotes] = useState<StudentNoteWithContext[]>([]);
+  const [message, setMessage] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const studentName = target.profile?.full_name?.trim() || "Student";
+  const recipient = target.parent ?? target.profile;
+  const recipientName = recipient?.full_name?.trim() || (target.parent ? "Parent" : studentName);
+  const recipientKind = target.parent ? "Parent" : "Student";
+  const recipientAvatar = target.parent?.avatar_url ?? target.profile?.avatar_url ?? null;
+
+  async function loadNotes() {
+    setLoading(true);
+    setError(null);
+    const supabase = createSupabaseBrowserClient();
+    const { data: noteRows, error: noteError } = await supabase
+      .from("program_student_notes")
+      .select("*")
+      .eq("program_id", program.id)
+      .eq("student_profile_id", target.enrollment.student_profile_id)
+      .order("created_at", { ascending: true });
+
+    if (noteError) {
+      setError(noteError.message);
+      setLoading(false);
+      return;
+    }
+
+    const authorIds = Array.from(new Set((noteRows ?? []).map((note) => note.author_profile_id)));
+    const { data: authors } = authorIds.length ? await supabase.from("profiles").select("*").in("id", authorIds) : { data: [] as Profile[] };
+    setNotes(
+      (noteRows ?? []).map((note) => ({
+        ...note,
+        program,
+        student: target.profile,
+        recipient: recipient as Profile | null,
+        author: (authors ?? []).find((author) => author.id === note.author_profile_id) ?? null,
+      })),
+    );
+    setLoading(false);
+  }
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      void loadNotes();
+    }, 0);
+    return () => window.clearTimeout(timeout);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [program.id, target.enrollment.student_profile_id]);
+
+  async function sendNote() {
+    if (!mosque || !currentUserId || !recipient?.id || !message.trim()) {
+      return;
+    }
+
+    setBusy(true);
+    setError(null);
+    const supabase = createSupabaseBrowserClient();
+    const { error: insertError } = await supabase.from("program_student_notes").insert({
+      mosque_id: mosque.id,
+      program_id: program.id,
+      student_profile_id: target.enrollment.student_profile_id,
+      recipient_profile_id: recipient.id,
+      parent_profile_id: target.parent?.id ?? null,
+      author_profile_id: currentUserId,
+      category: "note",
+      message: message.trim(),
+    });
+    setBusy(false);
+    if (insertError) {
+      setError(insertError.message);
+      return;
+    }
+    setMessage("");
+    window.dispatchEvent(new Event("tareeqah:notifications-changed"));
+    await loadNotes();
+  }
+
+  return (
+    <div className="bg-[var(--workspace)] px-4 pb-28 pt-4 text-[#26323A]">
+      <div className="space-y-4">
+        <button type="button" onClick={onBack} className="flex h-10 w-10 items-center justify-center rounded-full bg-white text-[#26323A] shadow-[0_8px_20px_rgba(38,50,58,0.08)]" aria-label="Back to students">
+          <ChevronLeftIcon />
+        </button>
+
+        <section className="rounded-[28px] bg-white p-4 shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
+          <div className="flex items-start gap-3">
+            <Avatar src={recipientAvatar} name={recipientName} />
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded-full bg-[#EEF6F7] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#2F8FB3]">{recipientKind}</span>
+                {target.parent ? <span className="truncate text-xs font-semibold text-[#6B747B]">For {studentName}</span> : null}
+              </div>
+              <h1 className="mt-1 truncate text-xl font-semibold leading-6">{recipientName}</h1>
+              <p className="mt-1 truncate text-sm font-semibold text-[#17624F]">{program.title}</p>
+              <p className="mt-1 truncate text-xs text-[#7B858C]">
+                {[target.profile?.email, target.profile?.phone_number].filter(Boolean).join(" - ") || "No student contact on file"}
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <section className="rounded-[28px] bg-white shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
+          <div className="border-b border-[#E6ECEF] px-4 py-3">
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-[#6B747B]">Notes</h2>
+          </div>
+          <div className="min-h-[260px] space-y-3 px-4 py-4">
+            {error ? <div className="rounded-xl bg-[#FDEDEA] px-3 py-2 text-sm text-[#A4352A]">{error}</div> : null}
+            {loading ? (
+              <InboxLoadingPanel label="Loading student notes" />
+            ) : notes.length ? (
+              notes.map((note) => <StudentNoteBubble key={note.id} note={note} viewer="teacher" />)
+            ) : (
+              <MiniEmpty text="No notes have been sent for this student in this class." />
+            )}
+          </div>
+        </section>
+
+        <section className="rounded-[28px] bg-white p-3 shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
+          <label className="block">
+            <span className="mb-2 block text-xs font-semibold uppercase tracking-wide text-[#6B747B]">Add note</span>
+            <textarea
+              value={message}
+              onChange={(event) => setMessage(event.target.value)}
+              placeholder="Write a note..."
+              rows={5}
+              className="w-full resize-none rounded-[20px] border border-[#D6DCE0] bg-[#F8FAFB] px-4 py-3 text-sm leading-6 text-[#26323A] outline-none transition focus:border-[#2F8FB3] focus:bg-white"
+            />
+          </label>
+          <button type="button" disabled={busy || !message.trim()} onClick={sendNote} className="mt-3 min-h-12 w-full rounded-full bg-[#17624F] px-4 text-sm font-semibold text-white shadow-[0_10px_24px_rgba(23,98,79,0.18)] disabled:opacity-50">
+            {busy ? "Sending..." : "Send note"}
+          </button>
+        </section>
+      </div>
+    </div>
   );
 }
 
@@ -5260,6 +6279,24 @@ function ChevronIcon({ expanded }: { expanded: boolean }) {
   return (
     <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       {expanded ? <path d="m7 14 5-5 5 5" /> : <path d="m7 10 5 5 5-5" />}
+    </svg>
+  );
+}
+
+function MoreVerticalIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-5 w-5" fill="currentColor" aria-hidden>
+      <circle cx="12" cy="5" r="1.6" />
+      <circle cx="12" cy="12" r="1.6" />
+      <circle cx="12" cy="19" r="1.6" />
+    </svg>
+  );
+}
+
+function ChevronLeftIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="m15 18-6-6 6-6" />
     </svg>
   );
 }
@@ -5479,9 +6516,9 @@ function ChildEnrollmentSelector({
         {childrenProfiles.map((child) => {
           const status = statuses[child.id];
           const eligibility = isProfileEligibleForProgram(child, program);
-          const locked = status?.enrolled || status?.requestStatus === "pending" || !eligibility.eligible;
+          const locked = status?.enrolled || status?.requestStatus === "pending" || status?.requestStatus === "waitlisted" || !eligibility.eligible;
           const checked = selectedChildIds.includes(child.id);
-          const detail = status?.enrolled ? "Already enrolled" : status?.requestStatus === "pending" ? "Pending review" : eligibility.eligible ? displayAge(child) : eligibility.reason;
+          const detail = status?.enrolled ? "Already enrolled" : status?.requestStatus === "pending" ? "Pending review" : status?.requestStatus === "waitlisted" ? "Waitlisted" : eligibility.eligible ? displayAge(child) : eligibility.reason;
           return (
             <button
               key={child.id}
