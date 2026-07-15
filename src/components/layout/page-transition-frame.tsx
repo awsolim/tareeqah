@@ -14,6 +14,7 @@ type NavPreview = {
 export function PageTransitionFrame({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [preview, setPreview] = useState<NavPreview | null>(null);
+  const activePreview = preview && preview.fromPath === pathname ? preview : null;
 
   useEffect(() => {
     function handlePreview(event: Event) {
@@ -32,9 +33,9 @@ export function PageTransitionFrame({ children }: { children: React.ReactNode })
   return (
     <main
       key={pathname}
-      className="pb-20 md:pb-0"
+      className={activePreview?.kind === "subpage" ? "pb-0 md:pb-0" : "pb-20 md:pb-0"}
     >
-      {preview && preview.fromPath === pathname ? <InstantNavPreview preview={preview} /> : children}
+      {activePreview ? <InstantNavPreview preview={activePreview} /> : children}
     </main>
   );
 }
@@ -46,18 +47,7 @@ function InstantNavPreview({ preview }: { preview: NavPreview }) {
   if (preview.label === "Me") {
     return (
       <div className={slideClass}>
-        <div className="min-h-[calc(100vh-140px)] bg-[var(--workspace)] px-5 py-8">
-          <div className="mx-auto max-w-sm space-y-4">
-            <div className="mx-auto h-28 w-28 animate-pulse rounded-full bg-[var(--placeholder)]" />
-            <div className="mx-auto h-6 w-40 animate-pulse rounded-full bg-[var(--placeholder)]" />
-            <div className="mx-auto h-4 w-28 animate-pulse rounded-full bg-[var(--placeholder)]" />
-            <div className="mt-8 space-y-3">
-              <div className="h-16 animate-pulse rounded-2xl bg-[#fffdf8]" />
-              <div className="h-16 animate-pulse rounded-2xl bg-[#fffdf8]" />
-              <div className="h-16 animate-pulse rounded-2xl bg-[#fffdf8]" />
-            </div>
-        </div>
-        </div>
+        <GenericPreviewLoading />
       </div>
     );
   }
@@ -65,22 +55,22 @@ function InstantNavPreview({ preview }: { preview: NavPreview }) {
   return (
     <div className={slideClass}>
       <section className="bg-[radial-gradient(circle_at_top_left,#E5FFF0_0,#D6F7E8_30%,#7ECFC2_62%,#2E9B82_100%)] text-[#26323A]">
-        <div className={preview.kind === "subpage" ? "app-container flex min-h-60 flex-col items-start justify-start px-7 pb-32 pt-32 text-left md:min-h-64 md:pt-32" : "app-container flex min-h-60 flex-col items-center justify-start pb-32 pt-32 text-center md:min-h-64"}>
+        <div className={preview.kind === "subpage" ? "app-container relative flex min-h-60 flex-col items-center justify-start px-14 pb-32 pt-32 text-center md:min-h-64 md:pt-32" : "app-container flex min-h-60 flex-col items-center justify-start pb-32 pt-0 text-center md:min-h-64 md:pt-0"}>
           {preview.kind === "subpage" ? (
-            <div className="flex w-full translate-y-12 items-center gap-3">
-              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white text-[#111827] shadow-[0_8px_18px_rgba(38,50,58,0.14)] ring-1 ring-white/80">
+            <div className="flex w-full items-center justify-center gap-3" style={{ transform: "translateY(23px)" }}>
+              <span className="absolute left-7 flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white text-[#111827] shadow-[0_8px_18px_rgba(38,50,58,0.14)] ring-1 ring-white/80">
                 <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" aria-hidden>
                   <path d="M15 5l-7 7 7 7" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
               </span>
-              <h1 className="text-[2.15rem] font-semibold leading-none tracking-normal md:text-5xl">{title}</h1>
+              <h1 className="text-2xl font-semibold leading-none tracking-normal md:text-3xl">{title}</h1>
             </div>
           ) : (
-            <h1 className="translate-y-12 text-[2.35rem] font-medium leading-none tracking-normal md:text-5xl">{title}</h1>
+            <h1 className="text-2xl font-medium leading-none tracking-normal md:text-3xl" style={{ transform: "translateY(28px)" }}>{title}</h1>
           )}
         </div>
       </section>
-      <div className="relative z-10 min-h-[calc(100vh-260px)]" style={{ marginTop: "-132px" }}>
+      <div className="relative z-10 min-h-[calc(100vh-260px)]" style={{ marginTop: "-172px" }}>
         <div className="min-h-[calc(100vh-260px)] overflow-hidden rounded-t-[34px] bg-[var(--workspace)]">
           <InstantPreviewContent preview={preview} />
         </div>
@@ -90,121 +80,17 @@ function InstantNavPreview({ preview }: { preview: NavPreview }) {
 }
 
 function InstantPreviewContent({ preview }: { preview: NavPreview }) {
-  if (preview.kind === "subpage") {
-    return <PreviewDetailSkeleton />;
-  }
-
-  if (preview.kind === "classes" || preview.label === "Classes" || preview.label === "Programs") {
-    const isStudentClasses = preview.href.includes("/portal/classes");
-    return (
-      <>
-        {isStudentClasses ? (
-          <div className="grid grid-cols-2 border-b border-[#D6DCE0]">
-            <div className="flex min-h-12 items-center justify-center border-b-2 border-[#2F8FB3] text-sm font-medium text-[#2F8FB3]">Enrolled</div>
-            <div className="flex min-h-12 items-center justify-center text-sm font-medium text-[#6B747B]">Browse</div>
-          </div>
-        ) : null}
-        <PreviewClassCards count={isStudentClasses ? 1 : 2} />
-      </>
-    );
-  }
-
-  if (preview.label === "Inbox") {
-    return (
-      <>
-        <div className="border-b border-[#E8DDCB] bg-[var(--workspace)] p-3">
-          <div className="grid grid-cols-2 rounded-full bg-[var(--placeholder-soft)] p-1">
-            <div className="flex min-h-10 items-center justify-center rounded-full bg-[#fffdf8] px-3 text-sm font-semibold text-[#17624F] shadow-sm">Announcements</div>
-            <div className="flex min-h-10 items-center justify-center px-3 text-sm font-semibold text-[#6B747B]">Requests</div>
-          </div>
-        </div>
-        <div className="space-y-4 bg-[var(--workspace)] p-4">
-          <div className="flex min-h-64 items-center justify-center">
-            <span className="h-11 w-11 animate-spin rounded-full border-4 border-[var(--placeholder-strong)] border-t-[#2F8FB3]" />
-          </div>
-        </div>
-      </>
-    );
-  }
-
-  return (
-    <div className="space-y-5 bg-[var(--workspace)] p-4">
-      <div className="rounded-[30px] bg-[#fffdf8] p-5 shadow-[0_18px_45px_rgba(38,50,58,0.08)]">
-        <div className="flex items-center gap-4">
-          <div className="h-14 w-14 shrink-0 animate-pulse rounded-2xl bg-[var(--placeholder)]" />
-          <div className="min-w-0 flex-1 space-y-2">
-            <div className="h-5 w-36 animate-pulse rounded-full bg-[var(--placeholder)]" />
-            <div className="h-4 w-44 animate-pulse rounded-full bg-[var(--placeholder-soft)]" />
-          </div>
-          <div className="h-10 w-20 animate-pulse rounded-full bg-[var(--placeholder-soft)]" />
-        </div>
-      </div>
-      <div className="px-1 pt-1">
-        <h2 className="text-lg font-semibold text-[#26323A]">Upcoming</h2>
-      </div>
-      <div className="space-y-5">
-        <div className="grid grid-cols-7 gap-1 px-1">
-          {Array.from({ length: 7 }).map((_, index) => (
-            <div key={index} className="flex flex-col items-center gap-1.5">
-              <div className="h-14 w-full max-w-12 animate-pulse rounded-2xl bg-[var(--placeholder)]" />
-              <div className="h-2 w-3 animate-pulse rounded-full bg-[var(--placeholder-strong)]" />
-            </div>
-          ))}
-        </div>
-        <div className="rounded-[24px] bg-[#fffdf8] px-4 py-3 shadow-[0_8px_24px_rgba(38,50,58,0.06)]">
-          <div className="flex items-center gap-3">
-            <div className="h-14 w-14 shrink-0 animate-pulse rounded-2xl bg-[var(--placeholder)]" />
-            <div className="min-w-0 flex-1 space-y-2">
-              <div className="h-5 w-44 animate-pulse rounded-full bg-[var(--placeholder)]" />
-              <div className="h-4 w-32 animate-pulse rounded-full bg-[var(--placeholder-soft)]" />
-            </div>
-            <div className="h-2.5 w-2.5 animate-pulse rounded-full bg-[#A8C9D4]" />
-          </div>
-        </div>
-      </div>
-    </div>
-  );
+  void preview;
+  return <GenericPreviewLoading />;
 }
 
-function PreviewDetailSkeleton() {
+function GenericPreviewLoading() {
   return (
-    <div className="space-y-5 bg-[var(--workspace)] p-4">
-      <div className="overflow-hidden rounded-[24px] bg-[#fffdf8] shadow-[0_12px_28px_rgba(38,50,58,0.08)]">
-        <div className="h-40 animate-pulse bg-[var(--placeholder)]" />
-        <div className="space-y-3 p-4">
-          <div className="h-7 w-4/5 animate-pulse rounded-full bg-[var(--placeholder)]" />
-          <div className="h-4 w-1/2 animate-pulse rounded-full bg-[var(--placeholder-soft)]" />
-          <div className="h-4 w-3/4 animate-pulse rounded-full bg-[var(--placeholder-soft)]" />
-        </div>
+    <div className="flex min-h-[calc(100vh-260px)] items-center justify-center bg-[var(--workspace)] px-6 py-10" aria-label="Loading">
+      <div className="flex flex-col items-center gap-3 text-center">
+        <span className="h-11 w-11 animate-spin rounded-full border-4 border-[#DDEFF4] border-t-[#2F8FB3]" aria-hidden />
+        <span className="text-sm font-semibold text-[#52616A]">Loading</span>
       </div>
-      <div className="rounded-[24px] bg-[#fffdf8] p-5 shadow-[0_12px_28px_rgba(38,50,58,0.06)]">
-        <div className="h-6 w-44 animate-pulse rounded-full bg-[var(--placeholder)]" />
-        <div className="mt-5 grid gap-3">
-          <div className="h-14 animate-pulse rounded-2xl bg-[var(--placeholder-soft)]" />
-          <div className="h-14 animate-pulse rounded-2xl bg-[var(--placeholder-soft)]" />
-          <div className="h-14 animate-pulse rounded-2xl bg-[var(--placeholder-soft)]" />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function PreviewClassCards({ count }: { count: number }) {
-  return (
-    <div className="grid gap-4 bg-[var(--workspace)] p-4 md:grid-cols-2">
-      {Array.from({ length: count }).map((_, index) => (
-        <div key={index} className="overflow-hidden rounded-[22px] border border-[#E8DDCB] bg-[#fffdf8] shadow-[0_12px_28px_rgba(38,50,58,0.08)]">
-          <div className="h-36 animate-pulse bg-[var(--placeholder)]" />
-          <div className="space-y-3 p-4">
-            <div className="h-6 w-3/4 animate-pulse rounded bg-[var(--placeholder)]" />
-            <div className="h-4 w-1/2 animate-pulse rounded bg-[var(--placeholder-soft)]" />
-            <div className="flex gap-3 pt-2">
-              <div className="h-9 flex-1 animate-pulse rounded bg-[var(--placeholder-soft)]" />
-              <div className="h-9 flex-1 animate-pulse rounded bg-[var(--placeholder-soft)]" />
-            </div>
-          </div>
-        </div>
-      ))}
     </div>
   );
 }

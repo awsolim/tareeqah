@@ -141,7 +141,10 @@ export async function POST(request: Request) {
       await replaceEnrollmentTracks(supabase, enrollment.id, trackIds);
     }
 
-    await supabase.from("enrollment_requests").update({ student_dismissed_at: now }).eq("id", enrollmentRequestId);
+    await supabase
+      .from("enrollment_requests")
+      .update({ admission_completed_at: now, student_dismissed_at: now, teacher_dismissed_at: null })
+      .eq("id", enrollmentRequestId);
 
     return Response.json({ ok: true });
   } catch (error) {

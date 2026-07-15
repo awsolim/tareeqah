@@ -24,11 +24,13 @@ function BottomNav({ items, inboxBadgeCount = 0 }: { items: NavItem[]; inboxBadg
   const pathname = usePathname();
   const router = useRouter();
   const [pendingHref, setPendingHref] = useState<string | null>(null);
+  const [previewNavVisible, setPreviewNavVisible] = useState<boolean | null>(null);
   const itemByLabel = new Map(items.map((item) => [item.label, item]));
-  const visibleItems = ["Home", "Classes", "Inbox", "Members", "Me"]
+  const visibleItems = ["Home", "Classes", "Inbox", "Members", "Masjid", "Me"]
     .map((label) => itemByLabel.get(label))
     .filter((item): item is NavItem => Boolean(item));
   const currentIndex = visibleItems.findIndex((item) => isNavItemActive(pathname, item));
+  const shouldShow = previewNavVisible ?? isMainTabRoute(pendingHref ?? pathname, visibleItems);
 
   useEffect(() => {
     for (const item of items) {
@@ -38,6 +40,20 @@ function BottomNav({ items, inboxBadgeCount = 0 }: { items: NavItem[]; inboxBadg
 
   useEffect(() => {
     setPendingHref(null);
+    setPreviewNavVisible(null);
+  }, [pathname]);
+
+  useEffect(() => {
+    function handlePreview(event: Event) {
+      const detail = (event as CustomEvent<{ fromPath?: string; kind?: string }>).detail;
+      if (!detail || detail.fromPath !== pathname) {
+        return;
+      }
+      setPreviewNavVisible(detail.kind !== "subpage");
+    }
+
+    window.addEventListener("tareeqah:nav-preview", handlePreview);
+    return () => window.removeEventListener("tareeqah:nav-preview", handlePreview);
   }, [pathname]);
 
   function transitionDirection(targetIndex: number) {
@@ -69,6 +85,10 @@ function BottomNav({ items, inboxBadgeCount = 0 }: { items: NavItem[]; inboxBadg
       setPendingHref(href);
       router.push(href);
     }
+  }
+
+  if (!shouldShow) {
+    return null;
   }
 
   return (
@@ -197,6 +217,16 @@ function NavIcon({ label, active = false }: { label: string; active?: boolean })
     );
   }
 
+  if (active && label === "Masjid") {
+    return (
+      <svg viewBox="0 0 24 24" className={className} fill="currentColor" aria-hidden>
+        <path d="M5.4 10.2 12 4.4l6.6 5.8v8.15a2.15 2.15 0 0 1-2.15 2.15H7.55a2.15 2.15 0 0 1-2.15-2.15V10.2Z" />
+        <path d="M9.1 9.15a2.9 2.9 0 0 1 5.8 0v2.2H9.1v-2.2Z" fill="white" opacity=".92" />
+        <path d="M8.15 14.25h7.7v6.25h-7.7v-6.25Z" fill="white" opacity=".86" />
+      </svg>
+    );
+  }
+
   if (active && label === "Me") {
     return (
       <svg viewBox="0 0 24 24" className={className} fill="currentColor" aria-hidden>
@@ -241,6 +271,17 @@ function NavIcon({ label, active = false }: { label: string; active?: boolean })
         <path d="M3.8 19.3c.75-3.35 2.48-5.02 5.2-5.02s4.45 1.67 5.2 5.02" />
         <circle cx="16.6" cy="8.1" r="2.45" />
         <path d="M15.45 14.2c2.1.3 3.5 1.7 4.2 4.2" />
+      </svg>
+    );
+  }
+
+  if (label === "Masjid") {
+    return (
+      <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+        <path d="M5.25 10.4 12 4.45l6.75 5.95v7.75a2.1 2.1 0 0 1-2.1 2.1H7.35a2.1 2.1 0 0 1-2.1-2.1V10.4Z" />
+        <path d="M9.1 11.2V9.05a2.9 2.9 0 0 1 5.8 0v2.15" />
+        <path d="M8.35 14.2h7.3" />
+        <path d="M8.35 17.15h7.3" />
       </svg>
     );
   }
@@ -413,7 +454,7 @@ export function AppTopBar({
 }
 
 function isMainTabRoute(pathname: string, items: NavItem[]) {
-  const mainLabels = new Set(["Home", "Classes", "Inbox", "Members", "Me"]);
+  const mainLabels = new Set(["Home", "Classes", "Inbox", "Members", "Masjid", "Me"]);
   return items.some((item) => mainLabels.has(item.label) && pathname === item.href);
 }
 

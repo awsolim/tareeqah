@@ -21,6 +21,7 @@ type Program = Database["public"]["Tables"]["programs"]["Row"];
 type Profile = Database["public"]["Tables"]["profiles"]["Row"];
 type ProgramDetails = Database["public"]["Tables"]["program_details"]["Row"];
 type ProgramOutcome = Database["public"]["Tables"]["program_outcomes"]["Row"];
+type ProgramFaq = Database["public"]["Tables"]["program_faqs"]["Row"];
 type ProgramContentSection = Database["public"]["Tables"]["program_content_sections"]["Row"];
 type ProgramMedia = Database["public"]["Tables"]["program_media"]["Row"];
 type ProgramTrack = Database["public"]["Tables"]["program_tracks"]["Row"];
@@ -30,6 +31,9 @@ type EnrollmentRequest = Database["public"]["Tables"]["enrollment_requests"]["Ro
 type WithdrawalRequest = Database["public"]["Tables"]["withdrawal_requests"]["Row"];
 type MosqueMembership = Database["public"]["Tables"]["mosque_memberships"]["Row"];
 type ProgramTeacher = Database["public"]["Tables"]["program_teachers"]["Row"];
+type ProgramInstructorEvent = Database["public"]["Tables"]["program_instructor_events"]["Row"];
+type ProgramSubscription = Database["public"]["Tables"]["program_subscriptions"]["Row"];
+type ProgramFinanceAuditEvent = Database["public"]["Tables"]["program_finance_audit_events"]["Row"];
 type AnnouncementReceipt = Database["public"]["Tables"]["program_announcement_receipts"]["Row"];
 type ProgramSessionCancellation = Database["public"]["Tables"]["program_session_cancellations"]["Row"];
 type TeacherDisplay = Pick<Profile, "id" | "full_name" | "avatar_url" | "teacher_credentials" | "teacher_whatsapp_number">;
@@ -42,12 +46,33 @@ type ProgramWithTeacher = Program & {
 
 type TeacherProgramRole = "director" | "instructor";
 type ProgramEditorMediaRow = { id: string; url: string; title: string; mediaType: string; file?: File | null; previewUrl?: string };
+type ProgramEditorFaqRow = { id: string; question: string; answer: string };
 
 type AnnouncementWithContext = Database["public"]["Tables"]["program_announcements"]["Row"] & {
   program?: Program | null;
   author?: Profile | null;
   receipt?: AnnouncementReceipt | null;
 };
+
+const ANNOUNCEMENT_THREAD_PAGE_SIZE = 25;
+const NOTE_THREAD_PAGE_SIZE = 25;
+const defaultProgramFaqRows: ProgramEditorFaqRow[] = [
+  {
+    id: "faq-eligibility",
+    question: "Who can join this class?",
+    answer: "Students who match the listed age and audience requirements can apply. The teaching team reviews each request before enrollment is confirmed.",
+  },
+  {
+    id: "faq-materials",
+    question: "What should students bring?",
+    answer: "Bring regular learning materials, a notebook, and anything the instructor requests after enrollment.",
+  },
+  {
+    id: "faq-schedule",
+    question: "How do schedule choices work?",
+    answer: "If this class has multiple schedules, choose the option that works best when applying. Enrolled families can manage eligible changes from the class page.",
+  },
+];
 
 type RequestWithContext = EnrollmentRequest & {
   program?: Program | null;
@@ -60,7 +85,16 @@ type WithdrawalRequestWithContext = WithdrawalRequest & {
   parent?: ParentDisplay | null;
   subscription?: ProgramSubscription | null;
 };
-type ProgramSubscription = Database["public"]["Tables"]["program_subscriptions"]["Row"];
+type InstructorLifecycleNotification = {
+  id: string;
+  program_id: string;
+  assignment_id: string | null;
+  teacher_profile_id: string | null;
+  event_type: "joined" | "resigned";
+  created_at: string | null;
+  program?: Program | null;
+  instructor?: Profile | null;
+};
 
 type ProgramScheduleRow = {
   day: (typeof scheduleDayOptions)[number];
@@ -116,6 +150,7 @@ const fallbackDevSwitchAccounts: DevSwitchAccount[] = [
 const devSwitchAccountsStorageKey = "tareeqah:dev-switch-accounts";
 const seenStudentRequestsStorageKey = "tareeqah:seen-student-request-notifications";
 const seenTeacherRequestsStorageKey = "tareeqah:seen-teacher-request-notifications";
+const dismissedTeacherInstructorUpdatesStorageKey = "tareeqah:dismissed-teacher-instructor-updates";
 const editorToastStorageKey = "tareeqah:editor-toast";
 
 function getAnnouncementTargetTrackIds(announcement: Pick<AnnouncementWithContext, "target_program_track_ids">) {
@@ -214,6 +249,14 @@ function studentRequestNotificationKey(request: Pick<EnrollmentRequest, "id" | "
 
 function studentWithdrawalNotificationKey(request: Pick<WithdrawalRequest, "id" | "status" | "reviewed_at" | "requested_at">) {
   return ["withdrawal", request.id, request.status, request.reviewed_at ?? request.requested_at ?? ""].join(":");
+}
+
+function teacherRequestNotificationKey(request: Pick<EnrollmentRequest, "id" | "requested_at" | "admission_completed_at">) {
+  return request.admission_completed_at ? ["admission-complete", request.id, request.admission_completed_at].join(":") : ["application", request.id, request.requested_at ?? ""].join(":");
+}
+
+function teacherInstructorNotificationKey(notification: Pick<InstructorLifecycleNotification, "id" | "event_type" | "teacher_profile_id">) {
+  return ["instructor", notification.event_type, notification.id, notification.teacher_profile_id ?? ""].join(":");
 }
 
 async function getCurrentAccessToken() {
@@ -537,6 +580,7 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
   const [details, setDetails] = useState<ProgramDetails | null>(null);
   const [outcomes, setOutcomes] = useState<ProgramOutcome[]>([]);
   const [contentSections, setContentSections] = useState<ProgramContentSection[]>([]);
+  const [faqs, setFaqs] = useState<ProgramFaq[]>([]);
   const [mediaItems, setMediaItems] = useState<ProgramMedia[]>([]);
   const [tracks, setTracks] = useState<ProgramTrack[]>([]);
   const [selectedTrackIds, setSelectedTrackIds] = useState<string[]>([]);
@@ -553,6 +597,7 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
   const [isStaffForProgram, setIsStaffForProgram] = useState(false);
   const [requestMessage, setRequestMessage] = useState<string | null>(null);
   const [requestBusy, setRequestBusy] = useState(false);
+  const [toast, setToast] = useState<EditorToastState | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -612,10 +657,11 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
       }
 
       if (programData) {
-        const [detailsResult, outcomesResult, contentResult, mediaResult, tracksResult] = await Promise.all([
+        const [detailsResult, outcomesResult, contentResult, faqResult, mediaResult, tracksResult] = await Promise.all([
           supabase.from("program_details").select("*").eq("program_id", programData.id).maybeSingle(),
           supabase.from("program_outcomes").select("*").eq("program_id", programData.id).order("sort_order", { ascending: true }),
           supabase.from("program_content_sections").select("*").eq("program_id", programData.id).order("sort_order", { ascending: true }),
+          supabase.from("program_faqs").select("*").eq("program_id", programData.id).order("sort_order", { ascending: true }),
           supabase.from("program_media").select("*").eq("program_id", programData.id).order("sort_order", { ascending: true }),
           supabase.from("program_tracks").select("*").eq("program_id", programData.id).eq("is_active", true).order("sort_order", { ascending: true }),
         ]);
@@ -623,6 +669,7 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
         setDetails(detailsResult.data ?? null);
         setOutcomes(outcomesResult.data ?? []);
         setContentSections(contentResult.data ?? []);
+        setFaqs(faqResult.data ?? []);
         setMediaItems(mediaResult.data ?? []);
         const activeTracks = tracksResult.data ?? [];
         setTracks(activeTracks);
@@ -758,6 +805,8 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
           [currentUserId]: { enrolled: isEnrolled, requestStatus },
         }
       : childStatuses;
+  const viewerHasActiveEnrollment =
+    isEnrolled || (accountType === "parent" && Object.values(childStatuses).some((status) => status.enrolled));
 
   async function requestEnrollment() {
     if (!currentUserId || !mosque || !program) {
@@ -807,6 +856,10 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
             reviewed_by: null,
             reviewed_at: null,
             review_note: null,
+            decision_note: null,
+            approved_price_monthly_cents: null,
+            payment_bypassed: false,
+            admission_completed_at: null,
             student_dismissed_at: null,
           })),
           { onConflict: "program_id,student_profile_id" },
@@ -844,7 +897,7 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
       }
       setSelectedChildIds([]);
       setChildSelectorOpen(false);
-      setRequestMessage(`${requestableStudentIds.length} enrollment request${requestableStudentIds.length === 1 ? "" : "s"} sent for review.`);
+      setToast({ tone: "success", message: `${requestableStudentIds.length} enrollment request${requestableStudentIds.length === 1 ? "" : "s"} sent. Check inbox for status.` });
       queueEnrollmentRequestSubmittedEmails((parentRequestRows ?? []).map((row) => row.id));
       setRequestBusy(false);
       return;
@@ -870,6 +923,10 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
           reviewed_by: null,
           reviewed_at: null,
           review_note: null,
+          decision_note: null,
+          approved_price_monthly_cents: null,
+          payment_bypassed: false,
+          admission_completed_at: null,
           student_dismissed_at: null,
         },
         { onConflict: "program_id,student_profile_id" },
@@ -889,13 +946,14 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
     }
 
     setRequestStatus("pending");
-    setRequestMessage("Your request has been sent and will be reviewed by the teacher.");
+    setToast({ tone: "success", message: "Enrollment request sent. Check inbox for status." });
     queueEnrollmentRequestSubmittedEmails((requestRows ?? []).map((row) => row.id));
     setRequestBusy(false);
   }
 
   return (
     <div className="bg-[var(--workspace)] p-4">
+      <EditorToast toast={toast} onClose={() => setToast(null)} />
       <div className="space-y-5">
         <section className="overflow-hidden rounded-[28px] bg-white shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
           <ProgramHero program={program} />
@@ -983,14 +1041,6 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
                   </div>
                 ) : accountType === "parent" ? (
                   <>
-                    <button
-                      type="button"
-                      onClick={() => setChildSelectorOpen((value) => !value)}
-                      disabled={parentApplicantProfiles.length === 0}
-                      className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#248B72] px-4 text-sm font-semibold !text-white shadow-[0_10px_22px_rgba(36,139,114,0.24)] transition-colors hover:bg-[#17624F] disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      Request Enrollment
-                    </button>
                     {childSelectorOpen ? (
                       <ChildEnrollmentSelector
                         program={program}
@@ -1006,9 +1056,21 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
                         onSubmit={requestEnrollment}
                         busy={requestBusy}
                       />
-                    ) : parentApplicantProfiles.length === 0 ? (
-                      <p className="mt-3 rounded-xl bg-[#FFF7E6] p-3 text-sm leading-6 text-[#8A5A00]">Complete your profile before requesting enrollment.</p>
-                    ) : null}
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => setChildSelectorOpen(true)}
+                          disabled={parentApplicantProfiles.length === 0}
+                          className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#248B72] px-4 text-sm font-semibold !text-white shadow-[0_10px_22px_rgba(36,139,114,0.24)] transition-colors hover:bg-[#17624F] disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          Request Enrollment
+                        </button>
+                        {parentApplicantProfiles.length === 0 ? (
+                          <p className="mt-3 rounded-xl bg-[#FFF7E6] p-3 text-sm leading-6 text-[#8A5A00]">Complete your profile before requesting enrollment.</p>
+                        ) : null}
+                      </>
+                    )}
                   </>
                 ) : isEnrolled ? (
                   <div className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#E8F7F2] px-4 text-sm font-semibold text-[#17624F] ring-1 ring-[#B9E4D7]">
@@ -1042,13 +1104,8 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
                 </Link>
               )}
               {requestMessage ? (
-                <div className="mt-3 rounded-xl border border-[#B9E4D7] bg-[#F0FBF7] p-3 text-sm leading-6 text-[#17624F]">
+                <div className="mt-3 rounded-xl border border-[#F3D28A] bg-[#FFF7E6] p-3 text-sm leading-6 text-[#8A5A00]">
                   <p>{requestMessage}</p>
-                  {requestStatus === "pending" || requestStatus === "waitlisted" ? (
-                    <Link href={`/m/${slug}/portal/announcements`} className="mt-1 inline-flex font-semibold text-[#17624F] underline">
-                      Check inbox
-                    </Link>
-                  ) : null}
                 </div>
               ) : null}
 
@@ -1056,7 +1113,7 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
                 <SidebarFact label="Age" value={age} />
                 <SidebarFact label="Audience" value={gender} />
                 <SidebarFact label="Schedule" value={selectedTrackSchedule.full} />
-                {section === "portal" ? (
+                {section === "portal" && viewerHasActiveEnrollment ? (
                   <div className="py-3 text-xs leading-5 text-[#6B747B]">
                     Go to Schedule Options from your class card to view different schedule options.
                   </div>
@@ -1065,37 +1122,39 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
               </dl>
             </aside>
 
-            <DetailSection title="Program Director">
-              <div className="flex items-center gap-4">
+            <section className="overflow-hidden rounded-[24px] bg-[#17624F] p-4 text-white shadow-[0_16px_34px_rgba(23,98,79,0.20)]">
+              <p className="text-center text-[11px] font-semibold uppercase tracking-[0.18em] text-white/70">Program Director</p>
+              <div className="mt-4 flex items-center gap-4">
                 <Avatar src={program.teacher?.avatar_url ?? null} name={teacherName} />
-                <div>
-                  <h2 className="text-base font-semibold text-[#26323A]">{teacherName}</h2>
-                  
+                <div className="min-w-0">
+                  <h2 className="truncate text-lg font-semibold text-white">{teacherName}</h2>
                 </div>
               </div>
-              {teacherCredentials ? <p className="mt-4 text-sm leading-7 text-[#52616A]">{teacherCredentials}</p> : null}
+              {teacherCredentials ? <p className="mt-4 text-sm leading-7 text-white/82">{teacherCredentials}</p> : null}
               <div className="mt-5 flex justify-center">
                 {teacherWhatsAppHref ? (
                   <a
                     href={teacherWhatsAppHref}
                     target="_blank"
                     rel="noreferrer"
-                    className="inline-flex min-h-11 min-w-36 items-center justify-center gap-2 rounded-lg bg-[#17624F] px-5 text-sm font-semibold !text-white shadow-[0_10px_20px_rgba(23,98,79,0.18)] ring-1 ring-[#0F4537]/20 transition-colors hover:bg-[#0F4537]"
-                    style={{ color: "#fff" }}
+                    className="inline-flex min-h-11 min-w-36 items-center justify-center gap-2 rounded-lg bg-white px-5 text-sm font-semibold !text-[#17624F] shadow-[0_10px_20px_rgba(15,69,55,0.22)] ring-1 ring-white/70 transition-colors hover:bg-[#F4FBF8]"
+                    style={{ color: "#17624F" }}
                   >
-                    <MessageIcon className="text-white" style={{ color: "#fff" }} />
-                    <span className="!text-white" style={{ color: "#fff" }}>
+                    <MessageIcon className="text-[#17624F]" style={{ color: "#17624F" }} />
+                    <span className="!text-[#17624F]" style={{ color: "#17624F" }}>
                       Contact
                     </span>
                   </a>
                 ) : (
-                  <span className="inline-flex min-h-11 min-w-36 items-center justify-center gap-2 rounded-lg bg-[#E8EEF2] px-5 text-sm font-semibold text-[#6B747B] ring-1 ring-[#D6E0E4]">
+                  <span className="inline-flex min-h-11 min-w-36 items-center justify-center gap-2 rounded-lg bg-white/12 px-5 text-sm font-semibold text-white/75 ring-1 ring-white/20">
                     <MessageIcon />
                     Contact unavailable
                   </span>
                 )}
               </div>
-            </DetailSection>
+            </section>
+
+            {faqs.length ? <ProgramFaqSection faqs={faqs} /> : null}
           </div>
         </div>
       </div>
@@ -1105,7 +1164,22 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
 
 export function StudentClassesData({ slug }: { slug: string }) {
   const { mosque, programs, enrolledProgramIds, loading, enrollmentLoading, error } = useStudentPrograms(slug);
-  const [tab, setTab] = useState<"enrolled" | "browse">("enrolled");
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const initialStudentClassesTab = searchParams.get("tab");
+  const [tab, setTab] = useState<"enrolled" | "browse">(initialStudentClassesTab === "browse" ? "browse" : "enrolled");
+
+  useEffect(() => {
+    const nextTab = searchParams.get("tab");
+    if (nextTab === "enrolled" || nextTab === "browse") {
+      setTab(nextTab);
+    }
+  }, [searchParams]);
+
+  function changeClassesTab(nextTab: "enrolled" | "browse") {
+    setTab(nextTab);
+    router.replace(`/m/${slug}/portal/classes?tab=${nextTab}`, { scroll: false });
+  }
 
   const enrolledPrograms = programs.filter((program) => enrolledProgramIds.includes(program.id));
   const browsePrograms = programs;
@@ -1130,17 +1204,17 @@ export function StudentClassesData({ slug }: { slug: string }) {
 
   return (
     <section className="bg-[var(--workspace)]">
-      <div className="grid grid-cols-2 border-b border-[#D6DCE0]">
+      <div className="grid grid-cols-2 border-b border-[#D6DCE0] md:hidden">
         <button
           type="button"
-          onClick={() => setTab("enrolled")}
+          onClick={() => changeClassesTab("enrolled")}
           className={cn("min-h-12 text-sm font-medium", tab === "enrolled" ? "border-b-2 border-[#2F8FB3] text-[#2F8FB3]" : "text-[#6B747B]")}
         >
           Enrolled
         </button>
         <button
           type="button"
-          onClick={() => setTab("browse")}
+          onClick={() => changeClassesTab("browse")}
           className={cn("min-h-12 text-sm font-medium", tab === "browse" ? "border-b-2 border-[#2F8FB3] text-[#2F8FB3]" : "text-[#6B747B]")}
         >
           Browse
@@ -1804,20 +1878,7 @@ export function PortalAccountData({ slug }: { slug: string }) {
   const accountType = accountLabel === "Account" && rawAccountType ? `${titleCase(rawAccountType)} Account` : accountLabel;
 
   if (loading) {
-    return (
-      <div className="min-h-[calc(100vh-140px)] bg-[var(--workspace)] px-5 py-8">
-        <div className="mx-auto max-w-sm space-y-4">
-          <div className="mx-auto h-28 w-28 rounded-full bg-[var(--placeholder)]" />
-          <div className="mx-auto h-6 w-40 rounded-full bg-[var(--placeholder)]" />
-          <div className="mx-auto h-4 w-28 rounded-full bg-[var(--placeholder)]" />
-          <div className="mt-8 space-y-3">
-            <div className="h-16 rounded-2xl bg-[#fffdf8]" />
-            <div className="h-16 rounded-2xl bg-[#fffdf8]" />
-            <div className="h-16 rounded-2xl bg-[#fffdf8]" />
-          </div>
-        </div>
-      </div>
-    );
+    return <GenericLoadingState label="Loading account" />;
   }
 
   if (!isSignedIn) {
@@ -2050,13 +2111,22 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
   const [notes, setNotes] = useState<StudentNoteWithContext[]>([]);
   const [requests, setRequests] = useState<RequestWithContext[]>([]);
   const [studentWithdrawals, setStudentWithdrawals] = useState<WithdrawalRequestWithContext[]>([]);
-  const [tab, setTab] = useState<"announcements" | "notes" | "requests">("announcements");
+  const initialInboxTab = searchParams.get("tab");
+  const [tab, setTab] = useState<"announcements" | "notes" | "requests">(initialInboxTab === "notes" || initialInboxTab === "requests" ? initialInboxTab : "announcements");
   const [selectedThread, setSelectedThread] = useState<StudentInboxThread | null>(null);
+  const [announcementTrackIdsByProgramId, setAnnouncementTrackIdsByProgramId] = useState<Record<string, string[]>>({});
+  const [announcementThreadExhausted, setAnnouncementThreadExhausted] = useState<Record<string, boolean>>({});
+  const [announcementThreadLoadingOlder, setAnnouncementThreadLoadingOlder] = useState<Record<string, boolean>>({});
+  const [noteThreadExhausted, setNoteThreadExhausted] = useState<Record<string, boolean>>({});
+  const [noteThreadLoadingOlder, setNoteThreadLoadingOlder] = useState<Record<string, boolean>>({});
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [seenRequestIds, setSeenRequestIds] = useState<Set<string>>(new Set());
   const [checkoutRequestId, setCheckoutRequestId] = useState<string | null>(null);
   const [paymentNotice, setPaymentNotice] = useState<"success" | "cancelled" | null>(null);
   const [protectedClear, setProtectedClear] = useState<{ mode: "single" | "all"; requestIds: string[]; count: number } | null>(null);
+  const [rescindTarget, setRescindTarget] = useState<RequestWithContext | null>(null);
+  const [rescindBusy, setRescindBusy] = useState(false);
+  const [toast, setToast] = useState<EditorToastState | null>(null);
   const [paymentConfirming, setPaymentConfirming] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -2123,6 +2193,11 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
       setSeenRequestIds(new Set());
       setAnnouncements([]);
       setEnrolledProgramsForInbox([]);
+      setAnnouncementTrackIdsByProgramId({});
+      setAnnouncementThreadExhausted({});
+      setAnnouncementThreadLoadingOlder({});
+      setNoteThreadExhausted({});
+      setNoteThreadLoadingOlder({});
       setNotes([]);
       setRequests([]);
       setStudentWithdrawals([]);
@@ -2144,7 +2219,7 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
     const { children } = isParent ? await fetchParentChildren(supabase, slug, userId, mosque.id) : { children: [] as StudentDisplay[] };
     const targetStudentIds = isParent ? children.map((child) => child.id) : [userId];
 
-    const [{ data: enrollments }, { data: requestRows, error: requestError }, { data: withdrawalRows, error: withdrawalError }, { data: noteRows, error: noteError }] = await Promise.all([
+    const [{ data: enrollments }, { data: requestRows, error: requestError }, { data: withdrawalRows, error: withdrawalError }] = await Promise.all([
       targetStudentIds.length
         ? supabase.from("enrollments").select("id, program_id, student_profile_id, program_track_id").in("student_profile_id", targetStudentIds)
         : Promise.resolve({ data: [] as EnrollmentTrackSelection[] }),
@@ -2178,14 +2253,11 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
             .eq("student_profile_id", userId)
             .is("student_dismissed_at", null)
             .order("requested_at", { ascending: false }),
-      targetStudentIds.length
-        ? supabase.from("program_student_notes").select("*").in("student_profile_id", targetStudentIds).order("created_at", { ascending: false }).limit(80)
-        : Promise.resolve({ data: [] as ProgramStudentNote[], error: null }),
     ]);
 
-    if (requestError || withdrawalError || noteError) {
+    if (requestError || withdrawalError) {
       setLoading(false);
-      setError(requestError?.message ?? withdrawalError?.message ?? noteError?.message ?? "Could not load inbox.");
+      setError(requestError?.message ?? withdrawalError?.message ?? "Could not load inbox.");
       return;
     }
 
@@ -2195,15 +2267,41 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
       ? await supabase.from("enrollment_tracks").select("enrollment_id, program_track_id").in("enrollment_id", enrollmentIds)
       : { data: [] as Array<{ enrollment_id: string; program_track_id: string }> };
     const enrolledTrackIdsByProgramId = getEnrollmentTrackIdsByProgram(enrollmentRows, enrollmentTrackRows ?? []);
+    setAnnouncementTrackIdsByProgramId(
+      Object.fromEntries(Array.from(enrolledTrackIdsByProgramId.entries()).map(([programId, trackIds]) => [programId, Array.from(trackIds)])),
+    );
 
     const enrolledProgramIds = enrollmentRows.map((enrollment) => enrollment.program_id);
+    const noteThreadKeys = Array.from(new Set(enrollmentRows.map((enrollment) => `${enrollment.program_id}:${enrollment.student_profile_id}`)));
+    const noteQueries = await Promise.all(
+      noteThreadKeys.map(async (key) => {
+        const [programId, studentId] = key.split(":");
+        const { data: rows, error: noteError } = await supabase
+          .from("program_student_notes")
+          .select("*")
+          .eq("program_id", programId)
+          .eq("student_profile_id", studentId)
+          .order("created_at", { ascending: false })
+          .limit(NOTE_THREAD_PAGE_SIZE);
+        return { key, rows: rows ?? [], error: noteError };
+      }),
+    );
+    const noteError = noteQueries.find((result) => result.error)?.error;
+    if (noteError) {
+      setLoading(false);
+      setError(noteError.message);
+      return;
+    }
+    setNoteThreadExhausted(Object.fromEntries(noteQueries.map((result) => [result.key, result.rows.length < NOTE_THREAD_PAGE_SIZE])));
+    setNoteThreadLoadingOlder({});
+    const noteRows = noteQueries.flatMap((result) => result.rows);
     const requestProgramIds = (requestRows ?? []).map((request) => request.program_id);
     const withdrawalProgramIds = (withdrawalRows ?? []).map((request) => request.program_id);
-    const noteProgramIds = (noteRows ?? []).map((note) => note.program_id);
+    const noteProgramIds = noteRows.map((note) => note.program_id);
     const knownProgramIds = Array.from(new Set([...enrolledProgramIds, ...requestProgramIds, ...withdrawalProgramIds, ...noteProgramIds]));
     const requestStudentIds = Array.from(new Set((requestRows ?? []).map((request) => request.student_profile_id)));
     const withdrawalStudentIds = Array.from(new Set((withdrawalRows ?? []).map((request) => request.student_profile_id)));
-    const noteStudentIds = Array.from(new Set((noteRows ?? []).map((note) => note.student_profile_id)));
+    const noteStudentIds = Array.from(new Set(noteRows.map((note) => note.student_profile_id)));
     const [{ data: programs }, { data: requestStudents }, { data: noteStudents }] = await Promise.all([
       knownProgramIds.length ? supabase.from("programs").select("*").in("id", knownProgramIds) : Promise.resolve({ data: [] as Program[] }),
       [...requestStudentIds, ...withdrawalStudentIds].length
@@ -2232,15 +2330,15 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
       })),
     );
 
-    const noteAuthorIds = Array.from(new Set((noteRows ?? []).map((note) => note.author_profile_id)));
-    const noteRecipientIds = Array.from(new Set((noteRows ?? []).map((note) => note.recipient_profile_id)));
+    const noteAuthorIds = Array.from(new Set(noteRows.map((note) => note.author_profile_id)));
+    const noteRecipientIds = Array.from(new Set(noteRows.map((note) => note.recipient_profile_id)));
     const [{ data: noteAuthors }, { data: noteRecipients }] = await Promise.all([
       noteAuthorIds.length ? supabase.from("profiles").select("*").in("id", noteAuthorIds) : Promise.resolve({ data: [] as Profile[] }),
       noteRecipientIds.length ? supabase.from("profiles").select("*").in("id", noteRecipientIds) : Promise.resolve({ data: [] as Profile[] }),
     ]);
     const studentProfiles = [...childProfiles, ...((noteStudents ?? []) as StudentDisplay[])];
     setNotes(
-      (noteRows ?? []).map((note) => ({
+      noteRows.map((note) => ({
         ...note,
         program: (programs ?? []).find((program) => program.id === note.program_id) ?? null,
         student: studentProfiles.find((student) => student.id === note.student_profile_id) ?? null,
@@ -2252,24 +2350,39 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
     if (enrolledProgramIds.length === 0) {
       setAnnouncements([]);
       setEnrolledProgramsForInbox([]);
+      setAnnouncementThreadExhausted({});
+      setAnnouncementThreadLoadingOlder({});
+      setNoteThreadExhausted({});
+      setNoteThreadLoadingOlder({});
       setLoading(false);
       return;
     }
 
-    const { data, error: queryError } = await supabase
-      .from("program_announcements")
-      .select("*")
-      .in("program_id", enrolledProgramIds)
-      .order("created_at", { ascending: false })
-      .limit(50);
+    const announcementQueries = await Promise.all(
+      Array.from(new Set(enrolledProgramIds)).map(async (programId) => {
+        const { data: rows, error: queryError } = await supabase
+          .from("program_announcements")
+          .select("*")
+          .eq("program_id", programId)
+          .order("created_at", { ascending: false })
+          .limit(ANNOUNCEMENT_THREAD_PAGE_SIZE);
+        return { programId, rows: rows ?? [], error: queryError };
+      }),
+    );
+    const queryError = announcementQueries.find((result) => result.error)?.error;
     if (queryError) {
       setLoading(false);
       setError(queryError.message);
       return;
     }
+    setAnnouncementThreadExhausted(
+      Object.fromEntries(announcementQueries.map((result) => [result.programId, result.rows.length < ANNOUNCEMENT_THREAD_PAGE_SIZE])),
+    );
+    setAnnouncementThreadLoadingOlder({});
 
-    const announcementIds = (data ?? []).map((announcement) => announcement.id);
-    const authorIds = Array.from(new Set((data ?? []).map((announcement) => announcement.author_profile_id).filter(Boolean)));
+    const announcementRows = announcementQueries.flatMap((result) => result.rows);
+    const announcementIds = announcementRows.map((announcement) => announcement.id);
+    const authorIds = Array.from(new Set(announcementRows.map((announcement) => announcement.author_profile_id).filter(Boolean)));
     const [{ data: authors }, { data: receipts }] = await Promise.all([
       authorIds.length ? supabase.from("profiles").select("*").in("id", authorIds) : Promise.resolve({ data: [] as Profile[] }),
       announcementIds.length
@@ -2277,7 +2390,7 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
         : Promise.resolve({ data: [] as AnnouncementReceipt[] }),
     ]);
 
-    const visibleAnnouncements = (data ?? [])
+    const visibleAnnouncements = announcementRows
       .map((announcement) => ({
         ...announcement,
         program: (programs ?? []).find((program) => program.id === announcement.program_id) ?? null,
@@ -2355,6 +2468,30 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
 
     window.dispatchEvent(new Event("tareeqah:notifications-changed"));
     await loadInbox();
+  }
+
+  async function confirmRescindRequest() {
+    if (!rescindTarget) {
+      return;
+    }
+
+    setRescindBusy(true);
+    const { error: rescindError } = await createSupabaseBrowserClient()
+      .from("enrollment_requests")
+      .update({ status: "cancelled", student_dismissed_at: new Date().toISOString() })
+      .eq("id", rescindTarget.id);
+
+    if (rescindError) {
+      setRescindBusy(false);
+      setError(rescindError.message);
+      return;
+    }
+
+    window.dispatchEvent(new Event("tareeqah:notifications-changed"));
+    await loadInbox();
+    setRescindBusy(false);
+    setRescindTarget(null);
+    setToast({ tone: "success", message: "Application rescinded." });
   }
 
   async function clearAllReturnedRequests() {
@@ -2518,17 +2655,173 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
     window.dispatchEvent(new Event("tareeqah:notifications-changed"));
   }
 
+  async function loadOlderAnnouncements(programId: string) {
+    if (!currentUserId || announcementThreadLoadingOlder[programId] || announcementThreadExhausted[programId]) {
+      return;
+    }
+
+    const currentProgramAnnouncements = announcements
+      .filter((announcement) => announcement.program_id === programId)
+      .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
+    const oldestLoadedAt = currentProgramAnnouncements[0]?.created_at;
+    if (!oldestLoadedAt) {
+      return;
+    }
+
+    setAnnouncementThreadLoadingOlder((current) => ({ ...current, [programId]: true }));
+    const supabase = createSupabaseBrowserClient();
+    const { data: olderRows, error: olderError } = await supabase
+      .from("program_announcements")
+      .select("*")
+      .eq("program_id", programId)
+      .lt("created_at", oldestLoadedAt)
+      .order("created_at", { ascending: false })
+      .limit(ANNOUNCEMENT_THREAD_PAGE_SIZE);
+
+    if (olderError) {
+      setAnnouncementThreadLoadingOlder((current) => ({ ...current, [programId]: false }));
+      setError(olderError.message);
+      return;
+    }
+
+    const announcementIds = (olderRows ?? []).map((announcement) => announcement.id);
+    const authorIds = Array.from(new Set((olderRows ?? []).map((announcement) => announcement.author_profile_id).filter(Boolean)));
+    const [{ data: authors }, { data: receipts }] = await Promise.all([
+      authorIds.length ? supabase.from("profiles").select("*").in("id", authorIds) : Promise.resolve({ data: [] as Profile[] }),
+      announcementIds.length
+        ? supabase.from("program_announcement_receipts").select("*").eq("profile_id", currentUserId).in("announcement_id", announcementIds)
+        : Promise.resolve({ data: [] as AnnouncementReceipt[] }),
+    ]);
+
+    const enrolledTrackIds = new Set(announcementTrackIdsByProgramId[programId] ?? []);
+    const program = enrolledProgramsForInbox.find((item) => item.id === programId) ?? null;
+    const now = new Date().toISOString();
+    const visibleOlderAnnouncements = (olderRows ?? [])
+      .map((announcement) => ({
+        ...announcement,
+        program,
+        author: (authors ?? []).find((author) => author.id === announcement.author_profile_id) ?? null,
+        receipt: (receipts ?? []).find((receipt) => receipt.announcement_id === announcement.id) ?? null,
+      }))
+      .filter((announcement) => isAnnouncementVisibleForEnrollment(announcement, enrolledTrackIds))
+      .filter((announcement) => !announcement.receipt?.dismissed_at)
+      .map((announcement) => ({
+        ...announcement,
+        receipt: {
+          id: announcement.receipt?.id ?? `local-${announcement.id}`,
+          announcement_id: announcement.id,
+          profile_id: currentUserId,
+          read_at: now,
+          dismissed_at: null,
+          created_at: announcement.receipt?.created_at ?? now,
+          updated_at: now,
+        },
+      }));
+
+    if (visibleOlderAnnouncements.length) {
+      await supabase.from("program_announcement_receipts").upsert(
+        visibleOlderAnnouncements.map((announcement) => ({
+          announcement_id: announcement.id,
+          profile_id: currentUserId,
+          read_at: now,
+          dismissed_at: null,
+          updated_at: now,
+        })),
+        { onConflict: "announcement_id,profile_id" },
+      );
+    }
+
+    setAnnouncements((current) => {
+      const existingIds = new Set(current.map((announcement) => announcement.id));
+      return [...current, ...visibleOlderAnnouncements.filter((announcement) => !existingIds.has(announcement.id))];
+    });
+    setAnnouncementThreadExhausted((current) => ({
+      ...current,
+      [programId]: (olderRows ?? []).length < ANNOUNCEMENT_THREAD_PAGE_SIZE,
+    }));
+    setAnnouncementThreadLoadingOlder((current) => ({ ...current, [programId]: false }));
+  }
+
+  async function loadOlderNotes(programId: string, studentId: string) {
+    const threadKey = `${programId}:${studentId}`;
+    if (!currentUserId || noteThreadLoadingOlder[threadKey] || noteThreadExhausted[threadKey]) {
+      return;
+    }
+
+    const currentThreadNotes = notes
+      .filter((note) => note.program_id === programId && note.student_profile_id === studentId)
+      .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
+    const oldestLoadedAt = currentThreadNotes[0]?.created_at;
+    if (!oldestLoadedAt) {
+      return;
+    }
+
+    setNoteThreadLoadingOlder((current) => ({ ...current, [threadKey]: true }));
+    const supabase = createSupabaseBrowserClient();
+    const { data: olderRows, error: olderError } = await supabase
+      .from("program_student_notes")
+      .select("*")
+      .eq("program_id", programId)
+      .eq("student_profile_id", studentId)
+      .lt("created_at", oldestLoadedAt)
+      .order("created_at", { ascending: false })
+      .limit(NOTE_THREAD_PAGE_SIZE);
+
+    if (olderError) {
+      setNoteThreadLoadingOlder((current) => ({ ...current, [threadKey]: false }));
+      setError(olderError.message);
+      return;
+    }
+
+    const authorIds = Array.from(new Set((olderRows ?? []).map((note) => note.author_profile_id)));
+    const recipientIds = Array.from(new Set((olderRows ?? []).map((note) => note.recipient_profile_id)));
+    const [{ data: authors }, { data: recipients }] = await Promise.all([
+      authorIds.length ? supabase.from("profiles").select("*").in("id", authorIds) : Promise.resolve({ data: [] as Profile[] }),
+      recipientIds.length ? supabase.from("profiles").select("*").in("id", recipientIds) : Promise.resolve({ data: [] as Profile[] }),
+    ]);
+
+    const now = new Date().toISOString();
+    const olderNoteIds = (olderRows ?? []).filter((note) => !note.seen_at).map((note) => note.id);
+    if (olderNoteIds.length) {
+      await supabase.rpc("mark_program_student_notes_seen", { note_ids: olderNoteIds });
+    }
+
+    const program = enrolledProgramsForInbox.find((item) => item.id === programId) ?? null;
+    const student = notes.find((note) => note.program_id === programId && note.student_profile_id === studentId)?.student ?? null;
+    const visibleOlderNotes = (olderRows ?? []).map((note) => ({
+      ...note,
+      program,
+      student,
+      recipient: (recipients ?? []).find((recipient) => recipient.id === note.recipient_profile_id) ?? null,
+      author: (authors ?? []).find((author) => author.id === note.author_profile_id) ?? null,
+      seen_at: note.seen_at ?? now,
+      seen_by: note.seen_by ?? currentUserId,
+      updated_at: now,
+    }));
+
+    setNotes((current) => {
+      const existingIds = new Set(current.map((note) => note.id));
+      return [...current, ...visibleOlderNotes.filter((note) => !existingIds.has(note.id))];
+    });
+    setNoteThreadExhausted((current) => ({ ...current, [threadKey]: (olderRows ?? []).length < NOTE_THREAD_PAGE_SIZE }));
+    setNoteThreadLoadingOlder((current) => ({ ...current, [threadKey]: false }));
+    window.dispatchEvent(new Event("tareeqah:notifications-changed"));
+  }
+
   return (
     <div className="bg-[var(--workspace)]">
-      <FloatingInboxTabs
-        tabs={[
-          { id: "announcements", label: "Announcements", badge: unreadAnnouncementCount },
-          { id: "notes", label: "Notes", badge: unreadNoteCount },
-          { id: "requests", label: "Applications", badge: unseenReturnedRequestCount },
-        ]}
-        value={tab}
-        onChange={(value) => changeTab(value as "announcements" | "notes" | "requests")}
-      />
+      <EditorToast toast={toast} onClose={() => setToast(null)} />
+      <div className="md:hidden">
+        <FloatingInboxTabs
+          tabs={[
+            { id: "announcements", label: "Announcements", badge: unreadAnnouncementCount },
+            { id: "notes", label: "Notes", badge: unreadNoteCount },
+            { id: "requests", label: "Applications", badge: unseenReturnedRequestCount },
+          ]}
+          value={tab}
+          onChange={(value) => changeTab(value as "announcements" | "notes" | "requests")}
+        />
+      </div>
       <div className="space-y-4 p-4">
         {error ? (
           <EmptyState title="Could not load inbox" text={error} />
@@ -2539,6 +2832,12 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
             thread={selectedThread}
             announcements={announcements}
             notes={notes}
+            hasOlderAnnouncements={selectedThread.kind === "announcements" ? !announcementThreadExhausted[selectedThread.programId] : false}
+            loadingOlderAnnouncements={selectedThread.kind === "announcements" ? Boolean(announcementThreadLoadingOlder[selectedThread.programId]) : false}
+            onLoadOlderAnnouncements={selectedThread.kind === "announcements" ? () => void loadOlderAnnouncements(selectedThread.programId) : undefined}
+            hasOlderNotes={selectedThread.kind === "notes" ? !noteThreadExhausted[`${selectedThread.programId}:${selectedThread.studentId}`] : false}
+            loadingOlderNotes={selectedThread.kind === "notes" ? Boolean(noteThreadLoadingOlder[`${selectedThread.programId}:${selectedThread.studentId}`]) : false}
+            onLoadOlderNotes={selectedThread.kind === "notes" ? () => void loadOlderNotes(selectedThread.programId, selectedThread.studentId) : undefined}
             onBack={() => setSelectedThread(null)}
           />
         ) : tab === "announcements" ? (
@@ -2571,7 +2870,7 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
               {pendingRequests.length || pendingWithdrawals.length ? (
                 <>
                   {pendingRequests.map((request) => (
-                    <StudentRequestCard key={request.id} request={request} onRescind={() => updateRequest(request.id, "rescind")} />
+                    <StudentRequestCard key={request.id} request={request} onRescind={() => setRescindTarget(request)} />
                   ))}
                   {pendingWithdrawals.map((request) => (
                     <StudentWithdrawalStatusCard key={request.id} request={request} />
@@ -2628,17 +2927,68 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
           }}
         />
       ) : null}
+      {rescindTarget ? (
+        <ConfirmStudentRescindModal
+          request={rescindTarget}
+          busy={rescindBusy}
+          onCancel={() => {
+            if (!rescindBusy) {
+              setRescindTarget(null);
+            }
+          }}
+          onConfirm={() => void confirmRescindRequest()}
+        />
+      ) : null}
     </div>
   );
 }
 
+function ConfirmStudentRescindModal({
+  request,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  request: RequestWithContext;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#26323A]/35 px-5 backdrop-blur-sm">
+      <div className="w-full max-w-sm rounded-[28px] bg-white p-6 text-[#26323A] shadow-[0_24px_60px_rgba(38,50,58,0.22)]">
+        <div className="flex h-14 w-14 items-center justify-center rounded-full bg-[#FFF2EF] text-[#C84B3E]">
+          <XIcon />
+        </div>
+        <h2 className="mt-4 text-xl font-semibold">Rescind application?</h2>
+        <p className="mt-2 text-sm leading-6 text-[#6B747B]">
+          This will cancel the pending application for {request.student?.full_name ?? "this student"} in {request.program?.title ?? "this class"}.
+        </p>
+        <div className="mt-6 grid gap-2">
+          <button type="button" onClick={onConfirm} disabled={busy} className="min-h-11 rounded-[8px] bg-[#26323A] px-4 text-sm font-semibold text-white disabled:opacity-60">
+            {busy ? "Rescinding..." : "Rescind application"}
+          </button>
+          <button type="button" onClick={onCancel} disabled={busy} className="min-h-11 rounded-[8px] bg-[#EEF3F5] px-4 text-sm font-semibold text-[#52616A] disabled:opacity-60">
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 export function TeacherInboxData({ slug }: { slug: string }) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const [programs, setPrograms] = useState<Program[]>([]);
   const [selectedProgramId, setSelectedProgramId] = useState<string>("");
   const [announcements, setAnnouncements] = useState<AnnouncementWithContext[]>([]);
   const [requests, setRequests] = useState<RequestWithContext[]>([]);
   const [withdrawals, setWithdrawals] = useState<WithdrawalRequestWithContext[]>([]);
-  const [tab, setTab] = useState<"announcements" | "requests" | "withdrawals">("announcements");
+  const [instructorNotifications, setInstructorNotifications] = useState<InstructorLifecycleNotification[]>([]);
+  const initialTeacherInboxTab = searchParams.get("tab");
+  const [tab, setTab] = useState<"requests" | "withdrawals" | "instructors">(initialTeacherInboxTab === "withdrawals" || initialTeacherInboxTab === "instructors" ? initialTeacherInboxTab : "requests");
   const [canReviewRequests, setCanReviewRequests] = useState(false);
   const [message, setMessage] = useState("");
   const [announcementTracksByProgramId, setAnnouncementTracksByProgramId] = useState<Record<string, ProgramTrack[]>>({});
@@ -2646,9 +2996,18 @@ export function TeacherInboxData({ slug }: { slug: string }) {
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [seenRequestIds, setSeenRequestIds] = useState<Set<string>>(new Set());
   const [reviewTarget, setReviewTarget] = useState<{ request: RequestWithContext; action: "approved" | "waitlisted" | "rejected" } | null>(null);
+  const [reviewBusy, setReviewBusy] = useState(false);
   const [busyWithdrawalId, setBusyWithdrawalId] = useState<string | null>(null);
+  const [toast, setToast] = useState<EditorToastState | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const nextTab = searchParams.get("tab");
+    if (nextTab === "requests" || nextTab === "withdrawals" || nextTab === "instructors") {
+      setTab(nextTab);
+    }
+  }, [searchParams]);
 
   async function loadTeacherInbox() {
     const supabase = createSupabaseBrowserClient();
@@ -2682,10 +3041,6 @@ export function TeacherInboxData({ slug }: { slug: string }) {
       .map((program) => program.id);
     setPrograms(teacherPrograms);
     setCanReviewRequests(directorProgramIds.length > 0);
-    if (directorProgramIds.length === 0 && tab === "requests") {
-      setTab("announcements");
-    }
-
     const activeProgramId = selectedProgramId || teacherPrograms[0]?.id || "";
     if (!selectedProgramId && activeProgramId) {
       setSelectedProgramId(activeProgramId);
@@ -2696,6 +3051,7 @@ export function TeacherInboxData({ slug }: { slug: string }) {
       setAnnouncements([]);
       setRequests([]);
       setWithdrawals([]);
+      setInstructorNotifications([]);
       setAnnouncementTracksByProgramId({});
       setSelectedAnnouncementTargetValue("");
       setCanReviewRequests(false);
@@ -2703,7 +3059,14 @@ export function TeacherInboxData({ slug }: { slug: string }) {
       return;
     }
 
-    const [{ data: announcementRows, error: announcementError }, { data: requestRows, error: requestError }, { data: withdrawalRows, error: withdrawalError }, { data: trackRows }] = await Promise.all([
+    const [
+      { data: announcementRows, error: announcementError },
+      { data: requestRows, error: requestError },
+      { data: withdrawalRows, error: withdrawalError },
+      { data: instructorRows, error: instructorError },
+      { data: instructorEventRows, error: instructorEventError },
+      { data: trackRows },
+    ] = await Promise.all([
       activeProgramId
         ? supabase.from("program_announcements").select("*").eq("program_id", activeProgramId).order("created_at", { ascending: false })
         : Promise.resolve({ data: [] as AnnouncementWithContext[], error: null }),
@@ -2713,13 +3076,25 @@ export function TeacherInboxData({ slug }: { slug: string }) {
       directorProgramIds.length
         ? supabase.from("withdrawal_requests").select("*").in("program_id", directorProgramIds).is("teacher_dismissed_at", null).order("requested_at", { ascending: false })
         : Promise.resolve({ data: [] as WithdrawalRequest[], error: null }),
+      directorProgramIds.length
+        ? supabase
+            .from("program_teachers")
+            .select("*")
+            .in("program_id", directorProgramIds)
+            .eq("role", "instructor")
+            .not("teacher_profile_id", "is", null)
+            .order("created_at", { ascending: false })
+        : Promise.resolve({ data: [] as ProgramTeacher[], error: null }),
+      directorProgramIds.length
+        ? supabase.from("program_instructor_events").select("*").in("program_id", directorProgramIds).order("created_at", { ascending: false })
+        : Promise.resolve({ data: [] as ProgramInstructorEvent[], error: null }),
       programIds.length
         ? supabase.from("program_tracks").select("*").in("program_id", programIds).eq("is_active", true).order("sort_order", { ascending: true })
         : Promise.resolve({ data: [] as ProgramTrack[] }),
     ]);
 
-    if (announcementError || requestError || withdrawalError) {
-      setError(announcementError?.message ?? requestError?.message ?? withdrawalError?.message ?? "Could not load teacher inbox.");
+    if (announcementError || requestError || withdrawalError || instructorError || instructorEventError) {
+      setError(announcementError?.message ?? requestError?.message ?? withdrawalError?.message ?? instructorError?.message ?? instructorEventError?.message ?? "Could not load teacher inbox.");
       setLoading(false);
       return;
     }
@@ -2727,8 +3102,14 @@ export function TeacherInboxData({ slug }: { slug: string }) {
     const studentIds = Array.from(new Set([...(requestRows ?? []).map((request) => request.student_profile_id), ...(withdrawalRows ?? []).map((request) => request.student_profile_id)]));
     const parentIds = Array.from(new Set([...(requestRows ?? []).map((request) => request.parent_profile_id).filter(Boolean), ...(withdrawalRows ?? []).map((request) => request.parent_profile_id).filter(Boolean)])) as string[];
     const authorIds = Array.from(new Set((announcementRows ?? []).map((announcement) => announcement.author_profile_id).filter(Boolean))) as string[];
+    const instructorIds = Array.from(
+      new Set([
+        ...(instructorRows ?? []).map((instructor) => instructor.teacher_profile_id).filter(Boolean),
+        ...(instructorEventRows ?? []).map((event) => event.teacher_profile_id).filter(Boolean),
+      ]),
+    ) as string[];
     const subscriptionStudentIds = Array.from(new Set((withdrawalRows ?? []).map((request) => request.student_profile_id)));
-    const [{ data: students }, { data: parents }, { data: authors }, { data: subscriptions }] = await Promise.all([
+    const [{ data: students }, { data: parents }, { data: authors }, { data: instructorProfiles }, { data: subscriptions }] = await Promise.all([
       studentIds.length
         ? supabase.from("profiles").select("id, full_name, email, phone_number, avatar_url, age, gender, date_of_birth, account_type").in("id", studentIds)
         : Promise.resolve({ data: [] as StudentDisplay[] }),
@@ -2736,6 +3117,7 @@ export function TeacherInboxData({ slug }: { slug: string }) {
         ? supabase.from("profiles").select("id, full_name, email, phone_number, avatar_url").in("id", parentIds)
         : Promise.resolve({ data: [] as ParentDisplay[] }),
       authorIds.length ? supabase.from("profiles").select("*").in("id", authorIds) : Promise.resolve({ data: [] as Profile[] }),
+      instructorIds.length ? supabase.from("profiles").select("*").in("id", instructorIds) : Promise.resolve({ data: [] as Profile[] }),
       subscriptionStudentIds.length
         ? supabase.from("program_subscriptions").select("*").in("program_id", directorProgramIds).in("student_profile_id", subscriptionStudentIds)
         : Promise.resolve({ data: [] as ProgramSubscription[] }),
@@ -2773,6 +3155,35 @@ export function TeacherInboxData({ slug }: { slug: string }) {
         subscription:
           (subscriptions ?? []).find((subscription) => subscription.program_id === request.program_id && subscription.student_profile_id === request.student_profile_id) ?? null,
       })),
+    );
+    const joinedAssignmentIdsWithEvents = new Set((instructorEventRows ?? []).filter((event) => event.event_type === "joined" && event.assignment_id).map((event) => event.assignment_id as string));
+    const instructorEventNotifications: InstructorLifecycleNotification[] = (instructorEventRows ?? []).map((event) => ({
+      id: event.id,
+      program_id: event.program_id,
+      assignment_id: event.assignment_id,
+      teacher_profile_id: event.teacher_profile_id,
+      event_type: event.event_type === "resigned" ? "resigned" : "joined",
+      created_at: event.created_at,
+      program: teacherPrograms.find((program) => program.id === event.program_id) ?? null,
+      instructor: event.teacher_profile_id ? ((instructorProfiles ?? []).find((profile) => profile.id === event.teacher_profile_id) as Profile | undefined) ?? null : null,
+    }));
+    const fallbackJoinNotifications: InstructorLifecycleNotification[] = (instructorRows ?? [])
+      .filter((notification) => !joinedAssignmentIdsWithEvents.has(notification.id))
+      .map((notification) => ({
+        id: notification.id,
+        program_id: notification.program_id,
+        assignment_id: notification.id,
+        teacher_profile_id: notification.teacher_profile_id,
+        event_type: "joined",
+        created_at: notification.created_at,
+        program: teacherPrograms.find((program) => program.id === notification.program_id) ?? null,
+        instructor: notification.teacher_profile_id ? ((instructorProfiles ?? []).find((profile) => profile.id === notification.teacher_profile_id) as Profile | undefined) ?? null : null,
+      }));
+    const dismissedInstructorUpdateIds = readSeenNotificationIds(dismissedTeacherInstructorUpdatesStorageKey, userId);
+    setInstructorNotifications(
+      [...instructorEventNotifications, ...fallbackJoinNotifications]
+        .filter((notification) => !dismissedInstructorUpdateIds.has(teacherInstructorNotificationKey(notification)))
+        .sort((a, b) => Date.parse(b.created_at ?? "0") - Date.parse(a.created_at ?? "0")),
     );
     setLoading(false);
   }
@@ -2860,6 +3271,7 @@ export function TeacherInboxData({ slug }: { slug: string }) {
       return;
     }
 
+    setReviewBusy(true);
     const supabase = createSupabaseBrowserClient();
     const now = new Date().toISOString();
     const { error: reviewError } = await supabase
@@ -2872,10 +3284,13 @@ export function TeacherInboxData({ slug }: { slug: string }) {
         decision_note: options.note?.trim() || null,
         approved_price_monthly_cents: status === "approved" ? (options.paymentBypassed ? 0 : options.priceMonthlyCents ?? request.program?.price_monthly_cents ?? null) : null,
         payment_bypassed: status === "approved" ? Boolean(options.paymentBypassed) : false,
+        admission_completed_at: status === "approved" && (!request.program?.is_paid || options.paymentBypassed) ? now : null,
+        teacher_dismissed_at: null,
       })
       .eq("id", request.id);
 
     if (reviewError) {
+      setReviewBusy(false);
       setError(reviewError.message);
       return;
     }
@@ -2893,8 +3308,10 @@ export function TeacherInboxData({ slug }: { slug: string }) {
 
     queueEnrollmentRequestReviewedEmail(request.id);
     window.dispatchEvent(new Event("tareeqah:notifications-changed"));
-    setReviewTarget(null);
     await loadTeacherInbox();
+    setReviewBusy(false);
+    setReviewTarget(null);
+    setToast({ tone: "success", message: status === "approved" ? "Application accepted." : status === "waitlisted" ? "Application waitlisted." : "Application rejected." });
   }
 
   async function reviewWithdrawal(request: WithdrawalRequestWithContext, status: "approved" | "rejected") {
@@ -2926,11 +3343,22 @@ export function TeacherInboxData({ slug }: { slug: string }) {
     await loadTeacherInbox();
   }
 
+  function clearAllInstructorUpdates() {
+    if (!instructorNotificationIds.length) {
+      return;
+    }
+    markNotificationIdsSeen(dismissedTeacherInstructorUpdatesStorageKey, currentUserId, instructorNotificationIds);
+    setSeenRequestIds(markNotificationIdsSeen(seenTeacherRequestsStorageKey, currentUserId, instructorNotificationIds));
+    setInstructorNotifications([]);
+  }
+
   const pendingRequests = requests.filter((request) => request.status === "pending");
   const pastRequests = requests.filter((request) => request.status !== "pending");
+  const completedAdmissionRequests = pastRequests.filter((request) => request.admission_completed_at && !request.teacher_dismissed_at);
   const pendingWithdrawals = withdrawals.filter((request) => request.status === "pending");
   const pastWithdrawals = withdrawals.filter((request) => request.status !== "pending");
-  const unseenPendingRequestCount = pendingRequests.filter((request) => !seenRequestIds.has(request.id)).length;
+  const unseenInstructorCount = instructorNotifications.filter((notification) => !seenRequestIds.has(teacherInstructorNotificationKey(notification))).length;
+  const unseenPendingRequestCount = [...pendingRequests, ...completedAdmissionRequests].filter((request) => !seenRequestIds.has(teacherRequestNotificationKey(request))).length;
   const selectedProgram = programs.find((program) => program.id === selectedProgramId);
   const announcementTargetOptions = programs.flatMap((program) => [
     { value: announcementTargetValue(program.id, null), label: announcementTargetLabel(program, null) },
@@ -2939,7 +3367,10 @@ export function TeacherInboxData({ slug }: { slug: string }) {
       label: announcementTargetLabel(program, track),
     })),
   ]);
-  const pendingRequestIdsKey = pendingRequests.map((request) => request.id).join("|");
+  const requestNotificationIds = [...pendingRequests, ...completedAdmissionRequests].map(teacherRequestNotificationKey);
+  const instructorNotificationIds = instructorNotifications.map(teacherInstructorNotificationKey);
+  const pendingRequestIdsKey = requestNotificationIds.join("|");
+  const instructorIdsKey = instructorNotificationIds.join("|");
 
   useEffect(() => {
     if (!loading && tab === "requests" && pendingRequestIdsKey) {
@@ -2947,70 +3378,42 @@ export function TeacherInboxData({ slug }: { slug: string }) {
     }
   }, [currentUserId, loading, pendingRequestIdsKey, tab]);
 
-  function changeTab(nextTab: "announcements" | "requests" | "withdrawals") {
+  useEffect(() => {
+    if (!loading && tab === "instructors" && instructorIdsKey) {
+      setSeenRequestIds(markNotificationIdsSeen(seenTeacherRequestsStorageKey, currentUserId, instructorIdsKey.split("|")));
+    }
+  }, [currentUserId, instructorIdsKey, loading, tab]);
+
+  function changeTab(nextTab: "requests" | "withdrawals" | "instructors") {
     setTab(nextTab);
+    router.replace(`/m/${slug}/teacher/inbox?tab=${nextTab}`, { scroll: false });
     if (nextTab === "requests") {
-      setSeenRequestIds(markNotificationIdsSeen(seenTeacherRequestsStorageKey, currentUserId, pendingRequests.map((request) => request.id)));
+      setSeenRequestIds(markNotificationIdsSeen(seenTeacherRequestsStorageKey, currentUserId, requestNotificationIds));
+    }
+    if (nextTab === "instructors") {
+      setSeenRequestIds(markNotificationIdsSeen(seenTeacherRequestsStorageKey, currentUserId, instructorNotificationIds));
     }
   }
 
   return (
     <div className="bg-[var(--workspace)]">
-      <FloatingInboxTabs
-        tabs={[
-          { id: "announcements", label: "Announcements" },
-          ...(canReviewRequests ? [{ id: "requests", label: "Applications", badge: unseenPendingRequestCount }] : []),
-          ...(canReviewRequests ? [{ id: "withdrawals", label: "Withdrawals", badge: pendingWithdrawals.length }] : []),
-        ]}
-        value={tab}
-        onChange={(value) => changeTab(value as "announcements" | "requests" | "withdrawals")}
-      />
+      <EditorToast toast={toast} onClose={() => setToast(null)} />
+      <div className="md:hidden">
+        <FloatingInboxTabs
+          tabs={[
+            { id: "requests", label: "Applications", badge: unseenPendingRequestCount },
+            { id: "withdrawals", label: "Withdrawals", badge: pendingWithdrawals.length },
+            { id: "instructors", label: "Instructors", badge: unseenInstructorCount },
+          ]}
+          value={tab}
+          onChange={(value) => changeTab(value as "requests" | "withdrawals" | "instructors")}
+        />
+      </div>
       <div className="space-y-4 p-4">
         {error ? (
           <EmptyState title="Could not load teacher inbox" text={error} />
         ) : loading ? (
-          <InboxLoadingPanel label={tab === "announcements" ? "Loading announcements" : "Loading applications"} />
-        ) : tab === "announcements" ? (
-          <section className="space-y-4">
-            <div>
-              <label className="block text-xs font-semibold uppercase tracking-wide text-[#6B747B]">Send to</label>
-              <select
-                value={selectedAnnouncementTargetValue || announcementTargetValue(selectedProgramId, null)}
-                onChange={(event) => {
-                  const target = parseAnnouncementTargetValue(event.target.value);
-                  setSelectedProgramId(target.programId);
-                  setSelectedAnnouncementTargetValue(event.target.value);
-                }}
-                className="mt-2 h-11 w-full border border-[#B9C3C8] bg-white px-3 text-sm text-[#26323A] outline-none focus:border-[#2F8FB3]"
-              >
-                {announcementTargetOptions.map((option) => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <textarea
-                value={message}
-                onChange={(event) => setMessage(event.target.value)}
-                placeholder="Write an announcement..."
-                className="min-h-24 w-full resize-none rounded-[14px] border border-[#B9C3C8] bg-white px-3 py-2 text-sm text-[#26323A] outline-none focus:border-[#2F8FB3]"
-              />
-              <div className="mt-2 flex justify-end">
-                <button type="button" onClick={sendAnnouncement} disabled={!selectedProgramId || !message.trim()} className="inline-flex min-h-10 items-center justify-center rounded-lg bg-[#17624F] px-5 text-sm font-semibold text-white hover:bg-[#0F4537] disabled:opacity-50">
-                  Send
-                </button>
-              </div>
-            </div>
-            <div className="space-y-4">
-              {announcements.length ? (
-                announcements.map((announcement) => (
-                  <TeacherAnnouncementBubble key={announcement.id} announcement={announcement} />
-                ))
-              ) : (
-                <MiniEmpty text={selectedProgram ? "No announcements have been sent for this class." : "No assigned classes found."} />
-              )}
-            </div>
-          </section>
+          <InboxLoadingPanel label={tab === "withdrawals" ? "Loading withdrawals" : tab === "instructors" ? "Loading instructors" : "Loading applications"} />
         ) : tab === "requests" ? (
           <>
             <TeacherRequestSection title="Pending Requests" count={pendingRequests.length}>
@@ -3038,7 +3441,7 @@ export function TeacherInboxData({ slug }: { slug: string }) {
               )}
             </TeacherRequestSection>
           </>
-        ) : (
+        ) : tab === "withdrawals" ? (
           <>
             <TeacherRequestSection title="Pending Withdrawals" count={pendingWithdrawals.length}>
               {pendingWithdrawals.length ? (
@@ -3063,12 +3466,27 @@ export function TeacherInboxData({ slug }: { slug: string }) {
               )}
             </TeacherRequestSection>
           </>
+        ) : (
+          <TeacherRequestSection title="Instructor Updates" count={instructorNotifications.length} action={instructorNotifications.length ? <ClearAllButton onClick={clearAllInstructorUpdates} /> : null}>
+            {instructorNotifications.length ? (
+              instructorNotifications.map((notification) => (
+                <InstructorLifecycleNotificationCard key={`${notification.event_type}:${notification.id}`} notification={notification} slug={slug} />
+              ))
+            ) : (
+              <MiniEmpty text="Instructor joins and resignations will appear here." />
+            )}
+          </TeacherRequestSection>
         )}
       </div>
       {reviewTarget ? (
         <ApplicationDecisionModal
           target={reviewTarget}
-          onClose={() => setReviewTarget(null)}
+          busy={reviewBusy}
+          onClose={() => {
+            if (!reviewBusy) {
+              setReviewTarget(null);
+            }
+          }}
           onSubmit={(options) => reviewRequest(reviewTarget.request, reviewTarget.action, options)}
         />
       ) : null}
@@ -3460,37 +3878,9 @@ export function TeacherScheduleData({ slug, programId }: { slug: string; program
 
 export function TeacherHomeData({ slug }: { slug: string }) {
   const { programs, currentUserId, loading, error } = useTeacherPrograms(slug);
-  const [pendingRequestCount, setPendingRequestCount] = useState(0);
-  const [requestLoading, setRequestLoading] = useState(true);
+  const { totalCount: inboxItemCount } = useTeacherNotificationCounts(currentUserId ? slug : "");
 
-  async function loadRequests() {
-    if (!currentUserId || programs.length === 0) {
-      setPendingRequestCount(0);
-      setRequestLoading(false);
-      return;
-    }
-
-    const supabase = createSupabaseBrowserClient();
-    const programIds = programs.map((program) => program.id);
-    const { data: requestRows } = await supabase
-            .from("enrollment_requests")
-              .select("id, status, reviewed_at, requested_at")
-      .in("program_id", programIds)
-      .eq("status", "pending");
-
-    setPendingRequestCount((requestRows ?? []).length);
-    setRequestLoading(false);
-  }
-
-  useEffect(() => {
-    const timeout = window.setTimeout(() => {
-      void loadRequests();
-    }, 0);
-    return () => window.clearTimeout(timeout);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentUserId, programs]);
-
-  if (loading || requestLoading) {
+  if (loading) {
     return <HomeLoadingState />;
   }
 
@@ -3501,10 +3891,10 @@ export function TeacherHomeData({ slug }: { slug: string }) {
   return (
     <div className="space-y-4 bg-[var(--workspace)] p-4">
       <HomeNotification
-        tone={pendingRequestCount > 0 ? "active" : "empty"}
-        title={pendingRequestCount > 0 ? "Action required" : "No new inbox items"}
-        text={pendingRequestCount > 0 ? `Check your inbox to review ${pendingRequestCount === 1 ? "the pending enrollment request" : `${pendingRequestCount} pending enrollment requests`}.` : "New enrollment requests and class messages will appear here."}
-        href={pendingRequestCount > 0 ? `/m/${slug}/teacher/inbox` : undefined}
+        tone={inboxItemCount > 0 ? "active" : "empty"}
+        title={inboxItemCount > 0 ? "Action required" : "No new inbox items"}
+        text={inboxItemCount > 0 ? `Check your inbox to review ${inboxItemCount === 1 ? "the new item" : `${inboxItemCount} new items`}.` : "New enrollment requests and class messages will appear here."}
+        href={inboxItemCount > 0 ? `/m/${slug}/teacher/inbox` : undefined}
       />
       <HomeSectionTitle title="Upcoming" />
       {programs.length ? <HomeUpcomingRows programs={programs} canCancelSessions currentUserId={currentUserId} /> : <HomeEmptyState title="No assigned classes" text="Your next class sessions will appear here." />}
@@ -3532,9 +3922,25 @@ export function AdminHomeData({ slug }: { slug: string }) {
 }
 
 export function TeacherClassesData({ slug }: { slug: string }) {
-  const { programs, allPrograms, roleByProgramId, canCreateClass, loading, error } = useTeacherPrograms(slug);
-  const [tab, setTab] = useState<"mine" | "other">("mine");
+  const { programs, allPrograms, roleByProgramId, financeAccessByProgramId, canCreateClass, loading, error } = useTeacherPrograms(slug);
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const initialTeacherClassesTab = searchParams.get("tab");
+  const [tab, setTab] = useState<"mine" | "other">(initialTeacherClassesTab === "other" ? "other" : "mine");
+  const [hiddenProgramIds, setHiddenProgramIds] = useState<Set<string>>(new Set());
   const [toast, setToast] = useState<EditorToastState | null>(null);
+
+  useEffect(() => {
+    const nextTab = searchParams.get("tab");
+    if (nextTab === "mine" || nextTab === "other") {
+      setTab(nextTab);
+    }
+  }, [searchParams]);
+
+  function changeTeacherClassesTab(nextTab: "mine" | "other") {
+    setTab(nextTab);
+    router.replace(`/m/${slug}/teacher/classes?tab=${nextTab}`, { scroll: false });
+  }
 
   useEffect(() => {
     const queuedToast = readQueuedEditorToast();
@@ -3551,23 +3957,24 @@ export function TeacherClassesData({ slug }: { slug: string }) {
     return <EmptyState title="Could not load classes" text={error} />;
   }
 
+  const visiblePrograms = programs.filter((program) => !hiddenProgramIds.has(program.id));
   const assignedProgramIds = new Set(programs.map((program) => program.id));
   const otherPrograms = allPrograms.filter((program) => !assignedProgramIds.has(program.id));
 
   return (
     <section className="bg-[var(--workspace)]">
       <EditorToast toast={toast} onClose={() => setToast(null)} />
-      <div className="grid grid-cols-2 border-b border-[#D6DCE0]">
+      <div className="grid grid-cols-2 border-b border-[#D6DCE0] md:hidden">
         <button
           type="button"
-          onClick={() => setTab("mine")}
+          onClick={() => changeTeacherClassesTab("mine")}
           className={cn("min-h-12 text-sm font-medium", tab === "mine" ? "border-b-2 border-[#2F8FB3] text-[#2F8FB3]" : "text-[#6B747B]")}
         >
           My Classes
         </button>
         <button
           type="button"
-          onClick={() => setTab("other")}
+          onClick={() => changeTeacherClassesTab("other")}
           className={cn("min-h-12 text-sm font-medium", tab === "other" ? "border-b-2 border-[#2F8FB3] text-[#2F8FB3]" : "text-[#6B747B]")}
         >
           Other Classes
@@ -3577,12 +3984,23 @@ export function TeacherClassesData({ slug }: { slug: string }) {
       <div className="space-y-4 p-4">
         {tab === "mine" ? (
           <>
-          {programs.length === 0 ? (
+          {visiblePrograms.length === 0 ? (
             <EmptyState title="No assigned classes" text="Classes you direct or instruct will appear here." />
           ) : (
             <div className="grid gap-4 md:grid-cols-2">
-              {programs.map((program) => (
-                <TeacherClassCard key={program.id} program={program} mosqueSlug={slug} role={roleByProgramId[program.id] ?? "instructor"} />
+              {visiblePrograms.map((program) => (
+                <TeacherClassCard
+                  key={program.id}
+                  program={program}
+                  mosqueSlug={slug}
+                  role={roleByProgramId[program.id] ?? "instructor"}
+                  canManageFinances={financeAccessByProgramId[program.id] ?? false}
+                  onResigned={() => {
+                    setHiddenProgramIds((current) => new Set([...current, program.id]));
+                    setToast({ tone: "success", message: "You resigned from the class." });
+                  }}
+                  onResignError={(message) => setToast({ tone: "error", message })}
+                />
               ))}
             </div>
           )}
@@ -3629,16 +4047,195 @@ export function AdminClassesData({ slug }: { slug: string }) {
   return (
     <section className="space-y-4 bg-[var(--workspace)] p-4">
       <EditorToast toast={toast} onClose={() => setToast(null)} />
+      <AdminMosqueSwitcher slug={slug} target="programs" />
       {programs.length === 0 ? (
         <EmptyState title="No classes yet" text="Classes created for this masjid will appear here." />
       ) : (
         <div className="grid gap-4 md:grid-cols-2">
           {programs.map((program) => (
-            <TeacherClassCard key={program.id} program={program} mosqueSlug={slug} role="director" basePath={`/m/${slug}/admin/programs`} controlLabel="Admin Control" />
+            <TeacherClassCard key={program.id} program={program} mosqueSlug={slug} role="director" basePath={`/m/${slug}/admin/programs`} controlLabel="Admin Control" canManageFinances />
           ))}
         </div>
       )}
       <TeacherWorkspaceTools slug={slug} mode="create" canCreateClass={canCreateClass} createHref={`/m/${slug}/admin/programs/new`} />
+    </section>
+  );
+}
+
+function AdminMosqueSwitcher({ slug, target = "programs" }: { slug: string; target?: "programs" | "masjid" | "finances" }) {
+  const router = useRouter();
+  const [mosques, setMosques] = useState<Array<Pick<Mosque, "id" | "name" | "slug">>>([]);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      void (async () => {
+        const session = await loadCachedSession();
+        const userId = session?.user.id;
+        if (!userId) {
+          setMosques([]);
+          return;
+        }
+        const supabase = createSupabaseBrowserClient();
+        const { data: memberships } = await supabase
+          .from("mosque_memberships")
+          .select("mosque_id")
+          .eq("profile_id", userId)
+          .eq("role", "admin")
+          .eq("status", "active");
+        const mosqueIds = (memberships ?? []).map((membership) => membership.mosque_id);
+        const { data } = mosqueIds.length
+          ? await supabase.from("mosques").select("id, name, slug").in("id", mosqueIds).order("name", { ascending: true })
+          : { data: [] as Array<Pick<Mosque, "id" | "name" | "slug">> };
+        setMosques(data ?? []);
+      })();
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, []);
+
+  if (mosques.length <= 1) {
+    return null;
+  }
+
+  return (
+    <label className="block rounded-[18px] border border-[#D6DCE0] bg-white p-3 shadow-[0_8px_22px_rgba(38,50,58,0.05)]">
+      <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#7B858C]">Viewing masjid</span>
+      <select
+        value={slug}
+        onChange={(event) => router.push(`/m/${event.target.value}/admin/${target === "masjid" ? "masjid" : target === "finances" ? "finances" : "programs"}`)}
+        className="mt-2 h-11 w-full rounded-[12px] border border-[#D6DCE0] bg-[#F8FAFB] px-3 text-sm font-semibold text-[#26323A] outline-none focus:border-[#2F8FB3]"
+      >
+        {mosques.map((mosque) => (
+          <option key={mosque.id} value={mosque.slug}>{mosque.name}</option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+export function AdminMasjidData({ slug }: { slug: string }) {
+  const [mosque, setMosque] = useState<Mosque | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      void (async () => {
+        setLoading(true);
+        setError(null);
+        const { data, error: mosqueError } = await createSupabaseBrowserClient().from("mosques").select("*").eq("slug", slug).maybeSingle();
+        if (mosqueError) {
+          setError(mosqueError.message);
+        }
+        setMosque(data ?? null);
+        setLoading(false);
+      })();
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, [slug]);
+
+  if (loading) {
+    return <ClassesLoadingPlaceholders count={1} />;
+  }
+
+  if (error) {
+    return <EmptyState title="Could not load masjid" text={error} />;
+  }
+
+  if (!mosque) {
+    return <EmptyState title="Masjid not found" text="This masjid could not be loaded." />;
+  }
+
+  return (
+    <section className="space-y-4 bg-[var(--workspace)] p-4">
+      <AdminMosqueSwitcher slug={slug} target="masjid" />
+      <article className="overflow-hidden rounded-[24px] border border-[#CBD8DE] bg-white shadow-[0_16px_40px_rgba(38,50,58,0.09)]">
+        <div className="relative h-44 bg-[#EAF4F2]">
+          {mosque.picture_url ? (
+            <Image src={mosque.picture_url} alt="" fill sizes="420px" className="object-cover" />
+          ) : (
+            <div className="flex h-full items-center justify-center text-3xl font-semibold text-[#17624F]">{initials(mosque.name)}</div>
+          )}
+        </div>
+        <div className="space-y-4 p-4">
+          <div>
+            <span className="inline-flex min-h-7 items-center rounded-full bg-[#E7F3F8] px-3 text-xs font-bold uppercase tracking-wide text-[#2F6077]">Masjid Control</span>
+            <h2 className="mt-3 text-2xl font-semibold leading-7 text-[#26323A]">{mosque.name}</h2>
+          </div>
+          <div className="divide-y divide-[#E3E8EC] border-t border-[#E3E8EC]">
+            <TeacherActionLink href={`/m/${slug}/admin/students`} icon={<StudentsIcon />} label="Manage Members" />
+            <TeacherActionLink href={`/m/${slug}/admin/finances`} icon={<FinanceIcon />} label="Manage Finances" />
+          </div>
+        </div>
+      </article>
+    </section>
+  );
+}
+
+export function AdminMasjidFinancesData({ slug }: { slug: string }) {
+  const [programs, setPrograms] = useState<Program[]>([]);
+  const [selectedProgramId, setSelectedProgramId] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      void (async () => {
+        setLoading(true);
+        setError(null);
+        const supabase = createSupabaseBrowserClient();
+        const { data: mosque } = await supabase.from("mosques").select("id").eq("slug", slug).maybeSingle();
+        if (!mosque) {
+          setError("Masjid not found.");
+          setLoading(false);
+          return;
+        }
+        const { data, error: programsError } = await supabase.from("programs").select("*").eq("mosque_id", mosque.id).order("title", { ascending: true });
+        if (programsError) {
+          setError(programsError.message);
+          setLoading(false);
+          return;
+        }
+        setPrograms(data ?? []);
+        setSelectedProgramId((current) => current || data?.[0]?.id || "");
+        setLoading(false);
+      })();
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, [slug]);
+
+  if (loading) {
+    return <DirectorySkeleton />;
+  }
+
+  if (error) {
+    return <EmptyState title="Could not load finances" text={error} />;
+  }
+
+  if (!programs.length) {
+    return (
+      <section className="space-y-4 bg-white p-4">
+        <AdminMosqueSwitcher slug={slug} target="finances" />
+        <EmptyState title="No classes yet" text="Create a class before managing finances." />
+      </section>
+    );
+  }
+
+  return (
+    <section className="space-y-4 bg-white p-4 pb-28">
+      <AdminMosqueSwitcher slug={slug} target="finances" />
+      <label className="block">
+        <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#7B858C]">Class finances</span>
+        <select
+          value={selectedProgramId}
+          onChange={(event) => setSelectedProgramId(event.target.value)}
+          className="mt-2 h-11 w-full rounded-[12px] border border-[#D6DCE0] bg-[#F8FAFB] px-3 text-sm font-semibold text-[#26323A] outline-none focus:border-[#2F8FB3]"
+        >
+          {programs.map((program) => (
+            <option key={program.id} value={program.id}>{program.title}</option>
+          ))}
+        </select>
+      </label>
+      {selectedProgramId ? <ProgramFinancesData slug={slug} programId={selectedProgramId} mode="admin" /> : null}
     </section>
   );
 }
@@ -3723,6 +4320,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
   const [learningTitle, setLearningTitle] = useState("What You Will Learn");
   const [learningIntro, setLearningIntro] = useState("");
   const [outcomeRows, setOutcomeRows] = useState<Array<{ id: string; text: string }>>([{ id: crypto.randomUUID(), text: "Add a learning outcome" }]);
+  const [faqRows, setFaqRows] = useState<ProgramEditorFaqRow[]>(defaultProgramFaqRows);
   const [mediaRows, setMediaRows] = useState<ProgramEditorMediaRow[]>([]);
   const [trackRows, setTrackRows] = useState<Array<{ id: string; name: string; sessions: ProgramScheduleRow[] }>>([
     { id: crypto.randomUUID(), name: "Main Track", sessions: [{ day: "Monday", start: "18:00", end: "20:00" }] },
@@ -3849,6 +4447,10 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
       setToast({ tone: "error", message: "Checklist points cannot be blank." });
       return;
     }
+    if (faqRows.some((row) => !row.question.trim() || !row.answer.trim())) {
+      setToast({ tone: "error", message: "FAQ questions and answers cannot be blank." });
+      return;
+    }
     if (trackRows.some((track) => !track.name.trim() || track.sessions.some((session) => session.end <= session.start))) {
       setToast({ tone: "error", message: "Each track needs a name and an end time after start time." });
       return;
@@ -3937,6 +4539,19 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
           throw new Error(outcomesError.message);
         }
       }
+      if (faqRows.length) {
+        const { error: faqsError } = await supabase.from("program_faqs").insert(
+          faqRows.map((row, index) => ({
+            program_id: program.id,
+            sort_order: index + 1,
+            question: row.question.trim(),
+            answer: row.answer.trim(),
+          })),
+        );
+        if (faqsError) {
+          throw new Error(faqsError.message);
+        }
+      }
       const { error: tracksError } = await supabase.from("program_tracks").insert(trackRows.map((track, index) => ({ program_id: program.id, sort_order: index + 1, name: track.name.trim(), description: null, schedule: track.sessions as unknown as Json, is_active: true })));
       if (tracksError) {
         throw new Error(tracksError.message);
@@ -3986,6 +4601,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
         learningTitle={learningVisible ? learningTitle : ""}
         learningIntro={learningVisible ? learningIntro : ""}
         outcomes={learningVisible ? outcomeRows.map((row) => row.text).filter((text) => text.trim()) : []}
+        faqRows={faqRows}
         mediaRows={mediaRows}
         trackRows={trackRows}
         instructorDisplayName={instructorDisplayName}
@@ -4046,6 +4662,8 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
         setLearningIntro={setLearningIntro}
         outcomeRows={outcomeRows}
         setOutcomeRows={setOutcomeRows}
+        faqRows={faqRows}
+        setFaqRows={setFaqRows}
         mediaRows={mediaRows}
         setMediaRows={setMediaRows}
         onMediaFile={setCreateMediaFile}
@@ -4113,6 +4731,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
   const [learningTitle, setLearningTitle] = useState("What You Will Learn");
   const [learningIntro, setLearningIntro] = useState("");
   const [outcomeRows, setOutcomeRows] = useState<Array<{ id: string; text: string }>>([]);
+  const [faqRows, setFaqRows] = useState<ProgramEditorFaqRow[]>(defaultProgramFaqRows);
   const [mediaRows, setMediaRows] = useState<Array<{ id: string; url: string; title: string; mediaType: string }>>([]);
   const [trackRows, setTrackRows] = useState<Array<{ id: string; name: string; sessions: ProgramScheduleRow[] }>>([]);
   const [trackSelectionMode, setTrackSelectionMode] = useState<TrackSelectionMode>("exact");
@@ -4144,11 +4763,12 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         return;
       }
 
-      const [{ data: programRow, error: programError }, { data: directorAllowed }, detailResult, outcomeResult, mediaResult, trackResult] = await Promise.all([
+      const [{ data: programRow, error: programError }, { data: directorAllowed }, detailResult, outcomeResult, faqResult, mediaResult, trackResult] = await Promise.all([
         supabase.from("programs").select("*").eq("id", programId).eq("mosque_id", mosque.id).maybeSingle(),
         supabase.rpc("is_program_director", { check_program_id: programId }),
         supabase.from("program_details").select("*").eq("program_id", programId).maybeSingle(),
         supabase.from("program_outcomes").select("*").eq("program_id", programId).order("sort_order", { ascending: true }),
+        supabase.from("program_faqs").select("*").eq("program_id", programId).order("sort_order", { ascending: true }),
         supabase.from("program_media").select("*").eq("program_id", programId).order("sort_order", { ascending: true }),
         supabase.from("program_tracks").select("*").eq("program_id", programId).order("sort_order", { ascending: true }),
       ]);
@@ -4217,6 +4837,9 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         const nextTrackSelectionMode = normalizeTrackSelectionMode(programRow.track_selection_mode);
         const nextTrackSelectionCount = programRow.track_selection_count ?? 1;
         const nextOutcomeRows = (outcomeResult.data ?? []).map((row) => ({ id: row.id, text: row.text }));
+        const nextFaqRows = (faqResult.data ?? []).length
+          ? (faqResult.data ?? []).map((row) => ({ id: row.id, question: row.question, answer: row.answer }))
+          : defaultProgramFaqRows;
         const nextMediaRows = (mediaResult.data ?? []).map((row) => ({ id: row.id, url: row.url, title: row.title ?? "", mediaType: row.media_type }));
         const nextTrackRows =
           (trackResult.data ?? []).length
@@ -4253,6 +4876,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         setTrackSelectionMode(nextTrackSelectionMode);
         setTrackSelectionCount(nextTrackSelectionCount);
         setOutcomeRows(nextOutcomeRows);
+        setFaqRows(nextFaqRows);
         setMediaRows(nextMediaRows);
         setTrackRows(nextTrackRows);
         setInitialEditorSignature(serializeProgramEditorState({
@@ -4269,6 +4893,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
           learningTitle: nextLearningTitle,
           learningIntro: nextLearningIntro,
           outcomeRows: nextOutcomeRows,
+          faqRows: nextFaqRows,
           mediaRows: nextMediaRows,
           trackRows: nextTrackRows,
           trackSelectionMode: nextTrackSelectionMode,
@@ -4373,6 +4998,11 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
       return;
     }
 
+    if (faqRows.some((row) => !row.question.trim() || !row.answer.trim())) {
+      setToast({ tone: "error", message: "FAQ questions and answers cannot be blank." });
+      return;
+    }
+
     if (trackRows.some((track) => !track.name.trim() || track.sessions.length === 0 || track.sessions.some((session) => session.end <= session.start))) {
       setToast({ tone: "error", message: "Each track needs a name and an end time after the start time." });
       return;
@@ -4455,6 +5085,23 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
       );
       if (outcomesError) {
         setToast({ tone: "error", message: outcomesError.message });
+        setBusy(false);
+        return;
+      }
+    }
+
+    await supabase.from("program_faqs").delete().eq("program_id", program.id);
+    if (faqRows.length) {
+      const { error: faqsError } = await supabase.from("program_faqs").insert(
+        faqRows.map((row, index) => ({
+          program_id: program.id,
+          sort_order: index + 1,
+          question: row.question.trim(),
+          answer: row.answer.trim(),
+        })),
+      );
+      if (faqsError) {
+        setToast({ tone: "error", message: faqsError.message });
         setBusy(false);
         return;
       }
@@ -4571,6 +5218,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
     learningTitle,
     learningIntro,
     outcomeRows,
+    faqRows,
     mediaRows,
     trackRows,
     trackSelectionMode,
@@ -4602,6 +5250,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         learningTitle={learningVisible ? learningTitle : ""}
         learningIntro={learningVisible ? learningIntro : ""}
         outcomes={learningVisible ? outcomeRows.map((row) => row.text).filter((text) => text.trim()) : []}
+        faqRows={faqRows}
         mediaRows={mediaRows}
         trackRows={trackRows}
         instructorDisplayName={instructorDisplayName}
@@ -4688,6 +5337,8 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
               Add checklist section
             </button>
           )}
+
+          <ProgramFaqEditor faqRows={faqRows} onChange={setFaqRows} />
 
           <DetailSection title="Program Media">
             <div className="divide-y divide-[#E6ECEF]">
@@ -4961,6 +5612,7 @@ function serializeProgramEditorState(state: {
   learningTitle: string;
   learningIntro: string;
   outcomeRows: Array<{ text: string }>;
+  faqRows: Array<{ question: string; answer: string }>;
   mediaRows: Array<{ url: string; title: string; mediaType: string }>;
   trackRows: Array<{ name: string; sessions: ProgramScheduleRow[] }>;
   trackSelectionMode: TrackSelectionMode;
@@ -4984,6 +5636,7 @@ function serializeProgramEditorState(state: {
     learningTitle: state.learningTitle.trim(),
     learningIntro: state.learningIntro.trim(),
     outcomes: state.outcomeRows.map((row) => row.text.trim()),
+    faqs: state.faqRows.map((row) => ({ question: row.question.trim(), answer: row.answer.trim() })),
     media: state.mediaRows.map((row) => ({ url: row.url.trim(), title: row.title.trim(), mediaType: row.mediaType })),
     tracks: state.trackRows.map((track) => ({
       name: track.name.trim(),
@@ -5003,6 +5656,7 @@ function ProgramEditorPreview({
   learningTitle,
   learningIntro,
   outcomes,
+  faqRows,
   mediaRows,
   trackRows,
   instructorDisplayName,
@@ -5014,6 +5668,7 @@ function ProgramEditorPreview({
   learningTitle: string;
   learningIntro: string;
   outcomes: string[];
+  faqRows: ProgramEditorFaqRow[];
   mediaRows: Array<{ id: string; url: string; title: string; mediaType: string; previewUrl?: string }>;
   trackRows: Array<{ id: string; name: string; sessions: ProgramScheduleRow[] }>;
   instructorDisplayName: string;
@@ -5133,6 +5788,16 @@ function ProgramEditorPreview({
         {instructorCredentials.trim() ? <p className="mt-3 text-sm leading-7 text-[#52616A]">{instructorCredentials}</p> : null}
         {instructorContactPhone.trim() ? <p className="mt-3 text-sm font-medium text-[#17624F]">{instructorContactPhone}</p> : null}
       </DetailSection>
+
+      {faqRows.length ? (
+        <ProgramFaqSection
+          faqs={faqRows.map((row, index) => ({
+            id: row.id || `preview-faq-${index}`,
+            question: row.question.trim() || `Question ${index + 1}`,
+            answer: row.answer.trim() || "Add an answer for this FAQ.",
+          }))}
+        />
+      ) : null}
       </div>
     </div>
   );
@@ -5183,6 +5848,8 @@ type ProgramEditorFieldsProps = {
   setLearningIntro: (value: string) => void;
   outcomeRows: Array<{ id: string; text: string }>;
   setOutcomeRows: Dispatch<SetStateAction<Array<{ id: string; text: string }>>>;
+  faqRows: ProgramEditorFaqRow[];
+  setFaqRows: Dispatch<SetStateAction<ProgramEditorFaqRow[]>>;
   mediaRows: ProgramEditorMediaRow[];
   setMediaRows: Dispatch<SetStateAction<ProgramEditorMediaRow[]>>;
   onMediaFile: (rowId: string, file: File | null) => void;
@@ -5214,6 +5881,50 @@ type ProgramEditorFieldsProps = {
   setInstructorContactPhone: (value: string) => void;
 };
 
+function ProgramFaqEditor({ faqRows, onChange }: { faqRows: ProgramEditorFaqRow[]; onChange: Dispatch<SetStateAction<ProgramEditorFaqRow[]>> }) {
+  return (
+    <DetailSection title="FAQs">
+      <div className="space-y-3">
+       
+        {faqRows.map((row, index) => (
+          <div key={row.id} className="space-y-2 border-t border-[#E6ECEF] pt-3 first:border-t-0 first:pt-0">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-[#7B858C]">Question {index + 1}</p>
+              <button
+                type="button"
+                onClick={() => onChange((current) => current.filter((item) => item.id !== row.id))}
+                className="flex h-8 w-8 items-center justify-center rounded-[8px] text-[#C83F31] hover:bg-[#FDEDEA]"
+                aria-label="Remove FAQ"
+              >
+                <TrashIcon />
+              </button>
+            </div>
+            <input
+              value={row.question}
+              onChange={(event) => onChange((current) => current.map((item) => item.id === row.id ? { ...item, question: event.target.value } : item))}
+              className="h-11 w-full rounded-[8px] border border-[#B9C3C8] px-3 text-sm outline-none focus:border-[#2F8FB3]"
+              placeholder="Question"
+            />
+            <textarea
+              value={row.answer}
+              onChange={(event) => onChange((current) => current.map((item) => item.id === row.id ? { ...item, answer: event.target.value } : item))}
+              className="min-h-24 w-full resize-y rounded-[8px] border border-[#B9C3C8] px-3 py-2 text-sm leading-6 outline-none focus:border-[#2F8FB3]"
+              placeholder="Answer"
+            />
+          </div>
+        ))}
+        <button
+          type="button"
+          onClick={() => onChange((current) => [...current, { id: crypto.randomUUID(), question: "New question", answer: "Add the answer families should see." }])}
+          className="min-h-10 rounded-[8px] border border-[#D6DCE0] px-4 text-sm font-semibold text-[#26323A]"
+        >
+          Add FAQ
+        </button>
+      </div>
+    </DetailSection>
+  );
+}
+
 function ProgramEditorFields({
   learningVisible,
   setLearningVisible,
@@ -5223,6 +5934,8 @@ function ProgramEditorFields({
   setLearningIntro,
   outcomeRows,
   setOutcomeRows,
+  faqRows,
+  setFaqRows,
   mediaRows,
   setMediaRows,
   onMediaFile,
@@ -5302,6 +6015,8 @@ function ProgramEditorFields({
             Add checklist section
           </button>
         )}
+
+        <ProgramFaqEditor faqRows={faqRows} onChange={setFaqRows} />
 
         <DetailSection title="Program Media">
           <div className="divide-y divide-[#E6ECEF]">
@@ -5668,11 +6383,17 @@ type AdminMemberEnrollmentContext = {
   program: Program | null;
   tracks: ProgramTrack[];
 };
+type AdminMemberTeacherClassContext = {
+  assignment: ProgramTeacher;
+  program: Program | null;
+};
 type AdminMember = MosqueMembership & {
   profile?: Profile | null;
   enrollmentContexts?: AdminMemberEnrollmentContext[];
+  teacherClassContexts?: AdminMemberTeacherClassContext[];
   parentProfile?: Profile | null;
   childProfiles?: Profile[];
+  synthetic?: boolean;
 };
 
 export function AdminMembersData({ slug }: { slug: string }) {
@@ -5680,6 +6401,12 @@ export function AdminMembersData({ slug }: { slug: string }) {
   const [activeType, setActiveType] = useState<"student" | "parent" | "teacher" | "admin">("student");
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [toast, setToast] = useState<EditorToastState | null>(null);
+  const [permissionTarget, setPermissionTarget] = useState<
+    | { type: "class_creation"; member: AdminMember; enabled: boolean }
+    | { type: "finance"; member: AdminMember; context: AdminMemberTeacherClassContext; enabled: boolean }
+    | null
+  >(null);
   const [error, setError] = useState<string | null>(null);
 
   async function loadMembers() {
@@ -5708,6 +6435,9 @@ export function AdminMembersData({ slug }: { slug: string }) {
 
     const { data: programRows } = await supabase.from("programs").select("*").eq("mosque_id", mosque.id).order("title", { ascending: true });
     const programIds = (programRows ?? []).map((program) => program.id);
+    const { data: teacherAssignmentRows } = programIds.length
+      ? await supabase.from("program_teachers").select("*").in("program_id", programIds).not("teacher_profile_id", "is", null).order("created_at", { ascending: true })
+      : { data: [] as ProgramTeacher[] };
     const { data: enrollmentRows } = programIds.length ? await supabase.from("enrollments").select("*").in("program_id", programIds) : { data: [] as Enrollment[] };
     const enrollmentIds = (enrollmentRows ?? []).map((enrollment) => enrollment.id);
     const { data: enrollmentTrackRows } = enrollmentIds.length
@@ -5721,6 +6451,7 @@ export function AdminMembersData({ slug }: { slug: string }) {
     const profileIds = Array.from(
       new Set([
         ...(membershipRows ?? []).map((membership) => membership.profile_id),
+        ...(teacherAssignmentRows ?? []).map((assignment) => assignment.teacher_profile_id).filter(Boolean) as string[],
         ...(enrollmentRows ?? []).map((enrollment) => enrollment.student_profile_id),
         ...(linkRows ?? []).flatMap((link) => [link.parent_profile_id, link.child_profile_id]),
       ]),
@@ -5734,6 +6465,19 @@ export function AdminMembersData({ slug }: { slug: string }) {
       trackIdsByEnrollmentId.set(row.enrollment_id, [...(trackIdsByEnrollmentId.get(row.enrollment_id) ?? []), row.program_track_id]);
     }
     const enrollmentContextsByStudentId = new Map<string, AdminMemberEnrollmentContext[]>();
+    const teacherContextsByProfileId = new Map<string, AdminMemberTeacherClassContext[]>();
+    for (const assignment of teacherAssignmentRows ?? []) {
+      if (!assignment.teacher_profile_id) {
+        continue;
+      }
+      teacherContextsByProfileId.set(assignment.teacher_profile_id, [
+        ...(teacherContextsByProfileId.get(assignment.teacher_profile_id) ?? []),
+        {
+          assignment,
+          program: programById.get(assignment.program_id) ?? null,
+        },
+      ]);
+    }
     for (const enrollment of enrollmentRows ?? []) {
       const selectedTrackIds = trackIdsByEnrollmentId.get(enrollment.id) ?? (enrollment.program_track_id ? [enrollment.program_track_id] : []);
       const context = {
@@ -5756,17 +6500,41 @@ export function AdminMembersData({ slug }: { slug: string }) {
       }
     }
 
-    setMembers(
-      (membershipRows ?? [])
+    const membershipMembers = (membershipRows ?? [])
         .map((membership) => ({
           ...membership,
           profile: profileById.get(membership.profile_id) ?? null,
           enrollmentContexts: enrollmentContextsByStudentId.get(membership.profile_id) ?? [],
+          teacherClassContexts: teacherContextsByProfileId.get(membership.profile_id) ?? [],
           parentProfile: parentByChildId.get(membership.profile_id) ?? null,
           childProfiles: childrenByParentId.get(membership.profile_id) ?? [],
         }))
-        .filter((membership) => membership.profile?.account_type === membership.role),
-    );
+        .filter((membership) => membership.profile?.account_type === membership.role || membership.role === "teacher");
+    const existingMembershipProfileIds = new Set(membershipMembers.map((membership) => membership.profile_id));
+    const syntheticTeacherMembers: AdminMember[] = Array.from(teacherContextsByProfileId.entries())
+      .filter(([profileId]) => !existingMembershipProfileIds.has(profileId))
+      .map(([profileId, contexts]) => ({
+        id: `teacher-assignment:${profileId}`,
+        mosque_id: mosque.id,
+        profile_id: profileId,
+        role: "teacher",
+        status: "active",
+        teacher_approval_status: null,
+        teacher_approval_reviewed_by: null,
+        teacher_approval_reviewed_at: null,
+        can_create_programs: false,
+        created_at: contexts[0]?.assignment.created_at ?? new Date().toISOString(),
+        updated_at: contexts[0]?.assignment.created_at ?? new Date().toISOString(),
+        profile: profileById.get(profileId) ?? null,
+        enrollmentContexts: [],
+        teacherClassContexts: contexts,
+        parentProfile: null,
+        childProfiles: [],
+        synthetic: true,
+      }))
+      .filter((member) => !member.profile || member.profile.account_type === "teacher");
+
+    setMembers([...membershipMembers, ...syntheticTeacherMembers]);
     setLoading(false);
   }
 
@@ -5791,6 +6559,43 @@ export function AdminMembersData({ slug }: { slug: string }) {
     await loadMembers();
   }
 
+  async function setTeacherFinancePermission(assignmentId: string, enabled: boolean) {
+    setBusyId(assignmentId);
+    setError(null);
+    const supabase = createSupabaseBrowserClient();
+    const { error: updateError } = await supabase
+      .from("program_teachers")
+      .update({ can_manage_finances: enabled })
+      .eq("id", assignmentId)
+      .eq("role", "director");
+    setBusyId(null);
+    if (updateError) {
+      setError(updateError.message);
+      return;
+    }
+    setToast({ tone: "success", message: enabled ? "Finance access enabled." : "Finance access removed." });
+    window.dispatchEvent(new Event("tareeqah:programs-changed"));
+    await loadMembers();
+  }
+
+  async function confirmPermissionChange() {
+    if (!permissionTarget) {
+      return;
+    }
+    const target = permissionTarget;
+    setPermissionTarget(null);
+    if (target.type === "class_creation") {
+      if (target.member.synthetic) {
+        setError("This teacher does not have an active teacher membership record yet.");
+        return;
+      }
+      await setTeacherCreationPermission(target.member.id, target.enabled);
+      setToast({ tone: "success", message: target.enabled ? "Class creation enabled." : "Class creation removed." });
+      return;
+    }
+    await setTeacherFinancePermission(target.context.assignment.id, target.enabled);
+  }
+
   if (loading) {
     return <DirectorySkeleton />;
   }
@@ -5808,6 +6613,7 @@ export function AdminMembersData({ slug }: { slug: string }) {
 
   return (
     <section className="space-y-4 bg-[var(--workspace)] p-4">
+      <EditorToast toast={toast} onClose={() => setToast(null)} />
       {error ? <div className="border border-[#F4C7C1] bg-[#FDEDEA] px-4 py-3 text-sm text-[#A4352A]">{error}</div> : null}
       <div className="grid grid-cols-4 gap-1.5">
         {tabs.map((tab) => (
@@ -5834,12 +6640,20 @@ export function AdminMembersData({ slug }: { slug: string }) {
               key={member.id}
               member={member}
               viewType={activeType}
-              busy={busyId === member.id}
-              onToggleTeacherCreation={() => void setTeacherCreationPermission(member.id, !member.can_create_programs)}
+              busyId={busyId}
+              onRequestToggleTeacherCreation={() => setPermissionTarget({ type: "class_creation", member, enabled: !member.can_create_programs })}
+              onRequestToggleFinance={(context) => setPermissionTarget({ type: "finance", member, context, enabled: !context.assignment.can_manage_finances })}
             />
           ))}
         </div>
       )}
+      {permissionTarget ? (
+        <AdminTeacherPermissionModal
+          target={permissionTarget}
+          onCancel={() => setPermissionTarget(null)}
+          onConfirm={() => void confirmPermissionChange()}
+        />
+      ) : null}
     </section>
   );
 }
@@ -5847,20 +6661,23 @@ export function AdminMembersData({ slug }: { slug: string }) {
 function AdminMemberRow({
   member,
   viewType,
-  busy,
-  onToggleTeacherCreation,
+  busyId,
+  onRequestToggleTeacherCreation,
+  onRequestToggleFinance,
 }: {
   member: AdminMember;
   viewType: "student" | "parent" | "teacher" | "admin";
-  busy: boolean;
-  onToggleTeacherCreation: () => void;
+  busyId: string | null;
+  onRequestToggleTeacherCreation: () => void;
+  onRequestToggleFinance: (context: AdminMemberTeacherClassContext) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const name = member.profile?.full_name || member.profile?.email || "Unnamed member";
+  const name = member.profile?.full_name || member.profile?.email || (member.role === "teacher" ? "Assigned teacher" : "Unnamed member");
   const isStudentView = viewType === "student";
   const isChildStudent = isStudentView && Boolean(member.parentProfile);
   const roleLabel = isStudentView ? (isChildStudent ? "Child Student" : "Adult Student") : member.role === "parent" ? "Parent" : member.role === "teacher" ? "Teacher" : "Admin";
   const enrollmentContexts = member.enrollmentContexts ?? [];
+  const teacherClassContexts = member.teacherClassContexts ?? [];
   const childProfiles = member.childProfiles ?? [];
 
   return (
@@ -5925,17 +6742,14 @@ function AdminMemberRow({
             ) : null}
             {viewType === "parent" ? <AdminMemberChildrenList children={childProfiles} /> : null}
             {member.role === "teacher" ? (
-              <button
-                type="button"
-                disabled={busy}
-                onClick={onToggleTeacherCreation}
-                className={cn(
-                  "mt-3 min-h-9 rounded-full px-4 text-xs font-semibold disabled:opacity-60",
-                  member.can_create_programs ? "border border-[#C83F31] bg-white text-[#C83F31]" : "bg-[#17624F] text-white",
-                )}
-              >
-                {member.can_create_programs ? "Revoke class creation" : "Allow class creation"}
-              </button>
+              <AdminMemberTeacherClassList
+                contexts={teacherClassContexts}
+                canCreatePrograms={member.can_create_programs}
+                synthetic={Boolean(member.synthetic)}
+                busyId={busyId}
+                onToggleClassCreation={onRequestToggleTeacherCreation}
+                onToggleFinance={onRequestToggleFinance}
+              />
             ) : null}
           </div>
         </div>
@@ -6001,13 +6815,16 @@ function AdminMemberChildrenList({ children }: { children: Profile[] }) {
 
 export function TeacherStudentsData({ slug, programId }: { slug: string; programId: string }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const fromFinances = searchParams.get("from") === "finances";
+  const financeStudentId = searchParams.get("studentId");
   const [mosque, setMosque] = useState<Mosque | null>(null);
   const [program, setProgram] = useState<Program | null>(null);
   const [students, setStudents] = useState<Array<{ enrollment: Enrollment; profile: StudentDisplay | null; parent?: ParentDisplay | null; trackIds: string[] }>>([]);
   const [tracks, setTracks] = useState<ProgramTrack[]>([]);
   const [selectedRosterTrackIds, setSelectedRosterTrackIds] = useState<string[]>([]);
   const [waitlist, setWaitlist] = useState<RequestWithContext[]>([]);
-  const [studentSearch, setStudentSearch] = useState("");
+  const [studentSearch, setStudentSearch] = useState(financeStudentId ?? "");
   const [genderFilter, setGenderFilter] = useState("all");
   const [studentSort, setStudentSort] = useState<"first" | "last" | "age">("first");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
@@ -6018,8 +6835,17 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
   const [error, setError] = useState<string | null>(null);
   const [kickTarget, setKickTarget] = useState<{ studentId: string; studentName: string } | null>(null);
   const [noteTarget, setNoteTarget] = useState<{ item: { enrollment: Enrollment; profile: StudentDisplay | null; parent?: ParentDisplay | null }; confirmedParent?: boolean } | null>(null);
+  const [reviewTarget, setReviewTarget] = useState<{ request: RequestWithContext; action: "approved" | "rejected" } | null>(null);
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const [toast, setToast] = useState<EditorToastState | null>(null);
   const [showKickMessage, setShowKickMessage] = useState(false);
   const [kickMessage, setKickMessage] = useState("");
+
+  useEffect(() => {
+    if (fromFinances && financeStudentId) {
+      setStudentSearch(financeStudentId);
+    }
+  }, [financeStudentId, fromFinances]);
 
   function notesHref(studentId: string) {
     const isAdminRoute = typeof window !== "undefined" && window.location.pathname.startsWith(`/m/${slug}/admin/`);
@@ -6190,6 +7016,64 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
     await loadStudents();
   }
 
+  async function reviewWaitlistedRequest(
+    request: RequestWithContext,
+    status: "approved" | "rejected",
+    options: { priceMonthlyCents?: number | null; paymentBypassed?: boolean; note?: string | null } = {},
+  ) {
+    if (!currentUserId || !program) {
+      return;
+    }
+
+    if (status === "approved" && program.is_paid && !options.paymentBypassed && (options.priceMonthlyCents ?? 0) < 50) {
+      setError("Paid approvals need a monthly price of at least $0.50, or choose bypass payment.");
+      return;
+    }
+
+    setReviewBusy(true);
+    setError(null);
+    const supabase = createSupabaseBrowserClient();
+    const now = new Date().toISOString();
+    const { error: reviewError } = await supabase
+      .from("enrollment_requests")
+      .update({
+        status,
+        reviewed_by: currentUserId,
+        reviewed_at: now,
+        review_note: options.note?.trim() || null,
+        decision_note: options.note?.trim() || null,
+        approved_price_monthly_cents: status === "approved" ? (options.paymentBypassed ? 0 : options.priceMonthlyCents ?? program.price_monthly_cents ?? null) : null,
+        payment_bypassed: status === "approved" ? Boolean(options.paymentBypassed) : false,
+        admission_completed_at: status === "approved" && (!program.is_paid || options.paymentBypassed) ? now : null,
+        teacher_dismissed_at: null,
+      })
+      .eq("id", request.id);
+
+    if (reviewError) {
+      setReviewBusy(false);
+      setError(reviewError.message);
+      return;
+    }
+
+    if (status === "approved" && (!program.is_paid || options.paymentBypassed)) {
+      await supabase.from("enrollments").upsert(
+        {
+          program_id: request.program_id,
+          student_profile_id: request.student_profile_id,
+          program_track_id: request.program_track_id,
+        },
+        { onConflict: "program_id,student_profile_id" },
+      );
+    }
+
+    queueEnrollmentRequestReviewedEmail(request.id);
+    window.dispatchEvent(new Event("tareeqah:notifications-changed"));
+    await loadStudents();
+    setReviewBusy(false);
+    setReviewTarget(null);
+    setToast({ tone: "success", message: status === "approved" ? "Waitlisted application accepted." : "Waitlisted application rejected." });
+  }
+
   const filteredStudents = useMemo(() => {
     const query = studentSearch.trim().toLowerCase();
     const sorted = students
@@ -6201,7 +7085,6 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
         }
         const trackMatches =
           tracks.length === 0 ||
-          selectedRosterTrackIds.length === 0 ||
           selectedRosterTrackIds.length === tracks.length ||
           (student.trackIds ?? []).some((trackId) => selectedRosterTrackIds.includes(trackId));
         if (!trackMatches) {
@@ -6217,6 +7100,8 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
           student.parent?.full_name,
           student.parent?.email,
           student.parent?.phone_number,
+          student.enrollment.student_profile_id,
+          student.enrollment.id,
         ]
           .filter(Boolean)
           .join(" ")
@@ -6275,6 +7160,18 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
 
   return (
     <div className="bg-white px-5 pb-28 pt-5">
+      <EditorToast toast={toast} onClose={() => setToast(null)} />
+      {fromFinances ? (
+        <div className="sticky top-3 z-20 mb-4">
+          <button
+            type="button"
+            onClick={() => router.push(`${typeof window !== "undefined" && window.location.pathname.startsWith(`/m/${slug}/admin/`) ? `/m/${slug}/admin/programs` : `/m/${slug}/teacher/classes`}/${programId}/finances`)}
+            className="min-h-10 rounded-full bg-[#17624F] px-4 text-sm font-semibold text-white shadow-[0_10px_24px_rgba(23,98,79,0.22)]"
+          >
+            Back to Finances
+          </button>
+        </div>
+      ) : null}
       <div className="space-y-5">
         {error ? <div className="border-l-4 border-[#E25241] bg-[#FDEDEA] p-3 text-sm text-[#A4352A]">{error}</div> : null}
 
@@ -6292,8 +7189,11 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
             onTrackToggle={(trackId) =>
               setSelectedRosterTrackIds((current) => {
                 const allTrackIds = tracks.map((track) => track.id);
-                if (trackId === "all") {
+                if (trackId === "select_all") {
                   return allTrackIds;
+                }
+                if (trackId === "deselect_all") {
+                  return [];
                 }
                 return current.includes(trackId) ? current.filter((id) => id !== trackId) : [...current, trackId];
               })
@@ -6365,19 +7265,38 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
           )}
         </section>
 
-        {waitlist.length ? (
+        {!fromFinances && waitlist.length ? (
           <section className="space-y-3">
             <HomeSectionTitle title="Waitlist" />
-            {waitlist.map((request) => <TeacherRequestCard key={request.id} request={request} reviewed />)}
+            {waitlist.map((request) => (
+              <TeacherRequestCard
+                key={request.id}
+                request={request}
+                onAccept={() => setReviewTarget({ request, action: "approved" })}
+                onReject={() => setReviewTarget({ request, action: "rejected" })}
+              />
+            ))}
           </section>
         ) : null}
       </div>
+      {reviewTarget ? (
+        <ApplicationDecisionModal
+          target={reviewTarget}
+          busy={reviewBusy}
+          onClose={() => {
+            if (!reviewBusy) {
+              setReviewTarget(null);
+            }
+          }}
+          onSubmit={(options) => reviewWaitlistedRequest(reviewTarget.request, reviewTarget.action, options)}
+        />
+      ) : null}
       {kickTarget ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#26323A]/35 px-6 backdrop-blur-sm">
           <div className="w-full max-w-sm rounded-[28px] bg-white p-5 text-[#26323A] shadow-[0_24px_70px_rgba(38,50,58,0.22)]">
             <h2 className="text-xl font-semibold">Remove student?</h2>
             <p className="mt-2 text-sm leading-6 text-[#6B747B]">
-              {kickTarget.studentName} will be removed from {program.title}. They will receive a notification in their inbox.
+              {kickTarget.studentName} will be removed from {program.title}. Any active payment subscription should be cancelled immediately, and they will receive a notification in their inbox.
             </p>
             <button
               type="button"
@@ -6428,6 +7347,636 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
       ) : null}
     </div>
   );
+}
+
+function AdminMemberTeacherClassList({
+  contexts,
+  canCreatePrograms,
+  synthetic,
+  busyId,
+  onToggleClassCreation,
+  onToggleFinance,
+}: {
+  contexts: AdminMemberTeacherClassContext[];
+  canCreatePrograms: boolean;
+  synthetic: boolean;
+  busyId: string | null;
+  onToggleClassCreation: () => void;
+  onToggleFinance: (context: AdminMemberTeacherClassContext) => void;
+}) {
+  return (
+    <div className="mt-3 rounded-[18px] bg-[#F7FAFB] px-4 py-3">
+      <p className="text-[10px] font-semibold uppercase tracking-wide text-[#7B858C]">Involved Classes</p>
+      {contexts.length === 0 ? (
+        <p className="mt-1 text-sm font-semibold text-[#26323A]">Not assigned to any classes.</p>
+      ) : (
+        <div className="mt-2 divide-y divide-[#E3E8EC]">
+          {contexts.map((context) => {
+            const isDirector = context.assignment.role === "director";
+            return (
+              <div key={context.assignment.id} className="flex items-center gap-3 py-3">
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-semibold text-[#26323A]">{context.program?.title ?? "Class"}</p>
+                  <p className="mt-0.5 truncate text-xs font-medium text-[#6B747B]">{isDirector ? "Director" : "Instructor"}</p>
+                </div>
+                {isDirector ? (
+                  <div className="flex shrink-0 items-center gap-2">
+                    <PermissionIconButton
+                      label={canCreatePrograms ? "Class creation active" : "Class creation inactive"}
+                      active={canCreatePrograms}
+                      disabled={synthetic || busyId === context.assignment.id}
+                      icon="class"
+                      onClick={onToggleClassCreation}
+                    />
+                    <PermissionIconButton
+                      label={context.assignment.can_manage_finances ? "Finance access active" : "Finance access inactive"}
+                      active={context.assignment.can_manage_finances}
+                      disabled={busyId === context.assignment.id}
+                      icon="finance"
+                      onClick={() => onToggleFinance(context)}
+                    />
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <div className="mt-3 flex flex-wrap gap-2 text-[11px] font-semibold text-[#7B858C]">
+        <span className="inline-flex items-center gap-1"><PermissionClassIcon /> Class creation</span>
+        <span className="inline-flex items-center gap-1"><FinanceIcon /> Finances</span>
+      </div>
+    </div>
+  );
+}
+
+function PermissionIconButton({
+  active,
+  disabled,
+  icon,
+  label,
+  onClick,
+}: {
+  active: boolean;
+  disabled?: boolean;
+  icon: "class" | "finance";
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      className={cn(
+        "flex h-9 w-9 items-center justify-center rounded-full border transition disabled:opacity-45",
+        active ? "border-[#17624F] bg-[#17624F] text-white" : "border-[#CAD4DA] bg-white text-[#8A949B]",
+      )}
+      aria-label={label}
+      title={label}
+    >
+      {icon === "class" ? <PermissionClassIcon /> : <FinanceIcon />}
+    </button>
+  );
+}
+
+function AdminTeacherPermissionModal({
+  target,
+  onCancel,
+  onConfirm,
+}: {
+  target:
+    | { type: "class_creation"; member: AdminMember; enabled: boolean }
+    | { type: "finance"; member: AdminMember; context: AdminMemberTeacherClassContext; enabled: boolean };
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const teacherName = target.member.profile?.full_name || target.member.profile?.email || "this teacher";
+  const permission = target.type === "class_creation" ? "class creation" : "finance management";
+  const className = target.type === "finance" ? target.context.program?.title ?? "this class" : null;
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#26323A]/35 px-5 backdrop-blur-sm">
+      <div className="w-full max-w-sm rounded-[28px] bg-white p-5 text-[#26323A] shadow-[0_24px_70px_rgba(38,50,58,0.22)]">
+        <div className={cn("flex h-12 w-12 items-center justify-center rounded-full", target.enabled ? "bg-[#E8F7F2] text-[#17624F]" : "bg-[#F3F6F8] text-[#52616A]")}>
+          {target.type === "class_creation" ? <PermissionClassIcon /> : <FinanceIcon />}
+        </div>
+        <h2 className="mt-4 text-xl font-semibold">{target.enabled ? "Enable" : "Disable"} {permission}?</h2>
+        <p className="mt-2 text-sm leading-6 text-[#6B747B]">
+          {target.enabled ? "Allow" : "Remove"} {permission} for {teacherName}
+          {className ? ` on ${className}` : ""}.
+        </p>
+        <div className="mt-5 flex justify-end gap-2">
+          <button type="button" onClick={onCancel} className="min-h-10 px-3 text-sm font-semibold text-[#6B747B]">Cancel</button>
+          <button type="button" onClick={onConfirm} className="min-h-10 rounded-[10px] bg-[#17624F] px-4 text-sm font-semibold text-white">Confirm</button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+type FinanceEnrollmentRow = {
+  enrollment: Enrollment;
+  student: StudentDisplay | null;
+  parent: ParentDisplay | null;
+  approver: Profile | null;
+  request: EnrollmentRequest | null;
+  subscription: ProgramSubscription | null;
+};
+
+type FinanceAction = "waive" | "change_price" | "end_subscription" | "student_info" | "payment_history";
+
+export function ProgramFinancesData({ slug, programId, mode = "teacher" }: { slug: string; programId: string; mode?: "teacher" | "admin" }) {
+  const router = useRouter();
+  const [program, setProgram] = useState<Program | null>(null);
+  const [rows, setRows] = useState<FinanceEnrollmentRow[]>([]);
+  const [auditEvents, setAuditEvents] = useState<ProgramFinanceAuditEvent[]>([]);
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [paymentFilter, setPaymentFilter] = useState("all");
+  const [typeFilter, setTypeFilter] = useState("all");
+  const [actionTarget, setActionTarget] = useState<{ row: FinanceEnrollmentRow; action: FinanceAction } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      void loadFinanceRows();
+    }, 0);
+    return () => window.clearTimeout(timeout);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [programId, slug, mode]);
+
+  async function loadFinanceRows() {
+    setLoading(true);
+    setError(null);
+    const supabase = createSupabaseBrowserClient();
+    const session = await loadCachedSession();
+    const userId = session?.user.id ?? null;
+    if (!userId) {
+      setError("Log in required.");
+      setLoading(false);
+      return;
+    }
+
+    const [{ data: mosque, error: mosqueError }, { data: profile }] = await Promise.all([
+      supabase.from("mosques").select("id").eq("slug", slug).maybeSingle(),
+      supabase.from("profiles").select("account_type").eq("id", userId).maybeSingle(),
+    ]);
+
+    if (mosqueError || !mosque) {
+      setError(mosqueError?.message ?? "Masjid not found.");
+      setLoading(false);
+      return;
+    }
+
+    const { data: programRow, error: programError } = await supabase.from("programs").select("*").eq("id", programId).eq("mosque_id", mosque.id).maybeSingle();
+    if (programError || !programRow) {
+      setError(programError?.message ?? "Class not found.");
+      setLoading(false);
+      return;
+    }
+
+    const [{ data: memberships }, { data: directorAssignment }] = await Promise.all([
+      supabase.from("mosque_memberships").select("role, status").eq("mosque_id", mosque.id).eq("profile_id", userId),
+      supabase
+        .from("program_teachers")
+        .select("id, can_manage_finances, role")
+        .eq("program_id", programId)
+        .eq("teacher_profile_id", userId)
+        .eq("role", "director")
+        .maybeSingle(),
+    ]);
+    const isAdmin = profile?.account_type === "admin" && (memberships ?? []).some((membership) => membership.role === "admin" && membership.status === "active");
+    const hasDirectorFinanceAccess = Boolean(directorAssignment?.can_manage_finances);
+    if (!isAdmin && !hasDirectorFinanceAccess) {
+      setProgram(programRow);
+      setRows([]);
+      setAuditEvents([]);
+      setError("Finance access has not been enabled for this class.");
+      setLoading(false);
+      return;
+    }
+
+    const [{ data: enrollmentRows, error: enrollmentError }, { data: requestRows }, { data: subscriptionRows }, { data: auditRows }] = await Promise.all([
+      supabase.from("enrollments").select("*").eq("program_id", programId).order("created_at", { ascending: true }),
+      supabase.from("enrollment_requests").select("*").eq("program_id", programId).order("requested_at", { ascending: false }),
+      supabase.from("program_subscriptions").select("*").eq("program_id", programId).order("updated_at", { ascending: false }),
+      supabase.from("program_finance_audit_events").select("*").eq("program_id", programId).order("created_at", { ascending: false }).limit(20),
+    ]);
+
+    if (enrollmentError) {
+      setError(enrollmentError.message);
+      setLoading(false);
+      return;
+    }
+
+    const studentIds = Array.from(new Set((enrollmentRows ?? []).map((enrollment) => enrollment.student_profile_id)));
+    const { data: linkRows } = studentIds.length
+      ? await supabase.from("parent_child_links").select("child_profile_id, parent_profile_id").eq("mosque_id", mosque.id).in("child_profile_id", studentIds)
+      : { data: [] as Array<{ child_profile_id: string; parent_profile_id: string }> };
+    const reviewerIds = Array.from(new Set((requestRows ?? []).map((request) => request.reviewed_by).filter(Boolean) as string[]));
+    const parentIds = Array.from(
+      new Set([
+        ...(linkRows ?? []).map((link) => link.parent_profile_id),
+        ...(requestRows ?? []).map((request) => request.parent_profile_id).filter(Boolean) as string[],
+        ...(subscriptionRows ?? []).map((subscription) => subscription.parent_profile_id).filter(Boolean) as string[],
+      ]),
+    );
+    const profileIds = Array.from(new Set([...studentIds, ...parentIds, ...reviewerIds]));
+    const { data: profileRows } = profileIds.length
+      ? await supabase.from("profiles").select("id, full_name, email, phone_number, avatar_url, age, gender, date_of_birth, account_type").in("id", profileIds)
+      : { data: [] as StudentDisplay[] };
+
+    setProgram(programRow);
+    setRows(
+      (enrollmentRows ?? []).map((enrollment) => {
+        const request = (requestRows ?? []).find((item) => item.student_profile_id === enrollment.student_profile_id) ?? null;
+        const subscription = (subscriptionRows ?? []).find((item) => item.student_profile_id === enrollment.student_profile_id) ?? null;
+        const parentId =
+          request?.parent_profile_id ??
+          subscription?.parent_profile_id ??
+          (linkRows ?? []).find((link) => link.child_profile_id === enrollment.student_profile_id)?.parent_profile_id ??
+          null;
+        return {
+          enrollment,
+          request,
+          subscription,
+          student: (profileRows ?? []).find((profile) => profile.id === enrollment.student_profile_id) as StudentDisplay | null,
+          approver: request?.reviewed_by ? ((profileRows ?? []).find((profile) => profile.id === request.reviewed_by) as Profile | undefined) ?? null : null,
+          parent: parentId ? ((profileRows ?? []).find((profile) => profile.id === parentId) as ParentDisplay | undefined) ?? null : null,
+        };
+      }),
+    );
+    setAuditEvents(auditRows ?? []);
+    setLoading(false);
+  }
+
+  const filteredRows = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return rows.filter((row) => {
+      const status = financeStatus(row);
+      const payment = financePaymentType(row, program);
+      const studentType = financeStudentType(row);
+      if (statusFilter !== "all" && status.toLowerCase() !== statusFilter) {
+        return false;
+      }
+      if (paymentFilter !== "all" && payment.toLowerCase() !== paymentFilter) {
+        return false;
+      }
+      if (typeFilter !== "all" && studentType !== typeFilter) {
+        return false;
+      }
+      if (!query) {
+        return true;
+      }
+      return [row.student?.full_name, row.parent?.full_name, row.student?.email, row.parent?.email, payment, status]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase()
+        .includes(query);
+    });
+  }, [paymentFilter, program, rows, search, statusFilter, typeFilter]);
+
+  const activeRows = rows.filter((row) => financeStatus(row) === "Active");
+  const monthlySumCents = activeRows.reduce((sum, row) => sum + financeMonthlyAmountCents(row, program), 0);
+
+  if (loading) {
+    return <DirectorySkeleton />;
+  }
+
+  if (error && !program) {
+    return <EmptyState title="Could not load finances" text={error} />;
+  }
+
+  if (!program) {
+    return <EmptyState title="Class not found" text="This class could not be loaded." />;
+  }
+
+  if (error) {
+    return <EmptyState title="Finance access unavailable" text={error} />;
+  }
+
+  return (
+    <section className="space-y-5 bg-white px-4 pb-28 pt-4 text-[#26323A]">
+      <div className="rounded-[28px] bg-[#17624F] p-5 text-white shadow-[0_18px_45px_rgba(23,98,79,0.22)]">
+        <div className="grid gap-5 md:grid-cols-[1fr_auto] md:items-end">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.28em] text-white/65">Finance Control</p>
+            <h2 className="mt-2 text-2xl font-semibold leading-7">{program.title}</h2>
+          </div>
+          <div className="grid grid-cols-3 gap-4 text-center">
+            <FinanceSummaryFigure value={rows.length.toString()} label="Total records" />
+            <FinanceSummaryFigure value={activeRows.length.toString()} label="Active students" />
+            <FinanceSummaryFigure value={formatPrice(monthlySumCents)} label="Monthly sum" />
+          </div>
+        </div>
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-[1fr_auto_auto_auto]">
+        <label className="flex min-h-11 items-center gap-2 rounded-[14px] border border-[#D6DCE0] bg-[#F8FAFB] px-3 text-[#6B747B]">
+          <SearchIcon />
+          <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search students, parents, status" className="min-w-0 flex-1 bg-transparent text-sm font-semibold text-[#26323A] outline-none placeholder:text-[#9AA4AA]" />
+        </label>
+        <FinanceSelect label="Status" value={statusFilter} options={["active", "kicked", "withdrawn"]} onChange={setStatusFilter} />
+        <FinanceSelect label="Payment" value={paymentFilter} options={["waived", "monthly", "annual"]} onChange={setPaymentFilter} />
+        <FinanceSelect label="Type" value={typeFilter} options={["adult", "child"]} labels={{ adult: "Adult student", child: "Child student" }} onChange={setTypeFilter} />
+      </div>
+
+      <div className="overflow-hidden rounded-[24px] border border-[#E1E8EC] bg-white shadow-[0_14px_38px_rgba(38,50,58,0.08)]">
+        <div className="overflow-x-auto">
+          <table className="min-w-[1240px] w-full text-left text-sm">
+            <thead className="bg-[#F7FAFB] text-[11px] font-semibold uppercase tracking-wide text-[#7B858C]">
+              <tr>
+                {["Student", "Parent", "Payment Type", "Price", "Status", "Last Payment", "Times Paid", "Next Billing", "Date Joined", "Approved By", "Actions"].map((column) => (
+                  <th key={column} className="px-4 py-3">{column}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[#EEF2F4]">
+              {filteredRows.map((row) => (
+                <tr key={row.enrollment.id} className="align-middle">
+                  <td className="px-4 py-4">
+                    <p className="font-semibold text-[#26323A]">{row.student?.full_name || "Student"}</p>
+                    <p className="mt-0.5 text-xs text-[#7B858C]">{row.student?.email || "No student email"}</p>
+                  </td>
+                  <td className="px-4 py-4">
+                    <p className="font-semibold text-[#26323A]">{row.parent?.full_name || "---"}</p>
+                    <p className="mt-0.5 text-xs text-[#7B858C]">{row.parent?.email || "---"}</p>
+                  </td>
+                  <td className="px-4 py-4 font-semibold text-[#52616A]">{financePaymentType(row, program)}</td>
+                  <td className="px-4 py-4 font-semibold text-[#26323A]">{financePrice(row, program)}</td>
+                  <td className="px-4 py-4">
+                    <span className={cn("rounded-full px-2.5 py-1 text-xs font-semibold", financeStatus(row).toLowerCase() === "active" ? "bg-[#EAF8EF] text-[#258A43]" : "bg-[#F3F6F8] text-[#52616A]")}>
+                      {financeStatus(row)}
+                    </span>
+                  </td>
+                  <td className="px-4 py-4 text-[#52616A]">{formatFinanceDate(row.subscription?.current_period_start)}</td>
+                  <td className="px-4 py-4 font-semibold text-[#26323A]">{financeTimesPaid(row)}</td>
+                  <td className="px-4 py-4 text-[#52616A]">{formatFinanceDate(row.subscription?.current_period_end)}</td>
+                  <td className="px-4 py-4 text-[#52616A]">{formatFinanceDate(row.enrollment.created_at)}</td>
+                  <td className="px-4 py-4 text-[#52616A]">{row.approver?.full_name ?? row.approver?.email ?? "---"}</td>
+                  <td className="px-4 py-4">
+                    <FinanceRowActionMenu
+                      row={row}
+                      onSelect={(action) => {
+                        if (action === "student_info") {
+                          const basePath = mode === "admin" ? `/m/${slug}/admin/programs` : `/m/${slug}/teacher/classes`;
+                          router.push(`${basePath}/${programId}/students?from=finances&studentId=${row.enrollment.student_profile_id}`);
+                          return;
+                        }
+                        setActionTarget({ row, action });
+                      }}
+                    />
+                  </td>
+                </tr>
+              ))}
+              {!filteredRows.length ? (
+                <tr>
+                  <td colSpan={11} className="px-4 py-10 text-center text-sm font-semibold text-[#7B858C]">No matching finance rows.</td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <section className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-semibold text-[#26323A]">Audit Trail</h2>
+          <span className="rounded-full bg-[#EEF6F7] px-2.5 py-1 text-xs font-semibold text-[#17624F]">{auditEvents.length || rows.length}</span>
+        </div>
+        <div className="divide-y divide-[#EEF2F4]">
+          {auditEvents.length
+            ? auditEvents.map((event) => (
+                <div key={event.id} className="py-3">
+                  <p className="text-sm font-semibold text-[#26323A]">{event.summary}</p>
+                  <p className="mt-0.5 text-xs text-[#7B858C]">{formatFinanceDate(event.created_at)} - {event.event_type.replace(/_/g, " ")}</p>
+                </div>
+              ))
+            : rows.slice(0, 5).map((row) => (
+                <div key={row.enrollment.id} className="py-3">
+                  <p className="text-sm font-semibold text-[#26323A]">{financeAuditFallbackSummary(row, program)}</p>
+                  <p className="mt-0.5 text-xs text-[#7B858C]">{formatFinanceDate(row.enrollment.created_at)} - finance activity</p>
+                </div>
+              ))}
+        </div>
+      </section>
+
+      {actionTarget ? <FinanceActionModal row={actionTarget.row} action={actionTarget.action} program={program} onClose={() => setActionTarget(null)} /> : null}
+    </section>
+  );
+}
+
+function FinanceRowActionMenu({ row, onSelect }: { row: FinanceEnrollmentRow; onSelect: (action: FinanceAction) => void }) {
+  const [open, setOpen] = useState(false);
+  const studentName = row.student?.full_name || "student";
+
+  return (
+    <div className="relative inline-flex justify-end">
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        className="flex h-9 w-9 items-center justify-center rounded-full bg-[#F1F5F6] text-[#26323A] transition-colors hover:bg-[#E3ECEF]"
+        aria-label={`Open finance actions for ${studentName}`}
+      >
+        <MoreVerticalIcon />
+      </button>
+      {open ? (
+        <div className="absolute right-0 top-11 z-20 w-48 overflow-hidden rounded-[16px] border border-[#E1E8EC] bg-white p-1 text-sm shadow-[0_18px_45px_rgba(38,50,58,0.14)]">
+          {[
+            { action: "student_info" as const, label: "Student information" },
+            { action: "payment_history" as const, label: "View payment history" },
+            { action: "waive" as const, label: "Waive tuition" },
+            { action: "change_price" as const, label: "Change price" },
+            { action: "end_subscription" as const, label: "End subscription" },
+          ].map((item) => (
+            <button
+              key={item.action}
+              type="button"
+              onClick={() => {
+                setOpen(false);
+                onSelect(item.action);
+              }}
+              className="flex min-h-10 w-full items-center rounded-[12px] px-3 text-left font-semibold text-[#52616A] transition-colors hover:bg-[#F4F8F9] hover:text-[#26323A]"
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function FinanceSummaryFigure({ value, label }: { value: string; label: string }) {
+  return (
+    <div>
+      <p className="text-3xl font-semibold leading-none text-white md:text-4xl">{value}</p>
+      <p className="mt-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-white/65">{label}</p>
+    </div>
+  );
+}
+
+function FinanceSelect({ label, value, options, labels = {}, onChange }: { label: string; value: string; options: string[]; labels?: Record<string, string>; onChange: (value: string) => void }) {
+  return (
+    <label className="grid gap-1 text-[10px] font-semibold uppercase tracking-wide text-[#7B858C]">
+      {label}
+      <select value={value} onChange={(event) => onChange(event.target.value)} className="h-11 rounded-[14px] border border-[#D6DCE0] bg-white px-3 text-sm font-semibold normal-case tracking-normal text-[#26323A] outline-none">
+        <option value="all">All</option>
+        {options.map((option) => (
+          <option key={option} value={option}>{labels[option] ?? titleCase(option)}</option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function FinanceActionModal({ row, action, program, onClose }: { row: FinanceEnrollmentRow; action: FinanceAction; program: Program; onClose: () => void }) {
+  const [price, setPrice] = useState(((row.request?.approved_price_monthly_cents ?? program.price_monthly_cents ?? 0) / 100).toFixed(2).replace(/\.00$/, ""));
+  const [billingMode, setBillingMode] = useState<"monthly" | "one_time">("monthly");
+  const modalTitle = action === "waive" ? "Waive tuition" : action === "change_price" ? "Change price" : action === "end_subscription" ? "End subscription" : "Payment history";
+  const modalText =
+    action === "waive"
+      ? "Pause charges indefinitely or for a fixed number of months while keeping the student enrolled."
+      : action === "change_price"
+        ? "Changing the price should end the current subscription and send a new checkout link."
+        : action === "end_subscription"
+          ? "Stop future billing either while keeping the student enrolled or while also removing them from class."
+          : "Payment history will show charges, exceptions, links, and subscription lifecycle events.";
+
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#26323A]/35 px-5 backdrop-blur-sm">
+      <div className="max-h-[88vh] w-full max-w-md overflow-y-auto rounded-[28px] bg-white p-5 text-[#26323A] shadow-[0_24px_70px_rgba(38,50,58,0.22)]">
+        <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">{program.title}</p>
+        <h2 className="mt-1 text-xl font-semibold">{modalTitle}</h2>
+        <p className="mt-2 text-sm leading-6 text-[#6B747B]">{row.student?.full_name || "Student"} - {modalText}</p>
+
+        <div className="mt-5">
+          {action === "waive" ? (
+            <div className="grid grid-cols-3 gap-2">
+              {["Indefinite", "1 month", "3 months"].map((label) => (
+                <button key={label} type="button" className="min-h-10 rounded-[10px] bg-[#EEF6F7] px-2 text-xs font-semibold text-[#17624F]">{label}</button>
+              ))}
+            </div>
+          ) : null}
+          {action === "change_price" ? (
+            <div className="grid grid-cols-[1fr_auto] gap-2">
+              <input value={price} onChange={(event) => setPrice(event.target.value)} inputMode="decimal" className="h-11 rounded-[10px] border border-[#B9C3C8] px-3 text-sm font-semibold outline-none focus:border-[#2F8FB3]" />
+              <div className="grid grid-cols-2 overflow-hidden rounded-[10px] border border-[#D6DCE0]">
+                {(["monthly", "one_time"] as const).map((mode) => (
+                  <button key={mode} type="button" onClick={() => setBillingMode(mode)} className={cn("px-3 text-xs font-semibold", billingMode === mode ? "bg-[#17624F] text-white" : "bg-white text-[#52616A]")}>
+                    {mode === "monthly" ? "Monthly" : "One-time"}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          {action === "end_subscription" ? (
+            <div className="grid gap-2">
+              <button type="button" className="min-h-10 rounded-[10px] bg-[#EEF3F5] px-3 text-sm font-semibold text-[#26323A]">End billing, keep student</button>
+              <button type="button" className="min-h-10 rounded-[10px] bg-[#26323A] px-3 text-sm font-semibold text-white">End billing and remove student</button>
+            </div>
+          ) : null}
+          {action === "payment_history" ? (
+            <div className="rounded-[18px] border border-dashed border-[#D6DCE0] bg-[#F8FAFB] p-4 text-sm font-semibold text-[#6B747B]">
+              Payment history will be connected after the payment ledger is added.
+            </div>
+          ) : null}
+        </div>
+
+        <div className="mt-5 flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="min-h-10 px-3 text-sm font-semibold text-[#6B747B]">Close</button>
+          <button type="button" disabled className="min-h-10 rounded-[10px] bg-[#26323A] px-4 text-sm font-semibold text-white opacity-50">Workflow pending</button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+function FinanceWorkflowBlock({ title, text, children }: { title: string; text: string; children: ReactNode }) {
+  return (
+    <section className="rounded-[18px] border border-[#E1E8EC] bg-[#FAFCFC] p-4">
+      <h3 className="text-sm font-semibold text-[#26323A]">{title}</h3>
+      <p className="mt-1 text-xs leading-5 text-[#6B747B]">{text}</p>
+      <div className="mt-3">{children}</div>
+    </section>
+  );
+}
+
+function financePaymentType(row: FinanceEnrollmentRow, program: Program | null) {
+  if (!program?.is_paid) {
+    return "Free";
+  }
+  if (row.request?.payment_bypassed) {
+    return "Waived";
+  }
+  if (row.subscription?.stripe_subscription_id) {
+    return "Monthly";
+  }
+  return "Monthly";
+}
+
+function financePrice(row: FinanceEnrollmentRow, program: Program | null) {
+  if (row.request?.payment_bypassed) {
+    return "Waived";
+  }
+  return formatPrice(row.request?.approved_price_monthly_cents ?? program?.price_monthly_cents ?? null);
+}
+
+function financeStatus(row: FinanceEnrollmentRow) {
+  void row;
+  return "Active";
+}
+
+function financeStudentType(row: FinanceEnrollmentRow) {
+  return row.parent ? "child" : "adult";
+}
+
+function financeMonthlyAmountCents(row: FinanceEnrollmentRow, program: Program | null) {
+  if (!program?.is_paid || row.request?.payment_bypassed) {
+    return 0;
+  }
+  if (financePaymentType(row, program).toLowerCase() !== "monthly") {
+    return 0;
+  }
+  return row.request?.approved_price_monthly_cents ?? program.price_monthly_cents ?? 0;
+}
+
+function financeTimesPaid(row: FinanceEnrollmentRow) {
+  if (row.request?.payment_bypassed) {
+    return "0";
+  }
+  if (row.request?.admission_completed_at || row.subscription?.current_period_start) {
+    return row.subscription?.stripe_subscription_id ? "1+" : "1";
+  }
+  return "0";
+}
+
+function financeAuditFallbackSummary(row: FinanceEnrollmentRow, program: Program) {
+  const actor = row.approver?.full_name ?? "Director";
+  const student = row.student?.full_name || "Student";
+  if (row.request?.payment_bypassed) {
+    return `${actor} waived payment indefinitely for ${student}.`;
+  }
+  if (row.subscription?.stripe_subscription_id) {
+    return `Parent paid and subscription is active for ${student}.`;
+  }
+  if (row.request?.approved_price_monthly_cents) {
+    return `${actor} changed ${student}'s price to ${formatPrice(row.request.approved_price_monthly_cents)}/month.`;
+  }
+  if (program.is_paid) {
+    return `Payment link was sent for ${student}.`;
+  }
+  return `${student} was admitted into ${program.title}.`;
+}
+
+function formatFinanceDate(value: string | null | undefined) {
+  if (!value) {
+    return "Not synced";
+  }
+  return new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
 function useMosquePrograms(slug: string) {
@@ -6536,6 +8085,7 @@ function useTeacherPrograms(slug: string) {
   const [programs, setPrograms] = useState<ProgramScheduleSource[]>([]);
   const [allPrograms, setAllPrograms] = useState<ProgramScheduleSource[]>([]);
   const [roleByProgramId, setRoleByProgramId] = useState<Record<string, TeacherProgramRole>>({});
+  const [financeAccessByProgramId, setFinanceAccessByProgramId] = useState<Record<string, boolean>>({});
   const [canCreateClass, setCanCreateClass] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -6559,6 +8109,7 @@ function useTeacherPrograms(slug: string) {
         setPrograms([]);
         setAllPrograms([]);
         setRoleByProgramId({});
+        setFinanceAccessByProgramId({});
         setCanCreateClass(false);
         setCurrentUserId(null);
         setError("Log in required.");
@@ -6592,6 +8143,7 @@ function useTeacherPrograms(slug: string) {
           setPrograms([]);
           setAllPrograms([]);
           setRoleByProgramId({});
+          setFinanceAccessByProgramId({});
           setCanCreateClass(false);
           setError("Teacher account required.");
           setLoading(false);
@@ -6604,6 +8156,7 @@ function useTeacherPrograms(slug: string) {
           setPrograms([]);
           setAllPrograms([]);
           setRoleByProgramId({});
+          setFinanceAccessByProgramId({});
           setCanCreateClass(false);
           setLoading(false);
         }
@@ -6612,7 +8165,7 @@ function useTeacherPrograms(slug: string) {
 
       const [{ data: mosquePrograms, error: programError }, { data: assignments, error: assignmentError }, { data: memberships }] = await Promise.all([
         supabase.from("programs").select("*").eq("mosque_id", mosque.id).eq("is_active", true).order("title", { ascending: true }),
-        supabase.from("program_teachers").select("program_id, role").eq("teacher_profile_id", userId),
+        supabase.from("program_teachers").select("program_id, role, can_manage_finances").eq("teacher_profile_id", userId),
         supabase.from("mosque_memberships").select("role, status, can_create_programs").eq("mosque_id", mosque.id).eq("profile_id", userId),
       ]);
 
@@ -6637,6 +8190,7 @@ function useTeacherPrograms(slug: string) {
       }));
       if (active) {
         const nextRoleByProgramId: Record<string, TeacherProgramRole> = {};
+        const nextFinanceAccessByProgramId: Record<string, boolean> = {};
         const isAdminForMosque = teacherAccountType === "admin" && (memberships ?? []).some((membership) => membership.role === "admin" && membership.status === "active");
         const canCreateForMosque = isAdminForMosque || (teacherAccountType === "teacher" && (memberships ?? []).some((membership) => membership.role === "teacher" && membership.status === "active" && membership.can_create_programs));
         const assignedPrograms = isAdminForMosque ? programsWithTracks : programsWithTracks.filter((program) => {
@@ -6644,6 +8198,7 @@ function useTeacherPrograms(slug: string) {
           const assignedRole = isDirector ? "director" : assignmentRoleByProgramId[program.id];
           if (assignedRole) {
             nextRoleByProgramId[program.id] = assignedRole;
+            nextFinanceAccessByProgramId[program.id] = assignedRole === "director" && Boolean((assignments ?? []).find((assignment) => assignment.program_id === program.id && assignment.role === "director")?.can_manage_finances);
             return true;
           }
           return false;
@@ -6651,10 +8206,12 @@ function useTeacherPrograms(slug: string) {
         if (isAdminForMosque) {
           for (const program of assignedPrograms) {
             nextRoleByProgramId[program.id] = "director";
+            nextFinanceAccessByProgramId[program.id] = true;
           }
         }
         setAllPrograms(programsWithTracks);
         setRoleByProgramId(nextRoleByProgramId);
+        setFinanceAccessByProgramId(nextFinanceAccessByProgramId);
         setPrograms(assignedPrograms);
         setCanCreateClass(canCreateForMosque);
         setLoading(false);
@@ -6670,7 +8227,7 @@ function useTeacherPrograms(slug: string) {
     };
   }, [slug]);
 
-  return { programs, allPrograms, roleByProgramId, canCreateClass, currentUserId, loading, error };
+  return { programs, allPrograms, roleByProgramId, financeAccessByProgramId, canCreateClass, currentUserId, loading, error };
 }
 
 function useAdminProgramsWithTracks(slug: string) {
@@ -7116,11 +8673,11 @@ export function useTeacherNotificationCounts(slug: string) {
 
       const [{ data: mosquePrograms }, { data: assignments }] = await Promise.all([
         supabase.from("programs").select("id, teacher_profile_id, director_profile_id").eq("mosque_id", mosque.id).eq("is_active", true),
-        supabase.from("program_teachers").select("program_id").eq("teacher_profile_id", userId),
+        supabase.from("program_teachers").select("program_id, role").eq("teacher_profile_id", userId),
       ]);
-      const assignedIds = new Set((assignments ?? []).map((assignment) => assignment.program_id));
+      const directorAssignmentIds = new Set((assignments ?? []).filter((assignment) => assignment.role === "director").map((assignment) => assignment.program_id));
       const programIds = (mosquePrograms ?? [])
-        .filter((program) => (program.director_profile_id ?? program.teacher_profile_id) === userId || assignedIds.has(program.id))
+        .filter((program) => (program.director_profile_id ?? program.teacher_profile_id) === userId || directorAssignmentIds.has(program.id))
         .map((program) => program.id);
 
       if (programIds.length === 0) {
@@ -7130,13 +8687,39 @@ export function useTeacherNotificationCounts(slug: string) {
         return;
       }
 
-      const [{ data: rows }, { data: withdrawalRows }] = await Promise.all([
-        supabase.from("enrollment_requests").select("id").in("program_id", programIds).eq("status", "pending").is("teacher_dismissed_at", null),
+      const [{ data: rows }, { data: withdrawalRows }, { data: instructorRows }, { data: instructorEventRows }] = await Promise.all([
+        supabase
+          .from("enrollment_requests")
+          .select("id, requested_at, admission_completed_at")
+          .in("program_id", programIds)
+          .is("teacher_dismissed_at", null)
+          .or("status.eq.pending,admission_completed_at.not.is.null"),
         supabase.from("withdrawal_requests").select("id").in("program_id", programIds).eq("status", "pending").is("teacher_dismissed_at", null),
+        supabase
+          .from("program_teachers")
+          .select("id, teacher_profile_id")
+          .in("program_id", programIds)
+          .eq("role", "instructor")
+          .not("teacher_profile_id", "is", null),
+        supabase
+          .from("program_instructor_events")
+          .select("id, assignment_id, teacher_profile_id, event_type")
+          .in("program_id", programIds),
       ]);
       const seenRequestIds = readSeenNotificationIds(seenTeacherRequestsStorageKey, userId);
       if (active) {
-        setRequestCount((rows ?? []).filter((row) => !seenRequestIds.has(row.id)).length + (withdrawalRows ?? []).length);
+        const unseenApplications = (rows ?? []).filter((row) => !seenRequestIds.has(teacherRequestNotificationKey(row))).length;
+        const joinedAssignmentIdsWithEvents = new Set((instructorEventRows ?? []).filter((event) => event.event_type === "joined" && event.assignment_id).map((event) => event.assignment_id as string));
+        const eventInstructorNotifications: Array<Pick<InstructorLifecycleNotification, "id" | "event_type" | "teacher_profile_id">> = (instructorEventRows ?? []).map((event) => ({
+          id: event.id,
+          event_type: event.event_type === "resigned" ? "resigned" : "joined",
+          teacher_profile_id: event.teacher_profile_id,
+        }));
+        const fallbackInstructorNotifications = (instructorRows ?? [])
+          .filter((row) => !joinedAssignmentIdsWithEvents.has(row.id))
+          .map((row) => ({ id: row.id, event_type: "joined" as const, teacher_profile_id: row.teacher_profile_id }));
+        const unseenInstructors = [...eventInstructorNotifications, ...fallbackInstructorNotifications].filter((row) => !seenRequestIds.has(teacherInstructorNotificationKey(row))).length;
+        setRequestCount(unseenApplications + unseenInstructors + (withdrawalRows ?? []).length);
       }
     }
 
@@ -7288,9 +8871,16 @@ function buildNoteThreads(notes: StudentNoteWithContext[]) {
 }
 
 function InboxLoadingPanel({ label }: { label: string }) {
+  return <GenericLoadingState label={label} />;
+}
+
+function GenericLoadingState({ label = "Loading" }: { label?: string }) {
   return (
-    <div className="flex min-h-64 items-center justify-center" aria-label={label}>
-      <span className="h-11 w-11 animate-spin rounded-full border-4 border-[var(--placeholder-strong)] border-t-[#2F8FB3]" aria-hidden />
+    <div className="flex min-h-64 items-center justify-center bg-[var(--workspace)] px-6 py-10" aria-label={label}>
+      <div className="flex flex-col items-center gap-3 text-center">
+        <span className="h-11 w-11 animate-spin rounded-full border-4 border-[#DDEFF4] border-t-[#2F8FB3]" aria-hidden />
+        <span className="text-sm font-semibold text-[#52616A]">Loading</span>
+      </div>
     </div>
   );
 }
@@ -7477,20 +9067,22 @@ function StudentRequestCard({
   const statusTime = request.reviewed_at ?? request.requested_at;
   const childName = request.parent_profile_id ? request.student?.full_name?.trim() : null;
   const isPaymentRequest = Boolean(onCompleteRegistration);
+  const reviewedMessage = request.review_note ?? request.decision_note;
   const message =
-    request.review_note ??
-    request.decision_note ??
-    (isPaymentRequest
-      ? "Your teacher approved this request. Complete registration to activate the class."
-      : request.status === "approved"
-        ? request.payment_bypassed
-          ? "You have been admitted."
-          : "Your request was approved."
-        : request.status === "waitlisted"
-          ? "You have been waitlisted and will be notified once a spot is available."
-        : request.status === "cancelled"
-          ? `You were removed from ${request.program?.title ?? "this class"}.`
-          : null);
+    request.status === "pending"
+      ? null
+      : reviewedMessage ??
+        (isPaymentRequest
+          ? "Your teacher approved this request. Complete registration to activate the class."
+          : request.status === "approved"
+            ? request.payment_bypassed
+              ? "You have been admitted."
+              : "Your request was approved."
+            : request.status === "waitlisted"
+              ? "You have been waitlisted and will be notified once a spot is available."
+              : request.status === "cancelled"
+                ? `You were removed from ${request.program?.title ?? "this class"}.`
+                : null);
   return (
     <article className={cn("rounded-xl border border-[#E1E8EC] bg-white p-3", (isPaymentRequest || request.payment_bypassed) && "border-[#CFE8D6] bg-[#FBFEFC]", request.status === "waitlisted" && "border-[#FFE3A3] bg-[#FFFDF7]")}>
       <div className="flex items-start gap-3">
@@ -7742,6 +9334,34 @@ function TeacherAnnouncementBubble({ announcement, readers = [], showSeenDetails
   );
 }
 
+function InstructorLifecycleNotificationCard({ notification, slug }: { notification: InstructorLifecycleNotification; slug: string }) {
+  const instructorName = notification.instructor?.full_name?.trim() || notification.instructor?.email || "Instructor";
+  const programTitle = notification.program?.title ?? "this class";
+  const actionText = notification.event_type === "resigned" ? "has resigned from" : "has become an instructor of";
+
+  return (
+    <article className="rounded-[22px] border border-[#E1E8EC] bg-white p-4 shadow-[0_10px_24px_rgba(38,50,58,0.07)]">
+      <div className="flex items-start gap-3">
+        <Avatar src={notification.instructor?.avatar_url ?? null} name={instructorName} />
+        <div className="min-w-0 flex-1">
+          <p className="text-sm leading-6 text-[#26323A]">
+            <span className="font-semibold">{instructorName}</span> {actionText} <span className="font-semibold">{programTitle}</span>.
+          </p>
+          <div className="mt-3">
+            <TransitionLink
+              href={`/m/${slug}/teacher/classes/${notification.program_id}/instructors`}
+              label="Manage"
+              className="inline-flex min-h-8 items-center justify-center rounded-full border border-[#D6E1E6] bg-white px-3 text-xs font-semibold text-[#26323A] shadow-[0_6px_14px_rgba(38,50,58,0.08)] transition-colors hover:border-[#B8CBD4] hover:bg-[#F7FAFB]"
+            >
+              Manage
+            </TransitionLink>
+          </div>
+        </div>
+      </div>
+    </article>
+  );
+}
+
 function TeacherRequestCard({
   request,
   reviewed = false,
@@ -7760,7 +9380,8 @@ function TeacherRequestCard({
   const [expanded, setExpanded] = useState(false);
   const studentName = request.student?.full_name ?? "Student";
   const isParentRequest = Boolean(request.parent_profile_id);
-  const statusLabel = request.status.charAt(0).toUpperCase() + request.status.slice(1);
+  const statusLabel = request.admission_completed_at ? "Admitted" : request.status.charAt(0).toUpperCase() + request.status.slice(1);
+  const requestContext = request.admission_completed_at ? "Registration complete" : isParentRequest ? "Parent request" : "Student request";
 
   return (
     <article className="relative pb-1">
@@ -7773,11 +9394,11 @@ function TeacherRequestCard({
           <div className="min-w-0 flex-1">
             <h3 className="truncate text-[15px] font-semibold leading-5 text-[#26323A]">{studentName}</h3>
             <p className="mt-0.5 truncate text-xs leading-4 text-[#6B747B]">
-              {isParentRequest ? "Parent request" : "Student request"} • {request.program?.title ?? "Class request"}
+              {requestContext} • {request.program?.title ?? "Class request"}
             </p>
           </div>
           {reviewed ? (
-            <span className={cn("shrink-0 rounded-full px-2 py-1 text-[11px] font-semibold", request.status === "approved" ? "bg-[#EAF8EF] text-[#258A43]" : request.status === "waitlisted" ? "bg-[#FFF4D6] text-[#8A6418]" : "bg-[#FDEDEA] text-[#C83F31]")}>
+            <span className={cn("shrink-0 rounded-full px-2 py-1 text-[11px] font-semibold", request.admission_completed_at || request.status === "approved" ? "bg-[#EAF8EF] text-[#258A43]" : request.status === "waitlisted" ? "bg-[#FFF4D6] text-[#8A6418]" : "bg-[#FDEDEA] text-[#C83F31]")}>
               {statusLabel}
             </span>
           ) : null}
@@ -7794,6 +9415,7 @@ function TeacherRequestCard({
           <div className="overflow-hidden">
             <div className="border-t border-[#E6ECEF] bg-[#F8FAFB] px-5 py-4">
               <dl className="grid grid-cols-[minmax(0,1.45fr)_minmax(0,0.8fr)] gap-x-5 gap-y-3 text-sm">
+                {request.admission_completed_at ? <RequestDetail label="Admitted" value={timeAgo(request.admission_completed_at)} /> : null}
                 {isParentRequest ? (
                   <>
                     <RequestDetail label="Child" value={request.student?.full_name} />
@@ -7813,13 +9435,15 @@ function TeacherRequestCard({
                 )}
               </dl>
               {!reviewed ? (
-                <div className="mt-4 grid grid-cols-3 gap-2">
+                <div className={cn("mt-4 grid gap-2", onWaitlist ? "grid-cols-3" : "grid-cols-2")}>
                   <button type="button" onClick={onAccept} className="min-h-10 rounded-[9px] bg-[#E2F6E8] px-2 text-xs font-semibold text-[#258A43] transition-colors hover:bg-[#D4F0DD]">
                     Accept
                   </button>
-                  <button type="button" onClick={onWaitlist} className="min-h-10 rounded-[9px] bg-[#FFF4D6] px-2 text-xs font-semibold text-[#8A6418] transition-colors hover:bg-[#FFE9A8]">
-                    Waitlist
-                  </button>
+                  {onWaitlist ? (
+                    <button type="button" onClick={onWaitlist} className="min-h-10 rounded-[9px] bg-[#FFF4D6] px-2 text-xs font-semibold text-[#8A6418] transition-colors hover:bg-[#FFE9A8]">
+                      Waitlist
+                    </button>
+                  ) : null}
                   <button type="button" onClick={onReject} className="min-h-10 rounded-[9px] bg-[#FCE8E4] px-2 text-xs font-semibold text-[#C83F31] transition-colors hover:bg-[#F9D8D1]">
                     Reject
                   </button>
@@ -7939,16 +9563,19 @@ function WithdrawalRequestCard({
 
 function ApplicationDecisionModal({
   target,
+  busy = false,
   onClose,
   onSubmit,
 }: {
   target: { request: RequestWithContext; action: "approved" | "waitlisted" | "rejected" };
+  busy?: boolean;
   onClose: () => void;
   onSubmit: (options: { priceMonthlyCents?: number | null; paymentBypassed?: boolean; note?: string | null }) => void;
 }) {
   const defaultPrice = ((target.request.approved_price_monthly_cents ?? target.request.program?.price_monthly_cents ?? 0) / 100).toFixed(2).replace(/\.00$/, "");
   const [price, setPrice] = useState(defaultPrice === "0" ? "" : defaultPrice);
   const [bypassPayment, setBypassPayment] = useState(false);
+  const [billingMode, setBillingMode] = useState<"monthly" | "one_time">("monthly");
   const [note, setNote] = useState("");
   const studentName = target.request.student?.full_name?.trim() || "this student";
   const title = target.action === "approved" ? "Accept application" : target.action === "waitlisted" ? "Waitlist application" : "Reject application";
@@ -7958,7 +9585,7 @@ function ApplicationDecisionModal({
       : target.action === "rejected"
         ? "Your application was not accepted at this time."
         : bypassPayment
-          ? "Your application was accepted and you have been admitted."
+          ? "Your application was accepted and you have been admitted. Payment By-passed."
           : "Your application was accepted. Complete checkout to activate enrollment.";
 
   function submit() {
@@ -7984,10 +9611,25 @@ function ApplicationDecisionModal({
               Bypass payment process
             </label>
             {!bypassPayment ? (
-              <label className="block">
-                <span className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">Monthly price</span>
-                <input value={price} onChange={(event) => setPrice(event.target.value)} inputMode="decimal" className="mt-1 h-11 w-full rounded-[10px] border border-[#B9C3C8] px-3 text-sm font-semibold outline-none focus:border-[#2F8FB3]" />
-              </label>
+              <>
+                <div className="grid grid-cols-2 overflow-hidden rounded-[12px] border border-[#D6DCE0]">
+                  {(["monthly", "one_time"] as const).map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => setBillingMode(mode)}
+                      className={cn("min-h-10 text-sm font-semibold", billingMode === mode ? "bg-[#17624F] text-white" : "bg-white text-[#52616A]")}
+                    >
+                      {mode === "monthly" ? "Monthly" : "One-time"}
+                    </button>
+                  ))}
+                </div>
+                <label className="block">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">{billingMode === "monthly" ? "Monthly price" : "One-time fee"}</span>
+                  <input value={price} onChange={(event) => setPrice(event.target.value)} inputMode="decimal" className="mt-1 h-11 w-full rounded-[10px] border border-[#B9C3C8] px-3 text-sm font-semibold outline-none focus:border-[#2F8FB3]" />
+                </label>
+                {billingMode === "one_time" ? <p className="text-xs leading-5 text-[#7B858C]">UI only for now: one-time checkout generation still needs the billing workflow wired.</p> : null}
+              </>
             ) : null}
           </div>
         ) : null}
@@ -8003,11 +9645,11 @@ function ApplicationDecisionModal({
         </label>
 
         <div className="mt-5 flex justify-end gap-2">
-          <button type="button" onClick={onClose} className="min-h-10 px-3 text-sm font-semibold text-[#6B747B]">
+          <button type="button" onClick={onClose} disabled={busy} className="min-h-10 px-3 text-sm font-semibold text-[#6B747B] disabled:opacity-50">
             Cancel
           </button>
-          <button type="button" onClick={submit} className="min-h-10 rounded-[10px] bg-[#17624F] px-4 text-sm font-semibold text-white">
-            Confirm
+          <button type="button" onClick={submit} disabled={busy} className="min-h-10 rounded-[10px] bg-[#17624F] px-4 text-sm font-semibold text-white disabled:opacity-60">
+            {busy ? "Working..." : "Confirm"}
           </button>
         </div>
       </div>
@@ -8070,8 +9712,8 @@ function TeacherStudentListControls({
 }) {
   const [viewMenuOpen, setViewMenuOpen] = useState(false);
   const [trackMenuOpen, setTrackMenuOpen] = useState(false);
-  const allTracksSelected = tracks.length > 0 && (selectedTrackIds.length === 0 || selectedTrackIds.length === tracks.length);
-  const trackLabel = tracks.length === 0 || allTracksSelected ? "All tracks" : selectedTrackIds.length === 1 ? tracks.find((track) => track.id === selectedTrackIds[0])?.name ?? "1 track" : `${selectedTrackIds.length} tracks`;
+  const allTracksSelected = tracks.length > 0 && selectedTrackIds.length === tracks.length;
+  const trackLabel = tracks.length === 0 || allTracksSelected ? "All tracks" : selectedTrackIds.length === 0 ? "No tracks" : selectedTrackIds.length === 1 ? tracks.find((track) => track.id === selectedTrackIds[0])?.name ?? "1 track" : `${selectedTrackIds.length} tracks`;
 
   return (
     <div className="space-y-4">
@@ -8154,11 +9796,28 @@ function TeacherStudentListControls({
               <ChevronIcon expanded={trackMenuOpen} />
             </button>
             {trackMenuOpen ? (
-              <div className="absolute left-0 top-[calc(100%+8px)] z-30 w-56 rounded-[16px] border border-[#DDE5E9] bg-white p-1 shadow-[0_18px_44px_rgba(38,50,58,0.18)]">
-                <RosterTrackOption checked={allTracksSelected} label="All" onClick={() => onTrackToggle("all")} />
+              <div className="absolute left-0 top-[calc(100%+8px)] z-30 w-56 rounded-[16px] border border-[#DDE5E9] bg-white p-2 shadow-[0_18px_44px_rgba(38,50,58,0.18)]">
+                <div className="grid grid-cols-2 gap-1.5 border-b border-[#EEF2F4] pb-2">
+                  <button
+                    type="button"
+                    onClick={() => onTrackToggle("select_all")}
+                    className="min-h-8 rounded-[10px] bg-[#EAF7F1] px-2 text-xs font-semibold text-[#17624F] transition-colors hover:bg-[#DDF1E7]"
+                  >
+                    Select all
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onTrackToggle("deselect_all")}
+                    className="min-h-8 rounded-[10px] bg-[#F2F4F5] px-2 text-xs font-semibold text-[#52616A] transition-colors hover:bg-[#E8ECEF]"
+                  >
+                    Deselect all
+                  </button>
+                </div>
+                <div className="pt-1">
                 {tracks.map((track) => (
                   <RosterTrackOption key={track.id} checked={selectedTrackIds.includes(track.id)} label={track.name} onClick={() => onTrackToggle(track.id)} />
                 ))}
+                </div>
               </div>
             ) : null}
           </div>
@@ -8402,15 +10061,35 @@ function StudentInboxThreadView({
   thread,
   announcements,
   notes,
+  hasOlderAnnouncements = false,
+  loadingOlderAnnouncements = false,
+  onLoadOlderAnnouncements,
+  hasOlderNotes = false,
+  loadingOlderNotes = false,
+  onLoadOlderNotes,
   onBack,
 }: {
   thread: StudentInboxThread;
   announcements: AnnouncementWithContext[];
   notes: StudentNoteWithContext[];
+  hasOlderAnnouncements?: boolean;
+  loadingOlderAnnouncements?: boolean;
+  onLoadOlderAnnouncements?: () => void;
+  hasOlderNotes?: boolean;
+  loadingOlderNotes?: boolean;
+  onLoadOlderNotes?: () => void;
   onBack: () => void;
 }) {
-  const threadAnnouncements = thread.kind === "announcements" ? announcements.filter((announcement) => announcement.program_id === thread.programId).slice().reverse() : [];
-  const threadNotes = thread.kind === "notes" ? notes.filter((note) => note.program_id === thread.programId && note.student_profile_id === thread.studentId).slice().reverse() : [];
+  const threadAnnouncements = thread.kind === "announcements"
+    ? announcements
+        .filter((announcement) => announcement.program_id === thread.programId)
+        .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
+    : [];
+  const threadNotes = thread.kind === "notes"
+    ? notes
+        .filter((note) => note.program_id === thread.programId && note.student_profile_id === thread.studentId)
+        .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
+    : [];
   const title = thread.kind === "announcements"
     ? threadAnnouncements[0]?.program?.title ?? "Announcements"
     : threadNotes[0]?.program?.title ?? "Notes";
@@ -8429,9 +10108,37 @@ function StudentInboxThreadView({
       </div>
       <div className="max-h-[520px] space-y-3 overflow-y-auto p-4">
         {thread.kind === "announcements" ? (
-          threadAnnouncements.length ? threadAnnouncements.map((announcement) => <StudentAnnouncementCard key={announcement.id} announcement={announcement} />) : <MiniEmpty text="No announcements in this thread." />
+          threadAnnouncements.length ? (
+            <>
+              {threadAnnouncements.map((announcement) => <StudentAnnouncementCard key={announcement.id} announcement={announcement} />)}
+              {hasOlderAnnouncements ? (
+                <button
+                  type="button"
+                  onClick={onLoadOlderAnnouncements}
+                  disabled={loadingOlderAnnouncements}
+                  className="mx-auto flex rounded-full bg-white px-4 py-2 text-sm font-semibold text-[#2F8FB3] shadow-[0_6px_18px_rgba(38,50,58,0.06)] ring-1 ring-[#DDE7EC] transition-colors hover:bg-[#F5FAFC] disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {loadingOlderAnnouncements ? "Loading older..." : "Load older"}
+                </button>
+              ) : null}
+            </>
+          ) : (
+            <MiniEmpty text="No announcements in this thread." />
+          )
         ) : threadNotes.length ? (
-          threadNotes.map((note) => <StudentNoteBubble key={note.id} note={note} viewer="recipient" />)
+          <>
+            {threadNotes.map((note) => <StudentNoteBubble key={note.id} note={note} viewer="recipient" />)}
+            {hasOlderNotes ? (
+              <button
+                type="button"
+                onClick={onLoadOlderNotes}
+                disabled={loadingOlderNotes}
+                className="mx-auto flex rounded-full bg-white px-4 py-2 text-sm font-semibold text-[#2F8FB3] shadow-[0_6px_18px_rgba(38,50,58,0.06)] ring-1 ring-[#DDE7EC] transition-colors hover:bg-[#F5FAFC] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {loadingOlderNotes ? "Loading older..." : "Load older"}
+              </button>
+            ) : null}
+          </>
         ) : (
           <MiniEmpty text="No notes in this thread." />
         )}
@@ -8818,10 +10525,12 @@ function ChevronLeftIcon() {
 function StudentsIcon() {
   return (
     <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
-      <circle cx="9" cy="7" r="4" />
-      <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
-      <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+      <circle cx="12" cy="7.2" r="3" />
+      <circle cx="5.8" cy="9" r="2.3" />
+      <circle cx="18.2" cy="9" r="2.3" />
+      <path d="M7.3 20c.55-3.1 2.12-4.65 4.7-4.65s4.15 1.55 4.7 4.65" />
+      <path d="M2.8 18.4c.38-2.24 1.43-3.36 3.15-3.36.75 0 1.37.21 1.87.64" />
+      <path d="M16.18 15.68c.5-.43 1.12-.64 1.87-.64 1.72 0 2.77 1.12 3.15 3.36" />
     </svg>
   );
 }
@@ -8829,11 +10538,10 @@ function StudentsIcon() {
 function InstructorManageIcon() {
   return (
     <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <rect x="4" y="5" width="16" height="13" rx="2.2" />
-      <circle cx="10" cy="11" r="2.1" />
-      <path d="M6.9 16c.55-1.55 1.58-2.32 3.1-2.32s2.55.77 3.1 2.32" />
-      <path d="M15.2 10h2.7" />
-      <path d="M15.2 13.5h2.7" />
+      <path d="m6.4 6.8 5.7-2.25 5.7 2.25-5.7 2.25-5.7-2.25Z" />
+      <path d="M17.8 6.8v3.35" />
+      <circle cx="12" cy="12.2" r="3.05" />
+      <path d="M5.9 20.3c.8-3.12 2.84-4.68 6.1-4.68s5.3 1.56 6.1 4.68" />
     </svg>
   );
 }
@@ -8866,6 +10574,27 @@ function ScheduleIcon() {
       <rect x="3" y="4" width="18" height="18" rx="2" />
       <path d="M8 15h4" />
       <path d="M8 18h8" />
+    </svg>
+  );
+}
+
+function FinanceIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <rect x="3" y="5" width="18" height="14" rx="2.4" />
+      <path d="M3 10h18" />
+      <path d="M7 15h3" />
+      <path d="M16.5 14.5a1.8 1.8 0 1 0 0 3.6 1.8 1.8 0 0 0 0-3.6Z" />
+    </svg>
+  );
+}
+
+function PermissionClassIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M4 19V7.5L12 4l8 3.5V19" />
+      <path d="M8 19v-6h8v6" />
+      <path d="M10 9h4" />
     </svg>
   );
 }
@@ -8916,6 +10645,17 @@ function CopyIcon() {
     <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       <rect x="8" y="8" width="11" height="11" rx="2" />
       <path d="M5 15H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v1" />
+    </svg>
+  );
+}
+
+function ClipboardIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M9 4.5h6a1.5 1.5 0 0 1 1.5 1.5v.75h-9V6A1.5 1.5 0 0 1 9 4.5Z" />
+      <path d="M8 6.75H6.5A2.5 2.5 0 0 0 4 9.25v8.25A2.5 2.5 0 0 0 6.5 20h11a2.5 2.5 0 0 0 2.5-2.5V9.25a2.5 2.5 0 0 0-2.5-2.5H16" />
+      <path d="M8.5 12.5h7" />
+      <path d="M8.5 16h5" />
     </svg>
   );
 }
@@ -9018,6 +10758,44 @@ function SidebarFact({ label, value }: { label: string; value: string }) {
   );
 }
 
+function ProgramFaqSection({ faqs }: { faqs: Array<Pick<ProgramFaq, "id" | "question" | "answer">> }) {
+  const [openId, setOpenId] = useState("");
+  return (
+    <section className="overflow-hidden rounded-[28px] bg-[#F6F1FF] p-4 shadow-[0_14px_36px_rgba(75,52,117,0.10)]">
+      <div className="rounded-[24px] bg-white/72 p-4 ring-1 ring-white">
+        <div className="mx-auto flex w-fit items-center gap-2 rounded-full bg-white px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-[#5D4A86] shadow-sm">
+          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[#EEE6FF] text-[#5D4A86]">?</span>
+          Frequently Asked Questions
+        </div>
+        <div className="mt-5 space-y-3">
+          {faqs.map((faq) => {
+            const open = faq.id === openId;
+            return (
+              <button
+                key={faq.id}
+                type="button"
+                onClick={() => setOpenId(open ? "" : faq.id)}
+                className={cn(
+                  "w-full rounded-[18px] bg-white p-4 text-left shadow-[0_10px_24px_rgba(38,50,58,0.08)] ring-1 ring-[#E7E0F2] transition",
+                  open && "ring-[#BFA9E8]",
+                )}
+              >
+                <span className="flex items-center justify-between gap-3">
+                  <span className="text-sm font-semibold leading-5 text-[#26323A]">{faq.question}</span>
+                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#F3EEFC] text-[#5D4A86]">
+                    <ChevronIcon expanded={open} />
+                  </span>
+                </span>
+                {open ? <span className="mt-3 block text-sm leading-6 text-[#52616A]">{faq.answer}</span> : null}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function ChildEnrollmentSelector({
   program,
   childrenProfiles,
@@ -9038,8 +10816,8 @@ function ChildEnrollmentSelector({
   busy: boolean;
 }) {
   return (
-    <div className="mt-3 rounded-2xl border border-[#D6E6E9] bg-[#F8FCFB] p-3">
-      <p className="px-1 text-xs font-semibold uppercase tracking-wide text-[#6B747B]">Select students</p>
+    <div className="mt-4 space-y-2">
+      <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">Select students</p>
       <div className="mt-2 space-y-2">
         {childrenProfiles.map((child) => {
           const status = statuses[child.id];
@@ -9063,13 +10841,13 @@ function ChildEnrollmentSelector({
               onClick={() => (locked ? undefined : onToggle(child.id))}
               disabled={locked}
               className={cn(
-                "flex min-h-12 w-full items-center gap-3 rounded-xl bg-white px-3 text-left text-sm ring-1 ring-[#E1E8EC] transition",
-                checked && "ring-2 ring-[#248B72]",
+                "flex min-h-12 w-full items-center gap-3 rounded-[14px] border p-3 text-left text-sm transition",
+                checked ? "border-[#17624F] bg-[#EAF7F1] ring-1 ring-[#17624F]" : "border-[#D6DCE0] bg-[#F8FBFC] hover:border-[#9EC8D5]",
                 locked && "cursor-not-allowed opacity-65",
               )}
             >
-              <span className={cn("flex h-5 w-5 shrink-0 items-center justify-center rounded-full border", checked ? "border-[#248B72] bg-[#248B72] text-white" : "border-[#B9C3C8]")}>
-                {checked ? "✓" : ""}
+              <span className={cn("flex h-5 w-5 shrink-0 items-center justify-center rounded-[6px] border text-[11px]", checked ? "border-[#17624F] bg-[#17624F] text-white" : "border-[#B9C3C8] bg-white text-transparent")}>
+                <CheckIcon />
               </span>
               <span className="min-w-0 flex-1">
                 <span className="block truncate font-semibold text-[#26323A]">
@@ -9085,7 +10863,7 @@ function ChildEnrollmentSelector({
         type="button"
         onClick={onSubmit}
         disabled={busy || selectedChildIds.length === 0}
-        className="mt-3 min-h-11 w-full rounded-full bg-[#17624F] px-4 text-sm font-semibold text-white disabled:opacity-60"
+        className="mt-3 min-h-11 w-full rounded-full bg-[#17624F] px-4 text-sm font-semibold text-white shadow-[0_10px_20px_rgba(23,98,79,0.18)] disabled:opacity-60"
       >
         {busy ? "Sending..." : "Submit Request"}
       </button>
@@ -9744,41 +11522,7 @@ function HomeEmptyState({ title, text }: { title: string; text: string }) {
 }
 
 function HomeLoadingState() {
-  return (
-    <section className="space-y-5 bg-[var(--workspace)] p-4" aria-label="Loading home">
-      <div className="rounded-[30px] bg-[#fffdf8] p-5 shadow-[0_18px_45px_rgba(38,50,58,0.08)]">
-        <div className="flex items-center gap-4">
-          <div className="h-14 w-14 shrink-0 animate-pulse rounded-2xl bg-[var(--placeholder)]" />
-          <div className="min-w-0 flex-1 space-y-2">
-            <div className="h-5 w-36 animate-pulse rounded-full bg-[var(--placeholder)]" />
-            <div className="h-4 w-44 animate-pulse rounded-full bg-[var(--placeholder-soft)]" />
-          </div>
-          <div className="h-10 w-20 animate-pulse rounded-full bg-[var(--placeholder-soft)]" />
-        </div>
-      </div>
-      <HomeSectionTitle title="Upcoming" />
-      <div className="space-y-5">
-        <div className="grid grid-cols-7 gap-1 px-1">
-          {Array.from({ length: 7 }).map((_, index) => (
-            <div key={index} className="flex flex-col items-center gap-1.5">
-              <div className="h-14 w-full max-w-12 animate-pulse rounded-2xl bg-[var(--placeholder)]" />
-              <div className="h-2 w-3 animate-pulse rounded-full bg-[var(--placeholder-strong)]" />
-            </div>
-          ))}
-        </div>
-        <div className="rounded-[24px] bg-[#fffdf8] px-4 py-3 shadow-[0_8px_24px_rgba(38,50,58,0.06)]">
-          <div className="flex items-center gap-3">
-            <div className="h-14 w-14 shrink-0 animate-pulse rounded-2xl bg-[var(--placeholder)]" />
-            <div className="min-w-0 flex-1 space-y-2">
-              <div className="h-5 w-44 animate-pulse rounded-full bg-[var(--placeholder)]" />
-              <div className="h-4 w-32 animate-pulse rounded-full bg-[var(--placeholder-soft)]" />
-            </div>
-            <div className="h-2.5 w-2.5 animate-pulse rounded-full bg-[#A8C9D4]" />
-          </div>
-        </div>
-      </div>
-    </section>
-  );
+  return <GenericLoadingState label="Loading home" />;
 }
 
 type HomeLesson = {
@@ -10002,28 +11746,7 @@ function HomeUpcomingRows({
 }
 
 function HomeUpcomingLoadingRows() {
-  return (
-    <div className="space-y-5" aria-label="Loading upcoming classes">
-      <div className="grid grid-cols-7 gap-1 px-1">
-        {Array.from({ length: 7 }).map((_, index) => (
-          <div key={index} className="flex flex-col items-center gap-1.5">
-            <div className="h-14 w-full max-w-12 animate-pulse rounded-2xl bg-[var(--placeholder)]" />
-            <div className="h-2 w-3 animate-pulse rounded-full bg-[var(--placeholder-strong)]" />
-          </div>
-        ))}
-      </div>
-      <div className="rounded-[24px] bg-[#fffdf8] px-4 py-3 shadow-[0_8px_24px_rgba(38,50,58,0.06)]">
-        <div className="flex items-center gap-3">
-          <div className="h-14 w-14 shrink-0 animate-pulse rounded-2xl bg-[var(--placeholder)]" />
-          <div className="min-w-0 flex-1 space-y-2">
-            <div className="h-5 w-44 animate-pulse rounded-full bg-[var(--placeholder)]" />
-            <div className="h-4 w-32 animate-pulse rounded-full bg-[var(--placeholder-soft)]" />
-          </div>
-          <div className="h-2.5 w-2.5 animate-pulse rounded-full bg-[#A8C9D4]" />
-        </div>
-      </div>
-    </div>
-  );
+  return <GenericLoadingState label="Loading upcoming classes" />;
 }
 
 function WeekCalendar({ days, lessonsByDay }: { days: Date[]; lessonsByDay: Map<string, HomeLesson[]> }) {
@@ -10226,7 +11949,27 @@ function defaultCancellationMessage(lesson: HomeLesson) {
   return `${lesson.program.title} on ${formatHomeDate(lesson.date)} from ${lessonTimeRange(lesson)} has been cancelled.`;
 }
 
-function TeacherClassCard({ program, mosqueSlug, role, basePath, controlLabel }: { program: Program; mosqueSlug: string; role: TeacherProgramRole; basePath?: string; controlLabel?: string }) {
+function TeacherClassCard({
+  program,
+  mosqueSlug,
+  role,
+  basePath,
+  controlLabel,
+  canManageFinances = false,
+  onResigned,
+  onResignError,
+}: {
+  program: Program;
+  mosqueSlug: string;
+  role: TeacherProgramRole;
+  basePath?: string;
+  controlLabel?: string;
+  canManageFinances?: boolean;
+  onResigned?: () => void;
+  onResignError?: (message: string) => void;
+}) {
+  const [resignOpen, setResignOpen] = useState(false);
+  const [resigning, setResigning] = useState(false);
   const schedule = scheduleSummary(program.schedule, program.schedule_notes);
   const age = formatAgeRange(program.age_range_text);
   const gender = formatGender(program.audience_gender);
@@ -10236,6 +11979,19 @@ function TeacherClassCard({ program, mosqueSlug, role, basePath, controlLabel }:
   const publicHref = `/m/${mosqueSlug}/programs/${program.id}?returnTo=${teacherClassesReturnTo}`;
   const primaryHref = isDirector ? `${classBasePath}/${program.id}` : publicHref;
   const primaryLabel = isDirector ? "Edit Program" : "Public Page";
+
+  async function resignFromClass() {
+    setResigning(true);
+    const { error: resignError } = await createSupabaseBrowserClient().rpc("resign_program_instructor", { target_program_id: program.id });
+    setResigning(false);
+    if (resignError) {
+      onResignError?.(resignError.message);
+      return;
+    }
+    setResignOpen(false);
+    onResigned?.();
+    window.dispatchEvent(new Event("tareeqah:notifications-changed"));
+  }
 
   return (
     <article className="overflow-hidden rounded-[22px] border border-[#CBD8DE] bg-white shadow-[0_16px_40px_rgba(38,50,58,0.09)]">
@@ -10254,13 +12010,23 @@ function TeacherClassCard({ program, mosqueSlug, role, basePath, controlLabel }:
         </div>
         <AudienceDetails age={age} gender={gender} />
         <div className="divide-y divide-[#E3E8EC] border-t border-[#E3E8EC]">
-          <TeacherActionLink href={publicHref} icon={<ExternalLinkIcon />} label="View Public Page" previewLabel="Public Page" />
+          <TeacherActionLink href={publicHref} icon={<ExternalLinkIcon />} label="View Public Page" previewLabel="Class Details" />
           <TeacherActionLink href={`${classBasePath}/${program.id}/students`} icon={<StudentsIcon />} label="Students" />
+          {isDirector ? <TeacherActionLink href={`${classBasePath}/${program.id}/instructors`} icon={<InstructorManageIcon />} label="Instructors" /> : null}
           <TeacherActionLink href={`${classBasePath}/${program.id}/announcement`} icon={<MegaphoneIcon />} label="Announcement" />
-          {isDirector ? <TeacherActionLink href={`${classBasePath}/${program.id}/instructors`} icon={<InstructorManageIcon />} label="Manage Instructors" /> : null}
+          {canManageFinances ? <TeacherActionLink href={`${classBasePath}/${program.id}/finances`} icon={<FinanceIcon />} label="Manage Finances" /> : null}
           {isDirector ? <TeacherActionLink href={`${classBasePath}/${program.id}`} icon={<EditClassIcon />} label="Edit Program" /> : null}
+          {!isDirector ? <TeacherActionButton icon={<XIcon />} label="Resign from Class" onClick={() => setResignOpen(true)} /> : null}
         </div>
       </div>
+      {resignOpen ? (
+        <ConfirmInstructorResignModal
+          programTitle={program.title}
+          busy={resigning}
+          onCancel={() => setResignOpen(false)}
+          onConfirm={() => void resignFromClass()}
+        />
+      ) : null}
     </article>
   );
 }
@@ -10288,6 +12054,51 @@ function TeacherActionLink({ href, icon, label, previewLabel }: { href: string; 
   );
 }
 
+function TeacherActionButton({ icon, label, onClick }: { icon: ReactNode; label: string; onClick: () => void }) {
+  return (
+    <button type="button" onClick={onClick} className="group flex min-h-[58px] w-full items-center gap-3 text-sm font-semibold text-[#26323A] transition hover:bg-[#F7FAFB]">
+      <span className="flex h-10 w-10 shrink-0 items-center justify-center text-[#26323A] transition group-hover:text-[#17624F]" aria-hidden>
+        {icon}
+      </span>
+      <span className="min-w-0 flex-1 text-left leading-5">{label}</span>
+      <ChevronRightIcon className="text-[#9AA4AA]" />
+    </button>
+  );
+}
+
+function ConfirmInstructorResignModal({
+  programTitle,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  programTitle: string;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#26323A]/35 px-5 backdrop-blur-sm">
+      <div className="w-full max-w-sm rounded-[28px] bg-white p-6 text-[#26323A] shadow-[0_24px_60px_rgba(38,50,58,0.22)]">
+        
+        <h2 className="mt-4 text-xl font-semibold">Resign from class?</h2>
+        <p className="mt-2 text-sm leading-6 text-[#6B747B]">
+          You are leaving {programTitle}. To rejoin, you will need a new instructor code from the director.
+        </p>
+        <div className="mt-6 grid gap-2">
+          <button type="button" onClick={onConfirm} disabled={busy} className="min-h-11 rounded-[8px] bg-[#26323A] px-4 text-sm font-semibold text-white disabled:opacity-60">
+            {busy ? "Leaving..." : "Resign from class"}
+          </button>
+          <button type="button" onClick={onCancel} disabled={busy} className="min-h-11 rounded-[8px] bg-[#EEF3F5] px-4 text-sm font-semibold text-[#52616A] disabled:opacity-60">
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 function TeacherOtherClassCard({ program, mosqueSlug }: { program: Program; mosqueSlug: string }) {
   const schedule = scheduleSummary(program.schedule, program.schedule_notes);
   const publicHref = `/m/${mosqueSlug}/programs/${program.id}?returnTo=${encodeURIComponent(`/m/${mosqueSlug}/teacher/classes`)}`;
@@ -10301,7 +12112,7 @@ function TeacherOtherClassCard({ program, mosqueSlug }: { program: Program; mosq
         </div>
       </div>
       <div className="mt-4 divide-y divide-[#E3E8EC] border-t border-[#E3E8EC]">
-        <TeacherActionLink href={publicHref} icon={<ExternalLinkIcon />} label="View Public Page" previewLabel="Public Page" />
+        <TeacherActionLink href={publicHref} icon={<ExternalLinkIcon />} label="View Public Page" previewLabel="Class Details" />
       </div>
     </article>
   );
@@ -10310,8 +12121,12 @@ function TeacherOtherClassCard({ program, mosqueSlug }: { program: Program; mosq
 function TeacherWorkspaceTools({ slug, mode, canCreateClass, createHref }: { slug: string; mode: "create" | "invite"; canCreateClass: boolean; createHref?: string }) {
   const [teacherMembership, setTeacherMembership] = useState<MosqueMembership | null>(null);
   const [inviteCode, setInviteCode] = useState("");
+  const [invitePreview, setInvitePreview] = useState<{ programId: string; title: string; directorName: string } | null>(null);
+  const [invitePreviewLoading, setInvitePreviewLoading] = useState(false);
+  const [invitePreviewError, setInvitePreviewError] = useState<string | null>(null);
   const [showInviteInput, setShowInviteInput] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [toast, setToast] = useState<EditorToastState | null>(null);
   const [busy, setBusy] = useState(false);
   const [membershipLoading, setMembershipLoading] = useState(true);
   const inviteInputRef = useRef<HTMLInputElement | null>(null);
@@ -10342,6 +12157,55 @@ function TeacherWorkspaceTools({ slug, mode, canCreateClass, createHref }: { slu
 
   const isActiveTeacher = teacherMembership?.status === "active";
 
+  useEffect(() => {
+    const code = inviteCode.trim().toUpperCase();
+    if (mode !== "invite" || code.length !== 8) {
+      setInvitePreview(null);
+      setInvitePreviewLoading(false);
+      setInvitePreviewError(null);
+      return;
+    }
+
+    let cancelled = false;
+    const timeout = window.setTimeout(() => {
+      void (async () => {
+        setInvitePreviewLoading(true);
+        const supabase = createSupabaseBrowserClient();
+        const { data: previewRows, error: previewError } = await supabase.rpc("lookup_program_instructor_code", { invite: code });
+        const previewRow = previewRows?.[0] ?? null;
+        if (previewError) {
+          if (!cancelled) {
+            setInvitePreview(null);
+            setInvitePreviewLoading(false);
+            setInvitePreviewError(previewError.message);
+          }
+          return;
+        }
+        if (!previewRow) {
+          if (!cancelled) {
+            setInvitePreview(null);
+            setInvitePreviewLoading(false);
+            setInvitePreviewError(null);
+          }
+          return;
+        }
+        if (!cancelled) {
+          setInvitePreviewError(null);
+          setInvitePreview({
+            programId: previewRow.program_id,
+            title: previewRow.title,
+            directorName: previewRow.director_name,
+          });
+          setInvitePreviewLoading(false);
+        }
+      })();
+    }, 180);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+    };
+  }, [inviteCode, mode]);
+
   async function claimInviteCode() {
     if (!inviteCode.trim()) {
       return;
@@ -10359,15 +12223,30 @@ function TeacherWorkspaceTools({ slug, mode, canCreateClass, createHref }: { slu
       return;
     }
     setInviteCode("");
-    setMessage("Instructor code accepted. The class is now assigned to you.");
+    setInvitePreview(null);
+    setShowInviteInput(false);
+    setToast({ tone: "success", message: "Instructor code accepted. The class is now assigned to you." });
     window.dispatchEvent(new Event("tareeqah:programs-changed"));
-    window.location.reload();
+    window.setTimeout(() => window.location.reload(), 450);
+  }
+
+  async function pasteInviteCode() {
+    const clipboardText = await navigator.clipboard.readText().catch(() => "");
+    const normalizedCode = clipboardText.replace(/[^a-zA-Z0-9]/g, "").toUpperCase().slice(0, 8);
+    if (!normalizedCode) {
+      setMessage("Clipboard does not contain an instructor code.");
+      return;
+    }
+    setMessage(null);
+    setInviteCode(normalizedCode);
+    inviteInputRef.current?.focus();
   }
 
   const inviteChars = inviteCode.padEnd(8, " ").slice(0, 8).split("");
 
   return (
     <section className={cn("space-y-3", mode === "invite" && "rounded-[30px] bg-[#17624F] p-5 text-white shadow-[0_18px_40px_rgba(23,98,79,0.24)]")}>
+      <EditorToast toast={toast} onClose={() => setToast(null)} />
       {mode === "invite" && !membershipLoading && !isActiveTeacher ? (
         <div className="rounded-[14px] border border-white/25 bg-white/14 px-3 py-2 text-sm text-white">
           A teacher account is required to use instructor codes.
@@ -10428,14 +12307,14 @@ function TeacherWorkspaceTools({ slug, mode, canCreateClass, createHref }: { slu
                 </div>
               </label>
 
-              <div className="grid grid-cols-[1fr_auto] gap-2">
+              <div className="grid grid-cols-[auto_1fr_auto] gap-2">
                 <button
                   type="button"
-                  disabled={busy || !isActiveTeacher || inviteCode.trim().length < 8}
-                  onClick={claimInviteCode}
-                  className="min-h-11 rounded-full bg-white px-4 text-sm font-semibold text-[#17624F] shadow-[0_10px_22px_rgba(10,45,36,0.16)] disabled:opacity-50"
+                  onClick={() => void pasteInviteCode()}
+                  className="flex h-11 w-11 items-center justify-center rounded-full bg-white/16 text-white ring-1 ring-white/20 transition-colors hover:bg-white/24"
+                  aria-label="Paste instructor code"
                 >
-                  Join Class
+                  <ClipboardIcon />
                 </button>
                 <button
                   type="button"
@@ -10448,6 +12327,36 @@ function TeacherWorkspaceTools({ slug, mode, canCreateClass, createHref }: { slu
                   Cancel
                 </button>
               </div>
+              {inviteCode.trim().length === 8 ? (
+                <div className="rounded-[18px] bg-white p-4 text-[#26323A] shadow-[0_12px_26px_rgba(10,45,36,0.14)]">
+                  {invitePreviewLoading ? (
+                    <p className="text-sm font-semibold text-[#6B747B]">Checking code...</p>
+                  ) : invitePreviewError ? (
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-sm font-semibold text-[#C84B3E]">{invitePreviewError}</p>
+                      <button type="button" onClick={() => setInviteCode("")} className="min-h-9 rounded-full bg-[#EEF3F5] px-3 text-xs font-semibold text-[#52616A]">Clear</button>
+                    </div>
+                  ) : invitePreview ? (
+                    <>
+                      <p className="text-sm font-semibold text-[#26323A]">{invitePreview.title}</p>
+                      <p className="mt-1 text-xs font-medium text-[#6B747B]">Directed by {invitePreview.directorName}</p>
+                      <div className="mt-4 grid grid-cols-2 gap-2">
+                        <button type="button" onClick={() => setInviteCode("")} className="min-h-10 rounded-full bg-[#EEF3F5] px-3 text-sm font-semibold text-[#52616A]">
+                          Not this class
+                        </button>
+                        <button type="button" disabled={busy || !isActiveTeacher} onClick={() => void claimInviteCode()} className="min-h-10 rounded-full bg-[#17624F] px-3 text-sm font-semibold text-white disabled:opacity-50">
+                          {busy ? "Joining..." : "Join Class"}
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-sm font-semibold text-[#C84B3E]">No class found for this code.</p>
+                      <button type="button" onClick={() => setInviteCode("")} className="min-h-9 rounded-full bg-[#EEF3F5] px-3 text-xs font-semibold text-[#52616A]">Clear</button>
+                    </div>
+                  )}
+                </div>
+              ) : null}
             </div>
           )}
         </div>
@@ -10476,6 +12385,7 @@ function ProgramTeacherStaffTools({ program }: { program: Program }) {
   const [isDirector, setIsDirector] = useState(false);
   const [instructors, setInstructors] = useState<Array<ProgramTeacher & { profile?: Profile | null }>>([]);
   const [message, setMessage] = useState<string | null>(null);
+  const [toast, setToast] = useState<EditorToastState | null>(null);
   const [latestInviteCode, setLatestInviteCode] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -10535,7 +12445,7 @@ function ProgramTeacherStaffTools({ program }: { program: Program }) {
     }
 
     await navigator.clipboard.writeText(code).catch(() => null);
-    setMessage("Instructor code copied.");
+    setToast({ tone: "success", message: "Instructor code copied to clipboard." });
   }
 
   async function removeInstructor(assignmentId: string) {
@@ -10561,6 +12471,7 @@ function ProgramTeacherStaffTools({ program }: { program: Program }) {
 
   return (
     <section className="space-y-6 bg-white px-4 pb-24 pt-4">
+      <EditorToast toast={toast} onClose={() => setToast(null)} />
       <div className="rounded-[30px] bg-[#17624F] p-5 text-white shadow-[0_18px_40px_rgba(23,98,79,0.24)]">
         <div className="min-w-0">
           <h2 className="text-xl font-semibold leading-6">Invite An Instructor</h2>
@@ -10603,6 +12514,27 @@ function ProgramTeacherStaffTools({ program }: { program: Program }) {
       {message ? <div className="px-1 text-sm font-semibold text-[#17624F]">{message}</div> : null}
 
       <section className="space-y-2">
+        <h2 className="px-1 text-lg font-semibold text-[#26323A]">Instructors</h2>
+        {activeInstructors.length ? (
+          <div className="divide-y divide-[#EEF2F4]">
+            {activeInstructors.map((assignment) => (
+              <div key={assignment.id} className="flex items-center justify-between gap-3 py-3">
+                <div className="min-w-0">
+                  <p className="truncate font-semibold text-[#26323A]">{assignment.profile?.full_name || assignment.profile?.email || "Assigned instructor"}</p>
+                  <p className="truncate text-sm text-[#6B747B]">{assignment.profile?.email || (assignment.teacher_profile_id ? "Profile hidden until permissions are applied" : "Instructor")}</p>
+                </div>
+                <button type="button" disabled={busy} onClick={() => void removeInstructor(assignment.id)} className="min-h-9 shrink-0 rounded-full px-3 text-sm font-semibold text-[#C83F31] disabled:opacity-60">
+                  Remove
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <MiniEmpty text="No instructors have joined yet." />
+        )}
+      </section>
+
+      <section className="space-y-2">
         <h2 className="px-1 text-lg font-semibold text-[#26323A]">Unused Codes</h2>
         {unusedCodes.length ? (
           <div className="divide-y divide-[#EEF2F4]">
@@ -10625,27 +12557,6 @@ function ProgramTeacherStaffTools({ program }: { program: Program }) {
           </div>
         ) : (
           <MiniEmpty text="No unused instructor codes." />
-        )}
-      </section>
-
-      <section className="space-y-2">
-        <h2 className="px-1 text-lg font-semibold text-[#26323A]">Instructors</h2>
-        {activeInstructors.length ? (
-          <div className="divide-y divide-[#EEF2F4]">
-            {activeInstructors.map((assignment) => (
-            <div key={assignment.id} className="flex items-center justify-between gap-3 py-3">
-              <div className="min-w-0">
-                <p className="truncate font-semibold text-[#26323A]">{assignment.profile?.full_name || "Instructor"}</p>
-                <p className="truncate text-sm text-[#6B747B]">{assignment.profile?.email || "Instructor"}</p>
-              </div>
-              <button type="button" disabled={busy} onClick={() => void removeInstructor(assignment.id)} className="min-h-9 shrink-0 rounded-full px-3 text-sm font-semibold text-[#C83F31] disabled:opacity-60">
-                Remove
-              </button>
-            </div>
-            ))}
-          </div>
-        ) : (
-          <MiniEmpty text="No instructors have joined yet." />
         )}
       </section>
     </section>
@@ -11163,56 +13074,16 @@ function Avatar({ src, name }: { src: string | null; name: string }) {
 }
 
 function DirectorySkeleton() {
-  return (
-    <div className="space-y-3 p-4">
-      <div className="h-12 bg-[var(--placeholder-soft)]" />
-      <div className="h-12 bg-[var(--placeholder-soft)]" />
-    </div>
-  );
+  return <GenericLoadingState label="Loading" />;
 }
 
 function ProgramDetailLoadingState() {
-  return (
-    <div className="space-y-5 bg-[var(--workspace)] p-4">
-      <div className="overflow-hidden rounded-[28px] bg-[#fffdf8] shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
-        <div className="h-40 animate-pulse bg-[var(--placeholder)]" />
-        <div className="space-y-3 p-4">
-          <div className="h-4 w-36 animate-pulse rounded-full bg-[var(--placeholder-strong)]" />
-          <div className="h-7 w-4/5 animate-pulse rounded-full bg-[var(--placeholder)]" />
-          <div className="h-4 w-full animate-pulse rounded-full bg-[var(--placeholder-soft)]" />
-          <div className="h-4 w-3/4 animate-pulse rounded-full bg-[var(--placeholder-soft)]" />
-        </div>
-      </div>
-      <div className="rounded-[24px] bg-[#fffdf8] p-5 shadow-[0_12px_28px_rgba(38,50,58,0.06)]">
-        <div className="h-6 w-44 animate-pulse rounded-full bg-[var(--placeholder)]" />
-        <div className="mt-5 grid gap-3">
-          <div className="h-12 animate-pulse rounded-2xl bg-[var(--placeholder-soft)]" />
-          <div className="h-12 animate-pulse rounded-2xl bg-[var(--placeholder-soft)]" />
-          <div className="h-12 animate-pulse rounded-2xl bg-[var(--placeholder-soft)]" />
-        </div>
-      </div>
-    </div>
-  );
+  return <GenericLoadingState label="Loading class" />;
 }
 
 function ClassesLoadingPlaceholders({ count = 2 }: { count?: number }) {
-  return (
-    <div className="grid gap-4 bg-[var(--workspace)] p-4 md:grid-cols-2" aria-label="Loading classes">
-      {Array.from({ length: count }).map((_, index) => (
-        <div key={index} className="overflow-hidden rounded-[22px] border border-[#E8DDCB] bg-[#fffdf8] shadow-[0_12px_28px_rgba(38,50,58,0.08)]">
-          <div className="h-36 animate-pulse bg-[var(--placeholder)]" />
-          <div className="space-y-3 p-4">
-            <div className="h-6 w-3/4 animate-pulse rounded bg-[var(--placeholder)]" />
-            <div className="h-4 w-1/2 animate-pulse rounded bg-[var(--placeholder-soft)]" />
-            <div className="flex gap-3 pt-2">
-              <div className="h-9 flex-1 animate-pulse rounded bg-[var(--placeholder-soft)]" />
-              <div className="h-9 flex-1 animate-pulse rounded bg-[var(--placeholder-soft)]" />
-            </div>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
+  void count;
+  return <GenericLoadingState label="Loading classes" />;
 }
 
 function initials(name: string) {

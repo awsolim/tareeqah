@@ -3,7 +3,7 @@
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { useStudentNotificationCounts, useTeacherNotificationCounts } from "@/components/data/supabase-public-sections";
 import type { NavItem } from "@/components/layout/horizontal-nav";
@@ -34,6 +34,7 @@ export function DesktopSidebar({
   section?: "public" | "portal" | "teacher" | "admin";
 }) {
   const pathname = usePathname();
+  const searchParams = useSearchParams();
   const whiteChrome = /\/teacher\/classes\/[^/]+\/instructors$/.test(pathname);
 
   const [displayName, setDisplayName] = useState(titleFromSlug(mosqueSlug) || appName);
@@ -87,23 +88,35 @@ export function DesktopSidebar({
         {visibleItems.map((item) => {
           const active = isNavItemActive(pathname, item);
           const badgeCount = item.label === "Inbox" || item.label === "Announcements" ? inboxBadgeCount : 0;
+          const label = desktopLabel(item.label);
+          const subItems = buildDesktopSubItems(label, section, mosqueSlug, accountHref);
+          const subItemActive = subItems.some((subItem) => isHrefActive(pathname, searchParams, subItem.href));
+
+          if (label === "Me" || subItems.length) {
+            return (
+              <DesktopNavGroup key={`${item.label}-${item.href}`} item={item} active={active || subItemActive} badgeCount={badgeCount}>
+                {label === "Me" ? (
+                  <DesktopAccountSubnav mosqueSlug={mosqueSlug} accountHref={accountHref} />
+                ) : (
+                  <DesktopSidebarSubnav items={subItems} pathname={pathname} searchParams={searchParams} />
+                )}
+              </DesktopNavGroup>
+            );
+          }
 
           return (
-            <Fragment key={`${item.label}-${item.href}`}>
-              <Link
-                href={item.href}
-                className={cn(
-                  "flex min-h-11 items-center gap-3 rounded-2xl px-3 text-sm font-semibold text-[#5B6770] transition-colors hover:bg-[#F1F5F6] hover:text-[#26323A]",
-                  active && "bg-[#E8F5F1] text-[#17624F]",
-                )}
-              >
-                <SidebarIcon label={item.label} />
-                <span className="min-w-0 flex-1 truncate">{desktopLabel(item.label)}</span>
-                {badgeCount ? <Badge count={badgeCount} /> : null}
-              </Link>
-
-              {desktopLabel(item.label) === "Me" ? <DesktopAccountSubnav mosqueSlug={mosqueSlug} accountHref={accountHref} /> : null}
-            </Fragment>
+            <Link
+              key={`${item.label}-${item.href}`}
+              href={item.href}
+              className={cn(
+                "flex min-h-11 items-center gap-3 rounded-2xl px-3 text-sm font-semibold text-[#5B6770] transition-colors hover:bg-[#F1F5F6] hover:text-[#26323A]",
+                active && "bg-[#E8F5F1] text-[#17624F]",
+              )}
+            >
+              <SidebarIcon label={item.label} />
+              <span className="min-w-0 flex-1 truncate">{label}</span>
+              {badgeCount ? <Badge count={badgeCount} /> : null}
+            </Link>
           );
         })}
       </nav>
@@ -113,6 +126,58 @@ export function DesktopSidebar({
         <DesktopProfileLink mosqueSlug={mosqueSlug} accountHref={accountHref} />
       </div>
     </aside>
+  );
+}
+
+function DesktopNavGroup({ item, active, badgeCount, children }: { item: NavItem; active: boolean; badgeCount: number; children: ReactNode }) {
+  const [open, setOpen] = useState(active);
+  const label = desktopLabel(item.label);
+
+  useEffect(() => {
+    if (active) {
+      setOpen(true);
+    }
+  }, [active]);
+
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        className={cn(
+          "flex min-h-11 w-full items-center gap-3 rounded-2xl px-3 text-left text-sm font-semibold text-[#5B6770] transition-colors hover:bg-[#F1F5F6] hover:text-[#26323A]",
+          active && "bg-[#E8F5F1] text-[#17624F]",
+        )}
+        aria-expanded={open}
+      >
+        <SidebarIcon label={item.label} />
+        <span className="min-w-0 flex-1 truncate">{label}</span>
+        {badgeCount ? <Badge count={badgeCount} /> : null}
+        <SidebarChevron expanded={open} />
+      </button>
+      {open ? <div className="mt-1 border-l border-[#D6DCE0] pl-4">{children}</div> : null}
+    </div>
+  );
+}
+
+type SearchParamReader = Pick<URLSearchParams, "get">;
+
+function DesktopSidebarSubnav({ items, pathname, searchParams }: { items: Array<{ label: string; href: string }>; pathname: string; searchParams: SearchParamReader }) {
+  return (
+    <div>
+      {items.map((item) => (
+        <Link
+          key={item.href}
+          href={item.href}
+          className={cn(
+            "flex min-h-9 items-center rounded-xl px-3 text-sm font-medium text-[#6B747B] transition-colors hover:bg-[#F1F5F6] hover:text-[#26323A]",
+            isHrefActive(pathname, searchParams, item.href) && "bg-[#F3FAF7] text-[#17624F]",
+          )}
+        >
+          {item.label}
+        </Link>
+      ))}
+    </div>
   );
 }
 
@@ -215,7 +280,6 @@ function DesktopProfileLink({ mosqueSlug, accountHref }: { mosqueSlug: string; a
 }
 
 function DesktopAccountSubnav({ mosqueSlug, accountHref }: { mosqueSlug: string; accountHref: string }) {
-  const pathname = usePathname();
   const searchParams = useSearchParams();
   const router = useRouter();
   const hasMounted = useHasMounted();
@@ -277,10 +341,6 @@ function DesktopAccountSubnav({ mosqueSlug, accountHref }: { mosqueSlug: string;
     return null;
   }
 
-  if (!pathname.startsWith(accountHref)) {
-    return null;
-  }
-
   if (sessionResolved && !session) {
     return null;
   }
@@ -326,7 +386,7 @@ function buildDesktopItems(section: "public" | "portal" | "teacher" | "admin", m
     return [
       { label: "Home", href: `/m/${mosqueSlug}/admin` },
       { label: "Classes", href: `/m/${mosqueSlug}/admin/programs` },
-      { label: "Members", href: `/m/${mosqueSlug}/admin/students` },
+      { label: "Masjid", href: `/m/${mosqueSlug}/admin/masjid` },
       { label: "Me", href: `/m/${mosqueSlug}/admin/settings` },
     ];
   }
@@ -346,6 +406,50 @@ function buildDesktopItems(section: "public" | "portal" | "teacher" | "admin", m
     { label: "Inbox", href: `/m/${mosqueSlug}/portal/announcements` },
     { label: "Me", href: `/m/${mosqueSlug}/account` },
   ];
+}
+
+function buildDesktopSubItems(label: string, section: "public" | "portal" | "teacher" | "admin", mosqueSlug: string, accountHref: string) {
+  const base = `/m/${mosqueSlug}`;
+
+  if (label === "Classes") {
+    if (section === "teacher") {
+      return [
+        { label: "My Classes", href: `${base}/teacher/classes?tab=mine` },
+        { label: "Other Classes", href: `${base}/teacher/classes?tab=other` },
+      ];
+    }
+    if (section === "portal") {
+      return [
+        { label: "Enrolled", href: `${base}/portal/classes?tab=enrolled` },
+        { label: "Browse", href: `${base}/portal/classes?tab=browse` },
+      ];
+    }
+    if (section === "admin") {
+      return [{ label: "All Classes", href: `${base}/admin/programs` }];
+    }
+    return [{ label: "Browse Classes", href: `${base}/programs` }];
+  }
+
+  if (label === "Inbox") {
+    if (section === "teacher") {
+      return [
+        { label: "Applications", href: `${base}/teacher/inbox?tab=requests` },
+        { label: "Withdrawals", href: `${base}/teacher/inbox?tab=withdrawals` },
+        { label: "Instructors", href: `${base}/teacher/inbox?tab=instructors` },
+      ];
+    }
+    return [
+      { label: "Announcements", href: `${base}/portal/announcements?tab=announcements` },
+      { label: "Notes", href: `${base}/portal/announcements?tab=notes` },
+      { label: "Applications", href: `${base}/portal/announcements?tab=requests` },
+    ];
+  }
+
+  if (label === "Me") {
+    return accountPanelItems.map((item) => ({ label: item.label, href: `${accountHref}?panel=${item.panel}` }));
+  }
+
+  return [];
 }
 
 function accountHrefForSection(section: "public" | "portal" | "teacher" | "admin", mosqueSlug: string) {
@@ -390,6 +494,23 @@ function isNavItemActive(pathname: string, item: NavItem) {
   const hrefPath = item.href.split("?")[0];
 
   return pathname === hrefPath || (item.label !== "Home" && pathname.startsWith(`${hrefPath}/`));
+}
+
+function isHrefActive(pathname: string, searchParams: SearchParamReader, href: string) {
+  const [hrefPath, queryString] = href.split("?");
+  if (pathname !== hrefPath) {
+    return false;
+  }
+  if (!queryString) {
+    return true;
+  }
+  const hrefParams = new URLSearchParams(queryString);
+  for (const [key, value] of hrefParams.entries()) {
+    if (searchParams.get(key) !== value) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function Badge({ count }: { count: number }) {
@@ -451,6 +572,14 @@ function SidebarIcon({ label }: { label: string }) {
   }
 
   return <span className="flex h-5 w-5 items-center justify-center text-xs font-semibold">{normalized[0]}</span>;
+}
+
+function SidebarChevron({ expanded }: { expanded: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" className={cn("h-4 w-4 transition-transform", expanded && "rotate-90")} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="m9 6 6 6-6 6" />
+    </svg>
+  );
 }
 
 function initials(name: string) {

@@ -237,10 +237,11 @@ export function ChildrenManager({ slug }: { slug: string }) {
 
   if (loading) {
     return (
-      <div className="space-y-3">
-        <div className="h-16 animate-pulse rounded-2xl bg-[#EEF2F4]" />
-        <div className="h-16 animate-pulse rounded-2xl bg-[#EEF2F4]" />
-        <div className="h-16 animate-pulse rounded-2xl bg-[#EEF2F4]" />
+      <div className="flex min-h-64 items-center justify-center px-6 py-10" aria-label="Loading">
+        <div className="flex flex-col items-center gap-3 text-center">
+          <span className="h-11 w-11 animate-spin rounded-full border-4 border-[#DDEFF4] border-t-[#2F8FB3]" aria-hidden />
+          <span className="text-sm font-semibold text-[#52616A]">Loading</span>
+        </div>
       </div>
     );
   }

@@ -9,6 +9,7 @@ export type Database = {
           name: string;
           slug: string;
           logo_url: string | null;
+          picture_url: string | null;
           primary_color: string | null;
           secondary_color: string | null;
           stripe_account_id: string | null;
@@ -96,12 +97,26 @@ export type Database = {
           program_id: string;
           teacher_profile_id: string | null;
           role: string;
+          can_manage_finances: boolean;
           invite_code: string | null;
           invite_code_created_at: string | null;
           created_at: string;
         };
         Insert: Partial<Database["public"]["Tables"]["program_teachers"]["Row"]>;
         Update: Partial<Database["public"]["Tables"]["program_teachers"]["Row"]>;
+        Relationships: [];
+      };
+      program_instructor_events: {
+        Row: {
+          id: string;
+          program_id: string;
+          assignment_id: string | null;
+          teacher_profile_id: string | null;
+          event_type: string;
+          created_at: string;
+        };
+        Insert: Partial<Database["public"]["Tables"]["program_instructor_events"]["Row"]>;
+        Update: Partial<Database["public"]["Tables"]["program_instructor_events"]["Row"]>;
         Relationships: [];
       };
       enrollment_requests: {
@@ -120,6 +135,7 @@ export type Database = {
           approved_price_monthly_cents: number | null;
           payment_bypassed: boolean;
           decision_note: string | null;
+          admission_completed_at: string | null;
           student_dismissed_at: string | null;
           teacher_dismissed_at: string | null;
         };
@@ -251,6 +267,21 @@ export type Database = {
         Update: Partial<Database["public"]["Tables"]["program_subscriptions"]["Row"]>;
         Relationships: [];
       };
+      program_finance_audit_events: {
+        Row: {
+          id: string;
+          program_id: string;
+          student_profile_id: string | null;
+          actor_profile_id: string | null;
+          event_type: string;
+          summary: string;
+          metadata: Json;
+          created_at: string;
+        };
+        Insert: Partial<Database["public"]["Tables"]["program_finance_audit_events"]["Row"]>;
+        Update: Partial<Database["public"]["Tables"]["program_finance_audit_events"]["Row"]>;
+        Relationships: [];
+      };
       program_details: {
         Row: {
           program_id: string;
@@ -277,6 +308,20 @@ export type Database = {
         };
         Insert: Partial<Database["public"]["Tables"]["program_outcomes"]["Row"]>;
         Update: Partial<Database["public"]["Tables"]["program_outcomes"]["Row"]>;
+        Relationships: [];
+      };
+      program_faqs: {
+        Row: {
+          id: string;
+          program_id: string;
+          sort_order: number;
+          question: string;
+          answer: string;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: Partial<Database["public"]["Tables"]["program_faqs"]["Row"]>;
+        Update: Partial<Database["public"]["Tables"]["program_faqs"]["Row"]>;
         Relationships: [];
       };
       program_subscription_tracks: {
@@ -451,6 +496,14 @@ export type Database = {
       claim_program_instructor_code: {
         Args: { invite: string };
         Returns: string;
+      };
+      lookup_program_instructor_code: {
+        Args: { invite: string };
+        Returns: Array<{ program_id: string; title: string; director_name: string }>;
+      };
+      resign_program_instructor: {
+        Args: { target_program_id: string };
+        Returns: void;
       };
       mark_program_student_notes_seen: {
         Args: { note_ids: string[] };

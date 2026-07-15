@@ -4,7 +4,7 @@ import { GoogleAuthCallback } from "@/components/auth/google-auth-callback";
 import { OAuthProfileCompletion } from "@/components/auth/oauth-profile-completion";
 import { ForgotPasswordPanel, ResetPasswordPanel } from "@/components/auth/password-reset";
 import { PortalRoleRedirect } from "@/components/data/portal-role-redirect";
-import { AdminClassesData, AdminHomeData, AdminMembersData, InboxAnnouncementsData, MosqueDirectoryRows, PortalAccountData, ProgramDetailData, PublicMasjidData, PublicProgramsData, StudentClassesData, StudentHomeData, StudentScheduleOptionsData, StudentWithdrawalRequestData, TeacherAnnouncementData, TeacherClassesData, TeacherHomeData, TeacherInboxData, TeacherInstructorsData, TeacherProgramCreateData, TeacherProgramSettingsData, TeacherScheduleData, TeacherStudentNotesData, TeacherStudentsData } from "@/components/data/supabase-public-sections";
+import { AdminClassesData, AdminHomeData, AdminMasjidData, AdminMasjidFinancesData, AdminMembersData, InboxAnnouncementsData, MosqueDirectoryRows, PortalAccountData, ProgramDetailData, ProgramFinancesData, PublicMasjidData, PublicProgramsData, StudentClassesData, StudentHomeData, StudentScheduleOptionsData, StudentWithdrawalRequestData, TeacherAnnouncementData, TeacherClassesData, TeacherHomeData, TeacherInboxData, TeacherInstructorsData, TeacherProgramCreateData, TeacherProgramSettingsData, TeacherScheduleData, TeacherStudentNotesData, TeacherStudentsData } from "@/components/data/supabase-public-sections";
 import { ActionToolbar } from "@/components/ui/action-toolbar";
 import { DataRow } from "@/components/ui/data-row";
 import { DataTable } from "@/components/ui/data-table";
@@ -514,6 +514,17 @@ export function TeacherAnnouncementPage({ slug, programId }: { slug: string; pro
   );
 }
 
+export function TeacherProgramFinancesPage({ slug, programId }: { slug: string; programId: string }) {
+  return (
+    <>
+      <PageTitleBar title="Finances" backHref={`/m/${slug}/teacher/classes`} backLabel="Classes" tone="teal" />
+      <Workspace overlapOffset="-172px" surfaceClassName="bg-white">
+        <ProgramFinancesData slug={slug} programId={programId} mode="teacher" />
+      </Workspace>
+    </>
+  );
+}
+
 export function TeacherSchedulePage({ slug, programId }: { slug: string; programId: string }) {
   return (
     <>
@@ -636,6 +647,17 @@ export function AdminStudentsPage({ slug }: { slug: string }) {
   );
 }
 
+export function AdminMasjidPage({ slug }: { slug: string }) {
+  return (
+    <PageShell section="admin" slug={slug}>
+      <PageTitleBar title="Masjid" tone="teal" />
+      <Workspace>
+        <AdminMasjidData slug={slug} />
+      </Workspace>
+    </PageShell>
+  );
+}
+
 export function AdminProgramDetailPage({ programId, slug }: { programId: string; slug: string }) {
   return (
     <PageShell section="admin" slug={slug}>
@@ -697,6 +719,28 @@ export function AdminAnnouncementPage({ slug, programId }: { slug: string; progr
       <PageTitleBar title="Announcement" backHref={`/m/${slug}/admin/programs`} backLabel="Classes" />
       <Workspace>
         <TeacherAnnouncementData slug={slug} programId={programId} />
+      </Workspace>
+    </PageShell>
+  );
+}
+
+export function AdminProgramFinancesPage({ slug, programId }: { slug: string; programId: string }) {
+  return (
+    <PageShell section="admin" slug={slug}>
+      <PageTitleBar title="Finances" backHref={`/m/${slug}/admin/programs`} backLabel="Classes" tone="teal" />
+      <Workspace overlapOffset="-172px" surfaceClassName="bg-white">
+        <ProgramFinancesData slug={slug} programId={programId} mode="admin" />
+      </Workspace>
+    </PageShell>
+  );
+}
+
+export function AdminMasjidFinancesPage({ slug }: { slug: string }) {
+  return (
+    <PageShell section="admin" slug={slug}>
+      <PageTitleBar title="Finances" backHref={`/m/${slug}/admin/masjid`} backLabel="Masjid" tone="teal" />
+      <Workspace overlapOffset="-172px" surfaceClassName="bg-white">
+        <AdminMasjidFinancesData slug={slug} />
       </Workspace>
     </PageShell>
   );
