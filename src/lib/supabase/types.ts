@@ -41,6 +41,8 @@ export type Database = {
           schedule: Json | null;
           schedule_timezone: string | null;
           schedule_notes: string | null;
+          track_selection_mode: string;
+          track_selection_count: number;
           tags: string[] | null;
           created_at: string;
           updated_at: string;
@@ -80,6 +82,7 @@ export type Database = {
           teacher_approval_status: string | null;
           teacher_approval_reviewed_by: string | null;
           teacher_approval_reviewed_at: string | null;
+          can_create_programs: boolean;
           created_at: string;
           updated_at: string;
         };
@@ -118,9 +121,34 @@ export type Database = {
           payment_bypassed: boolean;
           decision_note: string | null;
           student_dismissed_at: string | null;
+          teacher_dismissed_at: string | null;
         };
         Insert: Partial<Database["public"]["Tables"]["enrollment_requests"]["Row"]>;
         Update: Partial<Database["public"]["Tables"]["enrollment_requests"]["Row"]>;
+        Relationships: [];
+      };
+      withdrawal_requests: {
+        Row: {
+          id: string;
+          mosque_id: string;
+          program_id: string;
+          enrollment_id: string | null;
+          student_profile_id: string;
+          parent_profile_id: string | null;
+          requested_by: string;
+          status: string;
+          requested_at: string;
+          reviewed_by: string | null;
+          reviewed_at: string | null;
+          reason: string | null;
+          understands_no_refund: boolean;
+          understands_immediate_exit: boolean;
+          decision_note: string | null;
+          teacher_dismissed_at: string | null;
+          student_dismissed_at: string | null;
+        };
+        Insert: Partial<Database["public"]["Tables"]["withdrawal_requests"]["Row"]>;
+        Update: Partial<Database["public"]["Tables"]["withdrawal_requests"]["Row"]>;
         Relationships: [];
       };
       program_announcements: {
@@ -129,6 +157,7 @@ export type Database = {
           program_id: string;
           author_profile_id: string;
           message: string;
+          target_program_track_ids: string[];
           created_at: string;
           updated_at: string;
         };
@@ -148,6 +177,16 @@ export type Database = {
         };
         Insert: Partial<Database["public"]["Tables"]["program_announcement_receipts"]["Row"]>;
         Update: Partial<Database["public"]["Tables"]["program_announcement_receipts"]["Row"]>;
+        Relationships: [];
+      };
+      enrollment_request_tracks: {
+        Row: {
+          enrollment_request_id: string;
+          program_track_id: string;
+          created_at: string;
+        };
+        Insert: Partial<Database["public"]["Tables"]["enrollment_request_tracks"]["Row"]>;
+        Update: Partial<Database["public"]["Tables"]["enrollment_request_tracks"]["Row"]>;
         Relationships: [];
       };
       program_student_notes: {
@@ -240,6 +279,16 @@ export type Database = {
         Update: Partial<Database["public"]["Tables"]["program_outcomes"]["Row"]>;
         Relationships: [];
       };
+      program_subscription_tracks: {
+        Row: {
+          program_subscription_id: string;
+          program_track_id: string;
+          created_at: string;
+        };
+        Insert: Partial<Database["public"]["Tables"]["program_subscription_tracks"]["Row"]>;
+        Update: Partial<Database["public"]["Tables"]["program_subscription_tracks"]["Row"]>;
+        Relationships: [];
+      };
       program_tracks: {
         Row: {
           id: string;
@@ -315,6 +364,16 @@ export type Database = {
         Update: Partial<Database["public"]["Tables"]["enrollments"]["Row"]>;
         Relationships: [];
       };
+      enrollment_tracks: {
+        Row: {
+          enrollment_id: string;
+          program_track_id: string;
+          created_at: string;
+        };
+        Insert: Partial<Database["public"]["Tables"]["enrollment_tracks"]["Row"]>;
+        Update: Partial<Database["public"]["Tables"]["enrollment_tracks"]["Row"]>;
+        Relationships: [];
+      };
     };
     Views: Record<string, never>;
     Functions: {
@@ -324,6 +383,33 @@ export type Database = {
           child_gender: string;
           child_date_of_birth: string;
           child_mosque_slug: string;
+        };
+        Returns: string;
+      };
+      update_parent_child_profile: {
+        Args: {
+          child_profile_id: string;
+          child_full_name: string;
+          child_gender: string;
+          child_date_of_birth: string;
+          child_mosque_slug: string;
+        };
+        Returns: void;
+      };
+      update_enrollment_track_selection: {
+        Args: {
+          target_enrollment_id: string;
+          selected_track_ids: string[];
+        };
+        Returns: void;
+      };
+      request_program_withdrawal: {
+        Args: {
+          target_program_id: string;
+          target_student_profile_id: string;
+          withdrawal_reason?: string | null;
+          understands_no_refund?: boolean;
+          understands_immediate_exit?: boolean;
         };
         Returns: string;
       };

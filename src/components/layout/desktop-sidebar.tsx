@@ -34,6 +34,7 @@ export function DesktopSidebar({
   section?: "public" | "portal" | "teacher" | "admin";
 }) {
   const pathname = usePathname();
+  const whiteChrome = /\/teacher\/classes\/[^/]+\/instructors$/.test(pathname);
 
   const [displayName, setDisplayName] = useState(titleFromSlug(mosqueSlug) || appName);
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
@@ -71,7 +72,7 @@ export function DesktopSidebar({
   }, [mosqueSlug]);
 
   return (
-    <aside className="fixed inset-y-0 left-0 z-40 hidden w-72 flex-col border-r border-[#D6DCE0] bg-[var(--workspace)] px-5 py-6 text-[#26323A] md:flex">
+    <aside className={cn("fixed inset-y-0 left-0 z-40 hidden w-72 flex-col border-r border-[#D6DCE0] px-5 py-6 text-[#26323A] md:flex", whiteChrome ? "bg-white" : "bg-[var(--workspace)]")}>
       <Link href={homeHref} className="flex min-w-0 items-center gap-3">
         <SidebarLogo src={logoUrl} name={displayName} />
         <span className="min-w-0">
@@ -325,7 +326,7 @@ function buildDesktopItems(section: "public" | "portal" | "teacher" | "admin", m
     return [
       { label: "Home", href: `/m/${mosqueSlug}/admin` },
       { label: "Classes", href: `/m/${mosqueSlug}/admin/programs` },
-      { label: "Inbox", href: `/m/${mosqueSlug}/admin/enrollments` },
+      { label: "Members", href: `/m/${mosqueSlug}/admin/students` },
       { label: "Me", href: `/m/${mosqueSlug}/admin/settings` },
     ];
   }

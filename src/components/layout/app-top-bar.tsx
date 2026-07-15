@@ -3,11 +3,21 @@
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
-import { AuthStatusActions } from "@/components/auth/auth-status-actions";
+import { useEffect, useMemo, useState } from "react";
+import type { Session } from "@supabase/supabase-js";
 import { useStudentNotificationCounts, useTeacherNotificationCounts } from "@/components/data/supabase-public-sections";
-import { HorizontalNav, NavItem } from "@/components/layout/horizontal-nav";
-import { getCachedMosqueChrome, loadMosqueChrome } from "@/lib/client-cache";
+import type { NavItem } from "@/components/layout/horizontal-nav";
+import { emptyUserAccess, type UserAccess } from "@/lib/authz";
+import {
+  getCachedMosqueChrome,
+  getCachedSessionSnapshot,
+  loadCachedProfileName,
+  loadCachedSession,
+  loadCachedUserAccess,
+  loadMosqueChrome,
+  refreshCachedProfileName,
+  subscribeCachedSession,
+} from "@/lib/client-cache";
 import { cn } from "@/lib/utils";
 
 function BottomNav({ items, inboxBadgeCount = 0 }: { items: NavItem[]; inboxBadgeCount?: number }) {
@@ -15,7 +25,7 @@ function BottomNav({ items, inboxBadgeCount = 0 }: { items: NavItem[]; inboxBadg
   const router = useRouter();
   const [pendingHref, setPendingHref] = useState<string | null>(null);
   const itemByLabel = new Map(items.map((item) => [item.label, item]));
-  const visibleItems = ["Home", "Classes", "Inbox", "Me"]
+  const visibleItems = ["Home", "Classes", "Inbox", "Members", "Me"]
     .map((label) => itemByLabel.get(label))
     .filter((item): item is NavItem => Boolean(item));
   const currentIndex = visibleItems.findIndex((item) => isNavItemActive(pathname, item));
@@ -63,16 +73,20 @@ function BottomNav({ items, inboxBadgeCount = 0 }: { items: NavItem[]; inboxBadg
 
   return (
     <nav
-      className="pointer-events-auto fixed inset-x-0 z-[2147483647] h-[74px] border-t border-[#D6DCE0] bg-[var(--workspace)] md:hidden"
+      className="pointer-events-auto fixed inset-x-0 bottom-0 z-[2147483647] h-[calc(74px+env(safe-area-inset-bottom))] overflow-visible bg-transparent md:hidden"
       style={{
-        bottom: "0px",
-        paddingBottom: "env(safe-area-inset-bottom)",
         transform: "translate3d(0,0,0)",
         contain: "layout paint style",
       }}
       aria-label="Mobile primary navigation"
     >
-      <div className="mx-auto grid h-full w-full max-w-md" style={{ gridTemplateColumns: `repeat(${visibleItems.length}, minmax(0, 1fr))` }}>
+      <div
+        className={cn(
+          "mx-auto grid h-full w-full max-w-md rounded-t-[34px] border-x border-t border-[#D6DCE0] pb-[env(safe-area-inset-bottom)]",
+          "bg-white",
+        )}
+        style={{ gridTemplateColumns: `repeat(${visibleItems.length}, minmax(0, 1fr))` }}
+      >
         {visibleItems.map((item, index) => {
           const active = pendingHref ? pendingHref === item.href : isNavItemActive(pathname, item);
           const badgeCount = item.label === "Inbox" ? inboxBadgeCount : 0;
@@ -89,17 +103,16 @@ function BottomNav({ items, inboxBadgeCount = 0 }: { items: NavItem[]; inboxBadg
                 beginNavigation(index, item);
               }}
               className={cn(
-                "relative flex h-[74px] min-w-0 flex-col items-center justify-start px-1 pt-2.5 text-[11px] font-medium text-[#6B747B]",
-                active && "text-[#2F8FB3]",
+                "relative flex h-[74px] min-w-0 flex-col items-center justify-start px-1 pt-2.5 text-[11px] font-medium text-[#7B858C]",
+                active && "text-[#17624F]",
               )}
             >
               <span
                 className="relative flex h-9 w-[52px] shrink-0 items-center justify-center"
                 aria-hidden
               >
-                <span className={cn("absolute inset-x-1 inset-y-0 rounded-full opacity-0", active && "bg-[#E7F3F8] opacity-100")} aria-hidden />
                 <span className="relative flex h-9 w-[52px] items-center justify-center">
-                <NavIcon label={item.label} />
+                <NavIcon label={item.label} active={active} />
                 {badgeCount ? <NavBadge count={badgeCount} /> : null}
                 </span>
               </span>
@@ -145,16 +158,59 @@ function NavBadge({ count }: { count: number }) {
   );
 }
 
-function NavIcon({ label }: { label: string }) {
+function NavIcon({ label, active = false }: { label: string; active?: boolean }) {
   const className = "h-6 w-6";
-  const strokeWidth = 1.55;
+  const strokeWidth = 1.8;
+
+  if (active && label === "Home") {
+    return (
+      <svg viewBox="0 0 24 24" className={className} fill="currentColor" aria-hidden>
+        <path d="M4.8 10.9 12 4.55l7.2 6.35a.95.95 0 0 1-1.26 1.42l-.44-.39v6.48A2.1 2.1 0 0 1 15.4 20.5H8.6a2.1 2.1 0 0 1-2.1-2.09v-6.48l-.44.39A.95.95 0 1 1 4.8 10.9Z" />
+      </svg>
+    );
+  }
+
+  if (active && label === "Classes") {
+    return (
+      <svg viewBox="0 0 24 24" className={className} fill="currentColor" aria-hidden>
+        <path d="M7.2 4.5h8.9a3.1 3.1 0 0 1 3.1 3.1v10.2a1.7 1.7 0 0 1-2.45 1.52l-4.45-2.2a.65.65 0 0 0-.58 0l-4.47 2.2A1.7 1.7 0 0 1 4.8 17.8V6.9a2.4 2.4 0 0 1 2.4-2.4Zm1.8 5a.8.8 0 0 0 0 1.6h6a.8.8 0 0 0 0-1.6H9Zm0 3.4a.8.8 0 0 0 0 1.6h4.1a.8.8 0 0 0 0-1.6H9Z" />
+      </svg>
+    );
+  }
+
+  if (active && label === "Inbox") {
+    return (
+      <svg viewBox="0 0 24 24" className={className} fill="currentColor" aria-hidden>
+        <path d="M6.1 5.25h11.8a2.85 2.85 0 0 1 2.85 2.85v7.8a2.85 2.85 0 0 1-2.85 2.85H6.1a2.85 2.85 0 0 1-2.85-2.85V8.1A2.85 2.85 0 0 1 6.1 5.25Zm.36 3.12 5.09 3.78a.75.75 0 0 0 .9 0l5.09-3.78a.72.72 0 1 0-.86-1.16L12 10.68 7.32 7.21a.72.72 0 0 0-.86 1.16Z" />
+      </svg>
+    );
+  }
+
+  if (active && label === "Members") {
+    return (
+      <svg viewBox="0 0 24 24" className={className} fill="currentColor" aria-hidden>
+        <path d="M9 10.7a3.35 3.35 0 1 0 0-6.7 3.35 3.35 0 0 0 0 6.7Z" />
+        <path d="M3.15 18.9c.74-3.18 2.7-4.76 5.85-4.76s5.11 1.58 5.85 4.76a.82.82 0 0 1-.8 1H3.95a.82.82 0 0 1-.8-1Z" />
+        <path d="M16.5 10.2a2.75 2.75 0 1 0 0-5.5 2.75 2.75 0 0 0 0 5.5Z" />
+        <path d="M15.55 13.65c2.66.18 4.33 1.65 5.02 4.42a.72.72 0 0 1-.7.9h-3.62c-.24-1.7-.9-3.06-1.98-4.08.36-.5.79-.91 1.28-1.24Z" />
+      </svg>
+    );
+  }
+
+  if (active && label === "Me") {
+    return (
+      <svg viewBox="0 0 24 24" className={className} fill="currentColor" aria-hidden>
+        <path d="M12 11.35a3.95 3.95 0 1 0 0-7.9 3.95 3.95 0 0 0 0 7.9Z" />
+        <path d="M5.15 19.48c.87-3.62 3.16-5.44 6.85-5.44s5.98 1.82 6.85 5.44a.86.86 0 0 1-.84 1.07H5.99a.86.86 0 0 1-.84-1.07Z" />
+      </svg>
+    );
+  }
 
   if (label === "Home") {
     return (
       <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
-        <path d="M3.5 11.5 12 4l8.5 7.5" />
-        <path d="M6.5 10.5V20h11v-9.5" />
-        <path d="M10 20v-5h4v5" />
+        <path d="M4.75 10.95 12 4.55l7.25 6.4" />
+        <path d="M6.65 11.1v7.25a2 2 0 0 0 2 2h6.7a2 2 0 0 0 2-2V11.1" />
       </svg>
     );
   }
@@ -162,10 +218,9 @@ function NavIcon({ label }: { label: string }) {
   if (label === "Classes") {
     return (
       <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
-        <rect x="4" y="5" width="16" height="13" rx="1.5" />
-        <path d="M8 9h8" />
-        <path d="M8 13h5" />
-        <path d="M6.5 20h11" />
+        <path d="M5.35 6.95a2.4 2.4 0 0 1 2.4-2.4h8.5a2.4 2.4 0 0 1 2.4 2.4v10.75a1.2 1.2 0 0 1-1.72 1.08l-4.43-2.13a1.15 1.15 0 0 0-1 0l-4.43 2.13a1.2 1.2 0 0 1-1.72-1.08V6.95Z" />
+        <path d="M8.8 9.35h6.4" />
+        <path d="M8.8 12.85h4.4" />
       </svg>
     );
   }
@@ -173,8 +228,19 @@ function NavIcon({ label }: { label: string }) {
   if (label === "Inbox") {
     return (
       <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
-        <path d="M4 6h16v12H4z" />
-        <path d="m4 8 8 6 8-6" />
+        <rect x="3.9" y="5.55" width="16.2" height="12.9" rx="2.4" />
+        <path d="m5.9 8.25 5.58 4.15a.85.85 0 0 0 1.04 0l5.58-4.15" />
+      </svg>
+    );
+  }
+
+  if (label === "Members") {
+    return (
+      <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="9" cy="7.4" r="3.1" />
+        <path d="M3.8 19.3c.75-3.35 2.48-5.02 5.2-5.02s4.45 1.67 5.2 5.02" />
+        <circle cx="16.6" cy="8.1" r="2.45" />
+        <path d="M15.45 14.2c2.1.3 3.5 1.7 4.2 4.2" />
       </svg>
     );
   }
@@ -182,8 +248,8 @@ function NavIcon({ label }: { label: string }) {
   if (label === "Me") {
     return (
       <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
-        <circle cx="12" cy="8" r="3.2" />
-        <path d="M5.5 19c1-3.2 3.2-5 6.5-5s5.5 1.8 6.5 5" />
+        <circle cx="12" cy="7.75" r="3.65" />
+        <path d="M5.25 19.75c.9-3.75 3.15-5.62 6.75-5.62s5.85 1.87 6.75 5.62" />
       </svg>
     );
   }
@@ -204,10 +270,16 @@ export function AppTopBar({
   navItems: NavItem[];
   mobileNavItems?: NavItem[];
 }) {
+  const pathname = usePathname();
+  const showTopBar = isMainTabRoute(pathname, mobileNavItems ?? navItems);
   const [displayName, setDisplayName] = useState(
     mosqueSlug ? titleFromSlug(mosqueSlug) : appName
   );
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
+  const cachedSession = getCachedSessionSnapshot();
+  const [session, setSession] = useState<Session | null>(cachedSession ?? null);
+  const [access, setAccess] = useState<UserAccess>(emptyUserAccess);
+  const [profileName, setProfileName] = useState<string | null>(null);
 
   useEffect(() => {
     if (!mosqueSlug) {
@@ -237,38 +309,123 @@ export function AppTopBar({
     };
   }, [mosqueSlug, appName]);
 
+  useEffect(() => {
+    let cancelled = false;
+    const unsubscribe = subscribeCachedSession((nextSession) => {
+      setSession(nextSession);
+      if (!nextSession) {
+        setAccess(emptyUserAccess);
+        setProfileName(null);
+      }
+    });
 
+    loadCachedSession().then((nextSession) => {
+      if (!cancelled) {
+        setSession(nextSession);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!session?.user.id || !mosqueSlug) {
+      setAccess(emptyUserAccess);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    Promise.all([
+      loadCachedUserAccess(mosqueSlug, session.user.id),
+      refreshCachedProfileName(session.user.id),
+    ]).then(([nextAccess, nextProfileName]) => {
+      if (!cancelled) {
+        setAccess(nextAccess);
+        setProfileName(nextProfileName);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [mosqueSlug, session]);
+
+  useEffect(() => {
+    if (!session?.user.id) {
+      return;
+    }
+
+    let cancelled = false;
+    const refreshProfileName = () => {
+      loadCachedProfileName(session.user.id).then((nextProfileName) => {
+        if (!cancelled) {
+          setProfileName(nextProfileName);
+        }
+      });
+    };
+
+    window.addEventListener("tareeqah:profile-name-changed", refreshProfileName);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("tareeqah:profile-name-changed", refreshProfileName);
+    };
+  }, [session]);
+
+  const userFirstName = useMemo(() => {
+    const display = profileName?.trim() || session?.user.email?.replace(/@.*/, "") || "Guest";
+    return display.split(/\s+/)[0] || "Guest";
+  }, [profileName, session]);
+
+  const accountInitial = useMemo(() => getAccountInitial(access, session), [access, session]);
+
+  if (!showTopBar) {
+    return null;
+  }
 
 
   return (
-    <header className="sticky top-0 z-30 border-b border-[#D6DCE0] bg-[var(--workspace)] text-[#26323A] md:hidden">
-      <div className="app-container flex min-h-[72px] items-center gap-2 py-2">
-        <Link href={homeHref} className="flex min-w-0 flex-1 items-center gap-3">
-          <TopBarLogo src={logoUrl} name={displayName} />
-          <span className="min-w-0">
-            <span className="block truncate text-xl font-medium leading-6 text-[#26323A]">{displayName}</span>
-            <span className="block truncate text-xs leading-4 text-[#6B747B]">Powered by Tareeqah</span>
-          </span>
+    <header className="sticky top-0 z-30 border-b border-[#E4E9EC] bg-white text-[#26323A] md:hidden">
+      <div className="app-container grid min-h-[42px] grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 py-1">
+        <Link href={homeHref} className="flex min-w-0 items-center gap-2">
+          <TopBarLogo src={logoUrl} name={displayName} compact />
+          <span className="min-w-0 truncate text-[13px] font-semibold leading-4 text-[#26323A]">{displayName}</span>
         </Link>
-        <HorizontalNav items={navItems} />
-        <div className="flex shrink-0 items-center gap-2 md:hidden">
-          <AuthStatusActions loginHref={`${homeHref}/login`} mosqueSlug={mosqueSlug ?? ""} />
-        </div>
-        <div className="hidden md:block">
-          <AuthStatusActions loginHref={`${homeHref}/login`} mosqueSlug={mosqueSlug ?? ""} />
+        <p className="whitespace-nowrap text-center text-[10px] font-medium leading-3 text-[#7B858C]">
+          Powered by Tareeqah
+        </p>
+        <div className="flex min-w-0 items-center justify-end gap-1.5">
+          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#17624F] text-[11px] font-semibold leading-none text-white">
+            {accountInitial}
+          </span>
+          <span className="min-w-0 max-w-[74px] truncate text-right text-[12px] font-semibold leading-4 text-[#26323A]">
+            {userFirstName}
+          </span>
         </div>
       </div>
     </header>
   );
 }
 
-function TopBarLogo({ src, name }: { src: string | null; name: string }) {
+function isMainTabRoute(pathname: string, items: NavItem[]) {
+  const mainLabels = new Set(["Home", "Classes", "Inbox", "Members", "Me"]);
+  return items.some((item) => mainLabels.has(item.label) && pathname === item.href);
+}
+
+function TopBarLogo({ src, name, compact = false }: { src: string | null; name: string; compact?: boolean }) {
+  const sizeClass = compact ? "h-7 w-7" : "h-10 w-10";
+
   if (src) {
-    return <Image src={src} alt="" width={40} height={40} className="h-10 w-10 shrink-0 object-contain" />;
+    return <Image src={src} alt="" width={compact ? 28 : 40} height={compact ? 28 : 40} className={cn(sizeClass, "shrink-0 object-contain")} />;
   }
 
   return (
-    <span className="flex h-10 w-10 shrink-0 items-center justify-center bg-[#F7F8F9] text-sm font-medium text-[#2E8F7D]">
+    <span className={cn("flex shrink-0 items-center justify-center bg-[#F7F8F9] font-medium text-[#2E8F7D]", sizeClass, compact ? "text-[10px]" : "text-sm")}>
       {name
         .split(" ")
         .map((part) => part[0])
@@ -277,6 +434,30 @@ function TopBarLogo({ src, name }: { src: string | null; name: string }) {
         .toUpperCase()}
     </span>
   );
+}
+
+function getAccountInitial(access: UserAccess, session: Session | null) {
+  if (!session) {
+    return "?";
+  }
+
+  if (access.isMosqueAdmin) {
+    return "A";
+  }
+
+  if (access.isTeacher) {
+    return "T";
+  }
+
+  if (access.isParent) {
+    return "P";
+  }
+
+  if (access.isStudent) {
+    return "S";
+  }
+
+  return "?";
 }
 
 function titleFromSlug(slug: string) {

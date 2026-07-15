@@ -49,23 +49,22 @@ export async function loadUserAccessByMosqueSlug(slug: string): Promise<UserAcce
         .eq("profile_id", session.user.id)
     : { data: [] };
 
-  const activeVerifiedRows = (membershipRows.data ?? []).filter((row) => row.status === "active" && (row.role !== "teacher" || row.teacher_approval_status === "verified"));
+  const activeVerifiedRows = (membershipRows.data ?? []).filter((row) => row.status === "active");
   const mosqueRoles = activeVerifiedRows.map((row) => row.role).filter(isMosqueRole);
   const allMosqueRoles = Array.from(new Set(mosqueRoles));
   const teacherApprovalStatus =
     (membershipRows.data ?? []).find((row) => row.role === "teacher")?.teacher_approval_status ?? null;
   const normalizedAccountType = accountType?.toLowerCase() ?? null;
-  const useProfileAccountType = normalizedAccountType === "admin" || normalizedAccountType === "teacher" || normalizedAccountType === "parent" || normalizedAccountType === "student";
 
   return {
     profileId: session.user.id,
     accountType,
     mosqueRoles: allMosqueRoles,
     teacherApprovalStatus,
-    isMosqueAdmin: useProfileAccountType ? normalizedAccountType === "admin" : allMosqueRoles.includes("admin"),
-    isTeacher: normalizedAccountType === "teacher" ? teacherApprovalStatus === "verified" : allMosqueRoles.includes("teacher"),
-    isStudent: useProfileAccountType ? normalizedAccountType === "student" : allMosqueRoles.includes("student"),
-    isParent: useProfileAccountType ? normalizedAccountType === "parent" : allMosqueRoles.includes("parent"),
+    isMosqueAdmin: normalizedAccountType === "admin" && allMosqueRoles.includes("admin"),
+    isTeacher: normalizedAccountType === "teacher" && allMosqueRoles.includes("teacher"),
+    isStudent: normalizedAccountType === "student" && allMosqueRoles.includes("student"),
+    isParent: normalizedAccountType === "parent" && allMosqueRoles.includes("parent"),
   };
 }
 
@@ -76,11 +75,11 @@ export function getDefaultLandingHref(slug: string, access: UserAccess) {
     return `/m/${slug}/portal`;
   }
 
-  if (accountType === "admin" || access.isMosqueAdmin) {
+  if (access.isMosqueAdmin) {
     return `/m/${slug}/admin`;
   }
 
-  if (accountType === "teacher" || access.isTeacher) {
+  if (access.isTeacher) {
     return `/m/${slug}/teacher`;
   }
 
@@ -102,11 +101,11 @@ export function getAccountLabel(access: UserAccess) {
     return "Student Account";
   }
 
-  if (accountType === "admin" || access.isMosqueAdmin) {
+  if (access.isMosqueAdmin) {
     return "Admin Account";
   }
 
-  if (accountType === "teacher" || access.isTeacher) {
+  if (access.isTeacher) {
     return "Teacher Account";
   }
 

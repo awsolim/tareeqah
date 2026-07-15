@@ -15,6 +15,9 @@ type CreateProgramBody = {
   ageRangeText?: string | null;
   schedule?: Json | null;
   scheduleTimezone?: string | null;
+  trackSelectionMode?: string;
+  trackSelectionCount?: number;
+  directorProfileId?: string | null;
 };
 
 function shouldUseStripeConnect() {
@@ -43,6 +46,9 @@ export async function POST(request: Request) {
     const description = cleanDescription(body.description);
     const isPaid = Boolean(body.isPaid);
     const priceMonthlyCents = Number.isFinite(body.priceMonthlyCents) ? Number(body.priceMonthlyCents) : null;
+    const trackSelectionMode = body.trackSelectionMode === "minimum" || body.trackSelectionMode === "maximum" ? body.trackSelectionMode : "exact";
+    const trackSelectionCount = Number.isFinite(body.trackSelectionCount) ? Math.max(1, Math.round(Number(body.trackSelectionCount))) : 1;
+    const requestedDirectorProfileId = typeof body.directorProfileId === "string" && body.directorProfileId.trim() ? body.directorProfileId.trim() : null;
 
     if (!mosqueSlug) {
       return Response.json({ error: "Missing masjid." }, { status: 400 });
@@ -68,7 +74,7 @@ export async function POST(request: Request) {
 
     const [{ data: mosque }, { data: profile }] = await Promise.all([
       supabase.from("mosques").select("*").eq("slug", mosqueSlug).maybeSingle(),
-      supabase.from("profiles").select("id, global_role").eq("id", user.id).maybeSingle(),
+      supabase.from("profiles").select("id, account_type").eq("id", user.id).maybeSingle(),
     ]);
 
     if (!mosque) {
@@ -77,18 +83,38 @@ export async function POST(request: Request) {
 
     const { data: memberships } = await supabase
       .from("mosque_memberships")
-      .select("role, status, teacher_approval_status")
+      .select("role, status, can_create_programs")
       .eq("mosque_id", mosque.id)
       .eq("profile_id", user.id);
 
-    const isPlatformAdmin = profile?.global_role === "platform_admin";
-    const isMosqueAdmin = (memberships ?? []).some((membership) => membership.role === "admin" && membership.status === "active");
-    const isVerifiedTeacher = (memberships ?? []).some(
-      (membership) => membership.role === "teacher" && membership.status === "active" && membership.teacher_approval_status === "verified",
-    );
+    const accountType = profile?.account_type?.toLowerCase() ?? null;
+    const isMosqueAdmin = accountType === "admin" && (memberships ?? []).some((membership) => membership.role === "admin" && membership.status === "active");
+    const teacherMembership = (memberships ?? []).find((membership) => membership.role === "teacher" && membership.status === "active");
+    const canTeacherCreate = accountType === "teacher" && Boolean(teacherMembership?.can_create_programs);
 
-    if (!isPlatformAdmin && !isMosqueAdmin && !isVerifiedTeacher) {
-      return Response.json({ error: "Teacher approval is required before creating programs." }, { status: 403 });
+    if (!isMosqueAdmin && !canTeacherCreate) {
+      return Response.json({ error: "Class creation is not enabled for this account." }, { status: 403 });
+    }
+
+    const directorProfileId = isMosqueAdmin ? requestedDirectorProfileId : user.id;
+    if (!directorProfileId) {
+      return Response.json({ error: "Choose a director for this class." }, { status: 400 });
+    }
+
+    const [{ data: directorProfile }, { data: directorMembership }] = await Promise.all([
+      supabase.from("profiles").select("id, account_type").eq("id", directorProfileId).maybeSingle(),
+      supabase
+        .from("mosque_memberships")
+        .select("id")
+        .eq("mosque_id", mosque.id)
+        .eq("profile_id", directorProfileId)
+        .eq("role", "teacher")
+        .eq("status", "active")
+        .maybeSingle(),
+    ]);
+
+    if (directorProfile?.account_type !== "teacher" || !directorMembership) {
+      return Response.json({ error: "Director must be an active teacher for this masjid." }, { status: 400 });
     }
 
     let stripeProductId: string | null = null;
@@ -131,7 +157,7 @@ export async function POST(request: Request) {
       .from("programs")
       .insert({
         mosque_id: mosque.id,
-        director_profile_id: user.id,
+        director_profile_id: directorProfileId,
         title,
         description,
         is_active: true,
@@ -145,6 +171,8 @@ export async function POST(request: Request) {
         schedule: body.schedule ?? null,
         schedule_timezone: body.scheduleTimezone ?? null,
         schedule_notes: body.schedule ? null : "Schedule TBA",
+        track_selection_mode: trackSelectionMode,
+        track_selection_count: trackSelectionCount,
       })
       .select("*")
       .single();
@@ -156,7 +184,7 @@ export async function POST(request: Request) {
     const { error: teacherError } = await supabase.from("program_teachers").upsert(
       {
         program_id: program.id,
-        teacher_profile_id: user.id,
+        teacher_profile_id: directorProfileId,
         role: "director",
       },
       { onConflict: "program_id,teacher_profile_id" },

@@ -6,7 +6,7 @@ function safeReturnTo(value: string | string[] | undefined, slug: string) {
     return undefined;
   }
 
-  const allowedPrefixes = [`/m/${slug}/teacher/`, `/m/${slug}/portal/`, `/m/${slug}/programs`];
+  const allowedPrefixes = [`/m/${slug}/admin/`, `/m/${slug}/teacher/`, `/m/${slug}/portal/`, `/m/${slug}/programs`];
   return allowedPrefixes.some((prefix) => returnTo === prefix.slice(0, -1) || returnTo.startsWith(prefix)) ? returnTo : undefined;
 }
 

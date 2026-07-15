@@ -63,13 +63,37 @@ export function OAuthProfileCompletion({ slug }: { slug: string }) {
       return;
     }
 
+    if (!fullName.trim()) {
+      setSaving(false);
+      setError("Full name is required.");
+      return;
+    }
+
+    if ((accountType === "student" || accountType === "parent") && (!gender || !dateOfBirth)) {
+      setSaving(false);
+      setError("Date of birth and gender are required.");
+      return;
+    }
+
+    if (accountType === "student" && !isAtLeastAge(dateOfBirth, 13)) {
+      setSaving(false);
+      setError("Student accounts require the student to be 13 or older.");
+      return;
+    }
+
+    if (accountType === "parent" && !isAtLeastAge(dateOfBirth, 18)) {
+      setSaving(false);
+      setError("Parent accounts require the parent to be 18 or older.");
+      return;
+    }
+
     const supabase = createSupabaseBrowserClient();
     const { error: rpcError } = await supabase.rpc("complete_oauth_profile", {
       signup_account_type: accountType,
-      signup_full_name: fullName,
+      signup_full_name: fullName.trim(),
       signup_phone: normalizedPhone.value,
-      signup_gender: accountType === "student" ? gender : "",
-      signup_date_of_birth: accountType === "student" ? dateOfBirth : null,
+      signup_gender: accountType === "student" || accountType === "parent" ? gender : "",
+      signup_date_of_birth: accountType === "student" || accountType === "parent" ? dateOfBirth : null,
       signup_mosque_slug: slug,
     });
 
@@ -131,7 +155,7 @@ export function OAuthProfileCompletion({ slug }: { slug: string }) {
         onPhoneChange={setPhone}
       />
 
-      {accountType === "student" ? (
+      {accountType === "student" || accountType === "parent" ? (
         <>
           <CompletionSelect
             label="Gender"
@@ -156,6 +180,23 @@ export function OAuthProfileCompletion({ slug }: { slug: string }) {
       </FlatButton>
     </form>
   );
+}
+
+function isAtLeastAge(dateValue: string, minimumAge: number) {
+  if (!dateValue) {
+    return false;
+  }
+  const birthDate = new Date(`${dateValue}T00:00:00`);
+  if (Number.isNaN(birthDate.getTime())) {
+    return false;
+  }
+  const today = new Date();
+  let age = today.getFullYear() - birthDate.getFullYear();
+  const monthDifference = today.getMonth() - birthDate.getMonth();
+  if (monthDifference < 0 || (monthDifference === 0 && today.getDate() < birthDate.getDate())) {
+    age -= 1;
+  }
+  return age >= minimumAge;
 }
 
 function CompletionPhoneInput({

@@ -31,14 +31,12 @@ export function PortalRoleRedirect({
       }
 
       const access = await loadCachedUserAccess(slug, session.user.id);
-      const accountType = access.accountType?.toLowerCase() ?? null;
-
-      if (accountType === "teacher" || access.isTeacher) {
+      if (access.isTeacher) {
         router.replace(teacherHref);
         return;
       }
 
-      if (accountType === "admin" || access.isMosqueAdmin) {
+      if (access.isMosqueAdmin) {
         router.replace(adminHref);
         return;
       }

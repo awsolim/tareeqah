@@ -6,6 +6,19 @@ type CompleteAdmissionBody = {
   enrollmentRequestId?: string;
 };
 
+async function selectedTrackIdsForRequest(supabase: ReturnType<typeof createSupabaseServiceClient>, enrollmentRequestId: string, fallbackTrackId: string | null) {
+  const { data } = await supabase.from("enrollment_request_tracks").select("program_track_id").eq("enrollment_request_id", enrollmentRequestId);
+  const trackIds = (data ?? []).map((row) => row.program_track_id).filter((trackId): trackId is string => Boolean(trackId));
+  return trackIds.length ? trackIds : fallbackTrackId ? [fallbackTrackId] : [];
+}
+
+async function replaceEnrollmentTracks(supabase: ReturnType<typeof createSupabaseServiceClient>, enrollmentId: string, trackIds: string[]) {
+  await supabase.from("enrollment_tracks").delete().eq("enrollment_id", enrollmentId);
+  if (trackIds.length) {
+    await supabase.from("enrollment_tracks").insert(trackIds.map((trackId) => ({ enrollment_id: enrollmentId, program_track_id: trackId })));
+  }
+}
+
 export async function POST(request: Request) {
   try {
     const authorization = request.headers.get("authorization") ?? "";
@@ -49,18 +62,20 @@ export async function POST(request: Request) {
     }
 
     const now = new Date().toISOString();
-    const { error: enrollmentError } = await supabase.from("enrollments").upsert(
+    const trackIds = await selectedTrackIdsForRequest(supabase, enrollmentRequest.id, enrollmentRequest.program_track_id);
+    const { data: enrollment, error: enrollmentError } = await supabase.from("enrollments").upsert(
       {
         program_id: enrollmentRequest.program_id,
         student_profile_id: enrollmentRequest.student_profile_id,
-        program_track_id: enrollmentRequest.program_track_id,
+        program_track_id: trackIds[0] ?? enrollmentRequest.program_track_id,
       },
       { onConflict: "program_id,student_profile_id" },
-    );
+    ).select("id").single();
 
-    if (enrollmentError) {
-      return Response.json({ error: enrollmentError.message }, { status: 500 });
+    if (enrollmentError || !enrollment) {
+      return Response.json({ error: enrollmentError?.message ?? "Could not create enrollment." }, { status: 500 });
     }
+    await replaceEnrollmentTracks(supabase, enrollment.id, trackIds);
 
     await supabase.from("enrollment_requests").update({ student_dismissed_at: now }).eq("id", enrollmentRequest.id);
 

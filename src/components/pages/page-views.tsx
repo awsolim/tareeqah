@@ -2,8 +2,9 @@ import Link from "next/link";
 import { AuthPanel } from "@/components/auth/auth-panel";
 import { GoogleAuthCallback } from "@/components/auth/google-auth-callback";
 import { OAuthProfileCompletion } from "@/components/auth/oauth-profile-completion";
+import { ForgotPasswordPanel, ResetPasswordPanel } from "@/components/auth/password-reset";
 import { PortalRoleRedirect } from "@/components/data/portal-role-redirect";
-import { AdminTeacherRequestsData, InboxAnnouncementsData, MosqueDirectoryRows, PortalAccountData, ProgramDetailData, PublicMasjidData, PublicProgramsData, StudentClassesData, StudentHomeData, TeacherAnnouncementData, TeacherClassesData, TeacherHomeData, TeacherInboxData, TeacherInstructorsData, TeacherProgramCreateData, TeacherProgramSettingsData, TeacherScheduleData, TeacherStudentsData } from "@/components/data/supabase-public-sections";
+import { AdminClassesData, AdminHomeData, AdminMembersData, InboxAnnouncementsData, MosqueDirectoryRows, PortalAccountData, ProgramDetailData, PublicMasjidData, PublicProgramsData, StudentClassesData, StudentHomeData, StudentScheduleOptionsData, StudentWithdrawalRequestData, TeacherAnnouncementData, TeacherClassesData, TeacherHomeData, TeacherInboxData, TeacherInstructorsData, TeacherProgramCreateData, TeacherProgramSettingsData, TeacherScheduleData, TeacherStudentNotesData, TeacherStudentsData } from "@/components/data/supabase-public-sections";
 import { ActionToolbar } from "@/components/ui/action-toolbar";
 import { DataRow } from "@/components/ui/data-row";
 import { DataTable } from "@/components/ui/data-table";
@@ -27,20 +28,26 @@ import {
   studentName,
 } from "@/lib/mock-data";
 import type { Program } from "@/lib/mock-data";
-import { formatDate, formatTime } from "@/lib/utils";
+import { cn, formatDate, formatTime } from "@/lib/utils";
 
-function Workspace({ children, overlap = true }: { children: React.ReactNode; overlap?: boolean }) {
+function Workspace({
+  children,
+  overlap = true,
+  overlapOffset = "-172px",
+  surfaceClassName = "bg-[var(--workspace)]",
+}: {
+  children: React.ReactNode;
+  overlap?: boolean;
+  overlapOffset?: string;
+  surfaceClassName?: string;
+}) {
   return (
     <div
-      className={`relative z-10 min-h-[calc(100vh-260px)] ${overlap ? "" : "bg-[var(--workspace)] py-8"}`}
-      style={overlap ? { marginTop: "-132px" } : undefined}
+      className={cn("relative z-10 min-h-[calc(100vh-260px)]", overlap ? "" : `${surfaceClassName} py-8`)}
+      style={overlap ? { marginTop: overlapOffset } : undefined}
     >
       <div
-        className={
-          overlap
-            ? "min-h-[calc(100vh-260px)] overflow-hidden rounded-t-[34px] bg-[var(--workspace)]"
-            : "bg-[var(--workspace)]"
-        }
+        className={cn(overlap ? "min-h-[calc(100vh-260px)] overflow-hidden rounded-t-[34px]" : "", surfaceClassName)}
       >
         {children}
       </div>
@@ -133,14 +140,14 @@ function ScheduleRows({ limit }: { limit?: number }) {
 
 function AuthForm({ mode, slug }: { mode: "login" | "signup"; slug: string }) {
   return (
-    <PageShell slug={slug}>
+    <main className="min-h-screen bg-white">
       <PageTitleBar title={mode === "login" ? "Log In" : "Create Account"} subtitle={masjid.name} tone="teal" />
       <Workspace>
         <Panel>
           <AuthPanel mode={mode} slug={slug} />
         </Panel>
       </Workspace>
-    </PageShell>
+    </main>
   );
 }
 
@@ -193,9 +200,10 @@ export function PublicAccountPage({ slug }: { slug: string }) {
 }
 
 export function PublicProgramDetailPage({ programId, slug, returnTo }: { programId: string; slug: string; returnTo?: string }) {
+  const backLabel = returnTo?.includes("/admin/programs") || returnTo?.includes("/teacher/classes") || returnTo?.includes("/portal/classes") ? "Classes" : "Programs";
   return (
     <PageShell slug={slug}>
-      <PageTitleBar title="Class Details" backHref={returnTo ?? `/m/${slug}/programs`} backLabel={returnTo?.includes("/teacher/classes") || returnTo?.includes("/portal/classes") ? "Classes" : "Programs"} tone="teal" />
+      <PageTitleBar title="Class Details" backHref={returnTo ?? `/m/${slug}/programs`} backLabel={backLabel} tone="teal" />
       <Workspace>
         <ProgramDetailData slug={slug} programId={programId} section="public" />
       </Workspace>
@@ -239,8 +247,8 @@ export function TeacherProgramCreatePage({ slug }: { slug: string }) {
 export function TeacherInstructorsPage({ programId, slug }: { programId: string; slug: string }) {
   return (
     <>
-      <PageTitleBar title="Instructors" backHref={`/m/${slug}/teacher/classes`} backLabel="Classes" tone="teal" />
-      <Workspace>
+      <PageTitleBar title="Instructors" backHref={`/m/${slug}/teacher/classes`} backLabel="Classes" tone="teal" centerBackTitle smallTitle />
+      <Workspace overlapOffset="-172px" surfaceClassName="bg-white">
         <TeacherInstructorsData slug={slug} programId={programId} />
       </Workspace>
     </>
@@ -253,6 +261,32 @@ export function LoginPage({ slug }: { slug: string }) {
 
 export function SignupPage({ slug }: { slug: string }) {
   return <AuthForm mode="signup" slug={slug} />;
+}
+
+export function ForgotPasswordPage({ slug }: { slug: string }) {
+  return (
+    <main className="min-h-screen bg-white">
+      <PageTitleBar title="Reset Password" subtitle={masjid.name} tone="teal" />
+      <Workspace>
+        <Panel>
+          <ForgotPasswordPanel slug={slug} />
+        </Panel>
+      </Workspace>
+    </main>
+  );
+}
+
+export function ResetPasswordPage({ slug }: { slug: string }) {
+  return (
+    <main className="min-h-screen bg-white">
+      <PageTitleBar title="New Password" subtitle={masjid.name} tone="teal" />
+      <Workspace>
+        <Panel>
+          <ResetPasswordPanel slug={slug} />
+        </Panel>
+      </Workspace>
+    </main>
+  );
 }
 
 export function GoogleAuthCallbackPage({ slug }: { slug: string }) {
@@ -270,14 +304,14 @@ export function GoogleAuthCallbackPage({ slug }: { slug: string }) {
 
 export function CompleteOAuthProfilePage({ slug }: { slug: string }) {
   return (
-    <PageShell slug={slug}>
+    <main className="min-h-screen bg-white">
       <PageTitleBar title="Profile" subtitle="Finish your account setup." tone="teal" />
       <Workspace>
         <Panel>
           <OAuthProfileCompletion slug={slug} />
         </Panel>
       </Workspace>
-    </PageShell>
+    </main>
   );
 }
 
@@ -323,6 +357,28 @@ export function PortalClassesPage({ slug }: { slug: string }) {
       <PageTitleBar title="Classes" tone="teal" />
       <Workspace>
         <StudentClassesData slug={slug} />
+      </Workspace>
+    </PortalRoleRedirect>
+  );
+}
+
+export function PortalScheduleOptionsPage({ slug, programId }: { slug: string; programId: string }) {
+  return (
+    <PortalRoleRedirect slug={slug} teacherHref={`/m/${slug}/teacher/classes`} adminHref={`/m/${slug}/admin/programs`}>
+      <PageTitleBar title="Schedule Options" backHref={`/m/${slug}/portal/classes`} backLabel="Classes" tone="teal" />
+      <Workspace overlapOffset="-172px" surfaceClassName="bg-white">
+        <StudentScheduleOptionsData slug={slug} programId={programId} />
+      </Workspace>
+    </PortalRoleRedirect>
+  );
+}
+
+export function PortalWithdrawalRequestPage({ slug, programId }: { slug: string; programId: string }) {
+  return (
+    <PortalRoleRedirect slug={slug} teacherHref={`/m/${slug}/teacher/classes`} adminHref={`/m/${slug}/admin/programs`}>
+      <PageTitleBar title="Withdrawal" backHref={`/m/${slug}/portal/classes`} backLabel="Classes" tone="teal" />
+      <Workspace overlapOffset="-172px" surfaceClassName="bg-white">
+        <StudentWithdrawalRequestData slug={slug} programId={programId} />
       </Workspace>
     </PortalRoleRedirect>
   );
@@ -436,6 +492,17 @@ export function TeacherStudentsPage({ slug, programId }: { slug: string; program
   );
 }
 
+export function TeacherStudentNotesPage({ slug, programId, studentId }: { slug: string; programId: string; studentId: string }) {
+  return (
+    <>
+      <PageTitleBar title="Student Notes" backHref={`/m/${slug}/teacher/classes/${programId}/students`} backLabel="Students" />
+      <Workspace>
+        <TeacherStudentNotesData slug={slug} programId={programId} studentId={studentId} />
+      </Workspace>
+    </>
+  );
+}
+
 export function TeacherAnnouncementPage({ slug, programId }: { slug: string; programId: string }) {
   return (
     <>
@@ -523,36 +590,9 @@ export function TeacherAttendancePage({ slug }: { slug: string }) {
 export function AdminDashboardPage({ slug }: { slug: string }) {
   return (
     <PageShell section="admin" slug={slug}>
-      <PageTitleBar title="Admin" subtitle="Operational view for classes, enrollment, and attendance." />
+      <PageTitleBar title="Home" tone="teal" />
       <Workspace>
-        <AdminTeacherRequestsData slug={slug} />
-        <div className="grid lg:grid-cols-2">
-          <Panel>
-            <SectionHeader title="Today's Classes" />
-            {classes.slice(0, 4).map((classSection) => (
-              <DataRow key={classSection.id} title={classSection.name} subtitle={`${classSection.teacher} - ${classSection.room}`} meta={[{ label: "Time", value: formatTime(classSection.startTime) }]} />
-            ))}
-          </Panel>
-          <Panel>
-            <SectionHeader title="Pending Enrollments" />
-            {enrollments.filter((enrollment) => enrollment.status === "Pending").map((enrollment) => (
-              <DataRow key={enrollment.id} title={studentName(enrollment.studentId)} subtitle={className(enrollment.classId)} status={<StatusPill status={enrollment.status} />} />
-            ))}
-          </Panel>
-          <Panel>
-            <SectionHeader title="Waitlist" />
-            {enrollments.filter((enrollment) => enrollment.status === "Waitlisted").map((enrollment) => (
-              <DataRow key={enrollment.id} title={studentName(enrollment.studentId)} subtitle={className(enrollment.classId)} status={<StatusPill status={enrollment.status} />} />
-            ))}
-          </Panel>
-          <Panel>
-            <SectionHeader title="Attendance Not Submitted" />
-            {classes.slice(2, 5).map((classSection) => (
-              <DataRow key={classSection.id} title={classSection.name} subtitle={classSection.teacher} meta={[{ label: "Due", value: "Today" }]} />
-            ))}
-          </Panel>
-        </div>
-        <ActionToolbar actions={[{ label: "Add Program", variant: "primary" }, { label: "Add Student" }, { label: "Review Pending" }, { label: "Export" }]} />
+        <AdminHomeData slug={slug} />
       </Workspace>
     </PageShell>
   );
@@ -561,10 +601,9 @@ export function AdminDashboardPage({ slug }: { slug: string }) {
 export function AdminProgramsPage({ slug }: { slug: string }) {
   return (
     <PageShell section="admin" slug={slug}>
-      <PageTitleBar title="Programs" subtitle="Manage public programs and class sections." tone="teal" action={<FlatButton variant="success">New Program</FlatButton>} />
+      <PageTitleBar title="Classes" tone="teal" />
       <Workspace>
-        <ActionToolbar actions={[{ label: "Filter" }, { label: "Save" }, { label: "Archive Closed" }]} />
-        <ProgramRows grouped slug={slug} />
+        <AdminClassesData slug={slug} />
       </Workspace>
     </PageShell>
   );
@@ -589,14 +628,75 @@ export function AdminEnrollmentsPage({ slug }: { slug: string }) {
 export function AdminStudentsPage({ slug }: { slug: string }) {
   return (
     <PageShell section="admin" slug={slug}>
-      <PageTitleBar title="Students" subtitle="Family roster and student records." tone="teal" action={<FlatButton variant="success">Add Student</FlatButton>} />
+      <PageTitleBar title="Members" tone="teal" />
       <Workspace>
-        <Panel className="md:hidden">
-          {family.students.map((student) => (
-            <DataRow key={student.id} title={student.name} subtitle={family.name} meta={[{ label: "Grade", value: student.grade }, { label: "Age", value: student.age }]} />
-          ))}
-        </Panel>
-        <DataTable columns={["Student", "Family", "Grade", "Age", "Email"]} rows={family.students.map((student) => [student.name, family.name, student.grade, student.age, currentUser.email])} />
+        <AdminMembersData slug={slug} />
+      </Workspace>
+    </PageShell>
+  );
+}
+
+export function AdminProgramDetailPage({ programId, slug }: { programId: string; slug: string }) {
+  return (
+    <PageShell section="admin" slug={slug}>
+      <PageTitleBar title="Edit Program" backHref={`/m/${slug}/admin/programs`} backLabel="Classes" tone="teal" />
+      <Workspace>
+        <TeacherProgramSettingsData slug={slug} programId={programId} returnHref={`/m/${slug}/admin/programs`} />
+      </Workspace>
+    </PageShell>
+  );
+}
+
+export function AdminProgramCreatePage({ slug }: { slug: string }) {
+  return (
+    <PageShell section="admin" slug={slug}>
+      <PageTitleBar title="Add Class" backHref={`/m/${slug}/admin/programs`} backLabel="Classes" tone="teal" />
+      <Workspace>
+        <TeacherProgramCreateData slug={slug} />
+      </Workspace>
+    </PageShell>
+  );
+}
+
+export function AdminInstructorsPage({ programId, slug }: { programId: string; slug: string }) {
+  return (
+    <PageShell section="admin" slug={slug}>
+      <PageTitleBar title="Instructors" backHref={`/m/${slug}/admin/programs`} backLabel="Classes" tone="teal" centerBackTitle smallTitle />
+      <Workspace overlapOffset="-172px" surfaceClassName="bg-white">
+        <TeacherInstructorsData slug={slug} programId={programId} />
+      </Workspace>
+    </PageShell>
+  );
+}
+
+export function AdminProgramStudentsPage({ slug, programId }: { slug: string; programId: string }) {
+  return (
+    <PageShell section="admin" slug={slug}>
+      <PageTitleBar title="Students" backHref={`/m/${slug}/admin/programs`} backLabel="Classes" />
+      <Workspace>
+        <TeacherStudentsData slug={slug} programId={programId} />
+      </Workspace>
+    </PageShell>
+  );
+}
+
+export function AdminStudentNotesPage({ slug, programId, studentId }: { slug: string; programId: string; studentId: string }) {
+  return (
+    <PageShell section="admin" slug={slug}>
+      <PageTitleBar title="Student Notes" backHref={`/m/${slug}/admin/programs/${programId}/students`} backLabel="Students" />
+      <Workspace>
+        <TeacherStudentNotesData slug={slug} programId={programId} studentId={studentId} />
+      </Workspace>
+    </PageShell>
+  );
+}
+
+export function AdminAnnouncementPage({ slug, programId }: { slug: string; programId: string }) {
+  return (
+    <PageShell section="admin" slug={slug}>
+      <PageTitleBar title="Announcement" backHref={`/m/${slug}/admin/programs`} backLabel="Classes" />
+      <Workspace>
+        <TeacherAnnouncementData slug={slug} programId={programId} />
       </Workspace>
     </PageShell>
   );
@@ -605,27 +705,7 @@ export function AdminStudentsPage({ slug }: { slug: string }) {
 export function AdminSettingsPage({ slug }: { slug: string }) {
   return (
     <PageShell section="admin" slug={slug}>
-      <PageTitleBar title="Settings" subtitle="Masjid profile and registration defaults." />
-      <Workspace>
-        <Panel className="p-4 md:p-6">
-          <div className="grid gap-4 md:grid-cols-2">
-            <FormField label="Masjid name" name="masjidName" defaultValue={masjid.name} />
-            <FormField label="Office email" name="email" defaultValue={masjid.email} />
-            <FormField label="Address" name="address" defaultValue={masjid.address} />
-            <SelectField label="Registration mode" name="registration" defaultValue="review">
-              <option value="review">Review before confirm</option>
-              <option value="open">Auto-confirm open seats</option>
-              <option value="closed">Closed</option>
-            </SelectField>
-            <div className="md:col-span-2">
-              <TextareaField label="Portal message" name="message" defaultValue="Welcome to the Masjid Assiddiq class portal." />
-            </div>
-          </div>
-          <div className="mt-5">
-            <FlatButton variant="primary">Save Settings</FlatButton>
-          </div>
-        </Panel>
-      </Workspace>
+      <PortalAccountData slug={slug} />
     </PageShell>
   );
 }

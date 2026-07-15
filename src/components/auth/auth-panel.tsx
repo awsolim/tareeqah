@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { FormEvent, useMemo, useState } from "react";
+import { type FormEvent, type ReactNode, useMemo, useState } from "react";
 import { FlatButton } from "@/components/ui/flat-button";
 import { getDefaultLandingHref, loadUserAccessByMosqueSlug } from "@/lib/authz";
 import { normalizePhoneNumber, phoneCountryCodes } from "@/lib/phone";
@@ -65,6 +65,9 @@ export function AuthPanel({ mode, slug }: { mode: AuthMode; slug: string }) {
   const [dateOfBirth, setDateOfBirth] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -82,8 +85,16 @@ export function AuthPanel({ mode, slug }: { mode: AuthMode; slug: string }) {
     setMessage(null);
 
     const supabase = createSupabaseBrowserClient();
+    const trimmedFullName = fullName.trim();
+    const trimmedEmail = email.trim().toLowerCase();
 
     if (isSignup) {
+      if (!trimmedFullName) {
+        setSubmitting(false);
+        setError("Full name is required.");
+        return;
+      }
+
       const normalizedPhone = normalizePhoneNumber(phone, phoneCountryCode);
       if (normalizedPhone.error) {
         setSubmitting(false);
@@ -91,17 +102,48 @@ export function AuthPanel({ mode, slug }: { mode: AuthMode; slug: string }) {
         return;
       }
 
+      if ((accountType === "student" || accountType === "parent") && (!gender || !dateOfBirth)) {
+        setSubmitting(false);
+        setError("Date of birth and gender are required.");
+        return;
+      }
+
+      if (accountType === "student" && !isAtLeastAge(dateOfBirth, 13)) {
+        setSubmitting(false);
+        setError("Student accounts require the student to be 13 or older.");
+        return;
+      }
+
+      if (accountType === "parent" && !isAtLeastAge(dateOfBirth, 18)) {
+        setSubmitting(false);
+        setError("Parent accounts require the parent to be 18 or older.");
+        return;
+      }
+
+      const passwordError = validatePassword(password);
+      if (passwordError) {
+        setSubmitting(false);
+        setError(passwordError);
+        return;
+      }
+
+      if (password !== confirmPassword) {
+        setSubmitting(false);
+        setError("Passwords do not match.");
+        return;
+      }
+
       const { data, error: signUpError } = await supabase.auth.signUp({
-        email,
+        email: trimmedEmail,
         password,
         options: {
           emailRedirectTo: `${window.location.origin}/m/${activeSlug}/portal`,
           data: {
             account_type: accountType,
-            full_name: fullName,
+            full_name: trimmedFullName,
             phone: normalizedPhone.value,
-            gender: accountType === "student" ? gender : "",
-            date_of_birth: accountType === "student" ? dateOfBirth : "",
+            gender: accountType === "student" || accountType === "parent" ? gender : "",
+            date_of_birth: accountType === "student" || accountType === "parent" ? dateOfBirth : "",
             age: "",
             mosque_slug: activeSlug,
           },
@@ -118,8 +160,8 @@ export function AuthPanel({ mode, slug }: { mode: AuthMode; slug: string }) {
       if (data.session) {
         const access = await loadUserAccessByMosqueSlug(activeSlug);
         saveDevSwitchAccountForTesting({
-          label: fullName.trim() || email,
-          email,
+          label: trimmedFullName || trimmedEmail,
+          email: trimmedEmail,
           password,
           accountType,
         });
@@ -133,7 +175,7 @@ export function AuthPanel({ mode, slug }: { mode: AuthMode; slug: string }) {
     }
 
     const { error: signInError } = await supabase.auth.signInWithPassword({
-      email,
+      email: trimmedEmail,
       password,
     });
 
@@ -147,8 +189,8 @@ export function AuthPanel({ mode, slug }: { mode: AuthMode; slug: string }) {
     const access = await loadUserAccessByMosqueSlug(activeSlug);
     const loginAccountType = access.accountType?.toLowerCase();
     saveDevSwitchAccountForTesting({
-      label: email,
-      email,
+      label: trimmedEmail,
+      email: trimmedEmail,
       password,
       accountType: isDevSwitchAccountType(loginAccountType) ? loginAccountType : "student",
     });
@@ -214,7 +256,7 @@ export function AuthPanel({ mode, slug }: { mode: AuthMode; slug: string }) {
 
         <div className="flex items-center gap-3 text-xs font-medium uppercase text-[#8A949B]">
           <span className="h-px flex-1 bg-[#E1E6E9]" />
-          <span>Email</span>
+          <span>{isSignup ? "Manual sign-up" : "Manual sign-in"}</span>
           <span className="h-px flex-1 bg-[#E1E6E9]" />
         </div>
 
@@ -239,7 +281,7 @@ export function AuthPanel({ mode, slug }: { mode: AuthMode; slug: string }) {
             </div>
             {accountType === "teacher" ? (
               <p className="mt-2 border-l-4 border-[#DFAE3F] bg-[#FFF7E0] px-3 py-2 text-sm text-[#7A5416]">
-                Teacher accounts start with no teacher abilities. An organization admin must approve the account before you can access classes or tools.
+                Teacher accounts can join classes with instructor codes. Class creation is enabled separately by an admin.
               </p>
             ) : null}
           </fieldset>
@@ -254,7 +296,7 @@ export function AuthPanel({ mode, slug }: { mode: AuthMode; slug: string }) {
               phone={phone}
               onPhoneChange={setPhone}
             />
-            {accountType === "student" ? (
+            {accountType === "student" || accountType === "parent" ? (
               <>
                 <AuthSelect
                   label="Gender"
@@ -280,10 +322,27 @@ export function AuthPanel({ mode, slug }: { mode: AuthMode; slug: string }) {
           name="password"
           value={password}
           onChange={setPassword}
-          type="password"
+          type={showPassword ? "text" : "password"}
           autoComplete={isSignup ? "new-password" : "current-password"}
           required
+          trailing={
+            <PasswordVisibilityButton visible={showPassword} onClick={() => setShowPassword((current) => !current)} controls="password" />
+          }
         />
+        {isSignup ? (
+          <AuthInput
+            label="Confirm password"
+            name="confirmPassword"
+            value={confirmPassword}
+            onChange={setConfirmPassword}
+            type={showConfirmPassword ? "text" : "password"}
+            autoComplete="new-password"
+            required
+            trailing={
+              <PasswordVisibilityButton visible={showConfirmPassword} onClick={() => setShowConfirmPassword((current) => !current)} controls="confirm password" />
+            }
+          />
+        ) : null}
 
         {error ? <p className="border-l-4 border-[#E25241] bg-[#FDEDEA] px-3 py-2 text-sm text-[#9D2E23]">{error}</p> : null}
         {message ? <p className="border-l-4 border-[#2F8FB3] bg-[#E7F3F8] px-3 py-2 text-sm text-[#257B9C]">{message}</p> : null}
@@ -291,6 +350,12 @@ export function AuthPanel({ mode, slug }: { mode: AuthMode; slug: string }) {
         <FlatButton variant="primary" className="w-full" disabled={submitting}>
           {submitting ? "Please wait..." : submitLabel}
         </FlatButton>
+
+        {!isSignup ? (
+          <Link href={`/m/${activeSlug}/forgot-password`} className="block text-center text-sm font-semibold text-[#2F6B53]">
+            Forgot password?
+          </Link>
+        ) : null}
       </form>
     </div>
   );
@@ -386,6 +451,7 @@ function AuthInput({
   type = "text",
   autoComplete,
   required,
+  trailing,
 }: {
   label: string;
   name: string;
@@ -394,20 +460,79 @@ function AuthInput({
   type?: string;
   autoComplete?: string;
   required?: boolean;
+  trailing?: ReactNode;
 }) {
   return (
     <label className="block">
       <span className="text-sm font-medium text-[#26323A]">{label}</span>
-      <input
-        name={name}
-        type={type}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        autoComplete={autoComplete}
-        required={required}
-        suppressHydrationWarning
-        className="mt-1 h-11 w-full border border-[#B9C3C8] bg-white px-3 text-sm text-[#26323A] outline-none focus:border-[#2F8FB3]"
-      />
+      <span className="relative mt-1 block">
+        <input
+          name={name}
+          type={type}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          autoComplete={autoComplete}
+          required={required}
+          suppressHydrationWarning
+          className={cn("h-11 w-full border border-[#B9C3C8] bg-white px-3 text-sm text-[#26323A] outline-none focus:border-[#2F8FB3]", trailing ? "pr-12" : "")}
+        />
+        {trailing ? <span className="absolute inset-y-0 right-2 flex items-center">{trailing}</span> : null}
+      </span>
     </label>
   );
+}
+
+function PasswordVisibilityButton({ visible, onClick, controls }: { visible: boolean; onClick: () => void; controls: string }) {
+  return (
+    <button type="button" onClick={onClick} className="flex h-8 w-8 items-center justify-center rounded-full text-[#6B747B] hover:bg-[#F2F4F5] hover:text-[#26323A]" aria-label={visible ? `Hide ${controls}` : `Show ${controls}`}>
+      {visible ? <EyeOffIcon /> : <EyeIcon />}
+    </button>
+  );
+}
+
+function EyeIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z" />
+      <circle cx="12" cy="12" r="2.7" />
+    </svg>
+  );
+}
+
+function EyeOffIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="m3 3 18 18" />
+      <path d="M10.7 5.2A10.6 10.6 0 0 1 12 5c6 0 9.5 7 9.5 7a14.6 14.6 0 0 1-3.1 3.9" />
+      <path d="M6.5 6.8C3.9 8.5 2.5 12 2.5 12s3.5 7 9.5 7a9 9 0 0 0 4.2-1" />
+      <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+    </svg>
+  );
+}
+
+function validatePassword(value: string) {
+  if (value.length < 8) {
+    return "Password must be at least 8 characters.";
+  }
+  if (!/[a-z]/.test(value) || !/[A-Z]/.test(value) || !/\d/.test(value) || !/[^A-Za-z0-9]/.test(value)) {
+    return "Password must include uppercase, lowercase, number, and symbol.";
+  }
+  return null;
+}
+
+function isAtLeastAge(dateValue: string, minimumAge: number) {
+  if (!dateValue) {
+    return false;
+  }
+  const birthDate = new Date(`${dateValue}T00:00:00`);
+  if (Number.isNaN(birthDate.getTime())) {
+    return false;
+  }
+  const today = new Date();
+  let age = today.getFullYear() - birthDate.getFullYear();
+  const monthDifference = today.getMonth() - birthDate.getMonth();
+  if (monthDifference < 0 || (monthDifference === 0 && today.getDate() < birthDate.getDate())) {
+    age -= 1;
+  }
+  return age >= minimumAge;
 }

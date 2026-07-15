@@ -8,6 +8,26 @@ type ConfirmCheckoutBody = {
   checkoutSessionId?: string;
 };
 
+async function selectedTrackIdsForRequest(supabase: ReturnType<typeof createSupabaseServiceClient>, enrollmentRequestId: string, fallbackTrackId: string | null) {
+  const { data } = await supabase.from("enrollment_request_tracks").select("program_track_id").eq("enrollment_request_id", enrollmentRequestId);
+  const trackIds = (data ?? []).map((row) => row.program_track_id).filter((trackId): trackId is string => Boolean(trackId));
+  return trackIds.length ? trackIds : fallbackTrackId ? [fallbackTrackId] : [];
+}
+
+async function replaceEnrollmentTracks(supabase: ReturnType<typeof createSupabaseServiceClient>, enrollmentId: string, trackIds: string[]) {
+  await supabase.from("enrollment_tracks").delete().eq("enrollment_id", enrollmentId);
+  if (trackIds.length) {
+    await supabase.from("enrollment_tracks").insert(trackIds.map((trackId) => ({ enrollment_id: enrollmentId, program_track_id: trackId })));
+  }
+}
+
+async function replaceSubscriptionTracks(supabase: ReturnType<typeof createSupabaseServiceClient>, subscriptionRowId: string, trackIds: string[]) {
+  await supabase.from("program_subscription_tracks").delete().eq("program_subscription_id", subscriptionRowId);
+  if (trackIds.length) {
+    await supabase.from("program_subscription_tracks").insert(trackIds.map((trackId) => ({ program_subscription_id: subscriptionRowId, program_track_id: trackId })));
+  }
+}
+
 function stripeTimestampToIso(timestamp: number | null | undefined) {
   return timestamp ? new Date(timestamp * 1000).toISOString() : null;
 }
@@ -81,14 +101,15 @@ export async function POST(request: Request) {
     const subscriptionId = typeof session.subscription === "string" ? session.subscription : session.subscription?.id ?? null;
     const period = getSubscriptionPeriod(subscription);
     const now = new Date().toISOString();
+    const trackIds = await selectedTrackIdsForRequest(supabase, enrollmentRequest.id, enrollmentRequest.program_track_id);
 
-    await supabase.from("program_subscriptions").upsert(
+    const { data: subscriptionRow } = await supabase.from("program_subscriptions").upsert(
       {
         mosque_id: mosqueId,
         program_id: programId,
         student_profile_id: studentProfileId,
         parent_profile_id: parentProfileId,
-        program_track_id: enrollmentRequest.program_track_id,
+        program_track_id: trackIds[0] ?? enrollmentRequest.program_track_id,
         enrollment_request_id: enrollmentRequestId,
         stripe_account_id: metadata.stripe_account_id ?? null,
         stripe_customer_id: typeof session.customer === "string" ? session.customer : session.customer?.id ?? null,
@@ -102,16 +123,23 @@ export async function POST(request: Request) {
         updated_at: now,
       },
       { onConflict: "program_id,student_profile_id" },
-    );
+    ).select("id").single();
 
-    await supabase.from("enrollments").upsert(
+    const { data: enrollment } = await supabase.from("enrollments").upsert(
       {
         program_id: programId,
         student_profile_id: studentProfileId,
-        program_track_id: enrollmentRequest.program_track_id,
+        program_track_id: trackIds[0] ?? enrollmentRequest.program_track_id,
       },
       { onConflict: "program_id,student_profile_id" },
-    );
+    ).select("id").single();
+
+    if (subscriptionRow) {
+      await replaceSubscriptionTracks(supabase, subscriptionRow.id, trackIds);
+    }
+    if (enrollment) {
+      await replaceEnrollmentTracks(supabase, enrollment.id, trackIds);
+    }
 
     await supabase.from("enrollment_requests").update({ student_dismissed_at: now }).eq("id", enrollmentRequestId);
 

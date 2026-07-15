@@ -28,8 +28,7 @@ export function TeacherRouteGuard({ children, slug }: { children: React.ReactNod
         return;
       }
 
-      const accountType = access.accountType?.toLowerCase() ?? null;
-      if (accountType === "teacher" || accountType === "admin" || access.isTeacher || access.isMosqueAdmin) {
+      if (access.isTeacher || access.isMosqueAdmin) {
         setIsAllowed(true);
         return;
       }

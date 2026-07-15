@@ -15,6 +15,9 @@ type UpdateProgramBody = {
   schedule?: Json | null;
   scheduleTimezone?: string | null;
   scheduleNotes?: string | null;
+  trackSelectionMode?: string;
+  trackSelectionCount?: number;
+  directorProfileId?: string | null;
 };
 
 function shouldUseStripeConnect() {
@@ -75,6 +78,9 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
     const description = cleanDescription(body.description);
     const isPaid = Boolean(body.isPaid);
     const priceMonthlyCents = Number.isFinite(body.priceMonthlyCents) ? Number(body.priceMonthlyCents) : null;
+    const trackSelectionMode = body.trackSelectionMode === "minimum" || body.trackSelectionMode === "maximum" ? body.trackSelectionMode : "exact";
+    const trackSelectionCount = Number.isFinite(body.trackSelectionCount) ? Math.max(1, Math.round(Number(body.trackSelectionCount))) : 1;
+    const requestedDirectorProfileId = typeof body.directorProfileId === "string" && body.directorProfileId.trim() ? body.directorProfileId.trim() : null;
 
     if (!title) {
       return Response.json({ error: "Program title is required." }, { status: 400 });
@@ -88,6 +94,40 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
     const { data: existingProgram, error: existingError } = await supabase.from("programs").select("*, mosques(*)").eq("id", programId).maybeSingle();
     if (existingError || !existingProgram) {
       return Response.json({ error: existingError?.message ?? "Program not found." }, { status: 404 });
+    }
+
+    let nextDirectorProfileId: string | null | undefined;
+    if (requestedDirectorProfileId) {
+      const [{ data: viewerProfile }, { data: adminMembership }, { data: directorProfile }, { data: directorMembership }] = await Promise.all([
+        supabase.from("profiles").select("id, account_type").eq("id", auth.userId).maybeSingle(),
+        supabase
+          .from("mosque_memberships")
+          .select("id")
+          .eq("mosque_id", existingProgram.mosque_id)
+          .eq("profile_id", auth.userId)
+          .eq("role", "admin")
+          .eq("status", "active")
+          .maybeSingle(),
+        supabase.from("profiles").select("id, account_type").eq("id", requestedDirectorProfileId).maybeSingle(),
+        supabase
+          .from("mosque_memberships")
+          .select("id")
+          .eq("mosque_id", existingProgram.mosque_id)
+          .eq("profile_id", requestedDirectorProfileId)
+          .eq("role", "teacher")
+          .eq("status", "active")
+          .maybeSingle(),
+      ]);
+
+      if (viewerProfile?.account_type !== "admin" || !adminMembership) {
+        return Response.json({ error: "Admin access is required to change the director." }, { status: 403 });
+      }
+
+      if (directorProfile?.account_type !== "teacher" || !directorMembership) {
+        return Response.json({ error: "Director must be an active teacher for this masjid." }, { status: 400 });
+      }
+
+      nextDirectorProfileId = requestedDirectorProfileId;
     }
 
     let stripeProductId = existingProgram.stripe_product_id;
@@ -141,28 +181,49 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
       stripePriceId = null;
     }
 
+    const updatePayload = {
+      title,
+      description,
+      is_paid: isPaid,
+      thumbnail_url: typeof body.thumbnailUrl === "string" && body.thumbnailUrl.trim() ? body.thumbnailUrl.trim() : null,
+      audience_gender: typeof body.audienceGender === "string" && body.audienceGender.trim() ? body.audienceGender.trim() : null,
+      age_range_text: typeof body.ageRangeText === "string" && body.ageRangeText.trim() ? body.ageRangeText.trim() : null,
+      price_monthly_cents: isPaid ? priceMonthlyCents : null,
+      stripe_product_id: stripeProductId,
+      stripe_price_id: stripePriceId,
+      schedule: body.schedule ?? null,
+      schedule_timezone: body.scheduleTimezone ?? null,
+      schedule_notes: body.scheduleNotes ?? null,
+      track_selection_mode: trackSelectionMode,
+      track_selection_count: trackSelectionCount,
+      ...(nextDirectorProfileId ? { director_profile_id: nextDirectorProfileId } : {}),
+    };
+
     const { data: program, error: updateError } = await supabase
       .from("programs")
-      .update({
-        title,
-        description,
-        is_paid: isPaid,
-        thumbnail_url: typeof body.thumbnailUrl === "string" && body.thumbnailUrl.trim() ? body.thumbnailUrl.trim() : null,
-        audience_gender: typeof body.audienceGender === "string" && body.audienceGender.trim() ? body.audienceGender.trim() : null,
-        age_range_text: typeof body.ageRangeText === "string" && body.ageRangeText.trim() ? body.ageRangeText.trim() : null,
-        price_monthly_cents: isPaid ? priceMonthlyCents : null,
-        stripe_product_id: stripeProductId,
-        stripe_price_id: stripePriceId,
-        schedule: body.schedule ?? null,
-        schedule_timezone: body.scheduleTimezone ?? null,
-        schedule_notes: body.scheduleNotes ?? null,
-      })
+      .update(updatePayload)
       .eq("id", programId)
       .select("*")
       .single();
 
     if (updateError || !program) {
       return Response.json({ error: updateError?.message ?? "Could not update program." }, { status: 500 });
+    }
+
+    if (nextDirectorProfileId) {
+      await supabase.from("program_teachers").delete().eq("program_id", programId).eq("role", "director");
+      const { error: teacherError } = await supabase.from("program_teachers").upsert(
+        {
+          program_id: programId,
+          teacher_profile_id: nextDirectorProfileId,
+          role: "director",
+        },
+        { onConflict: "program_id,teacher_profile_id" },
+      );
+
+      if (teacherError) {
+        return Response.json({ error: teacherError.message }, { status: 500 });
+      }
     }
 
     return Response.json({ program });

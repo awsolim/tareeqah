@@ -56,13 +56,13 @@ export function AppChrome({
   const scopedAdminNav = [
     { label: "Home", href: `/m/${slug}/admin` },
     { label: "Classes", href: `/m/${slug}/admin/programs` },
-    { label: "Inbox", href: `/m/${slug}/admin/enrollments` },
+    { label: "Members", href: `/m/${slug}/admin/students` },
     { label: "Me", href: `/m/${slug}/admin/settings` },
   ];
   const scopedAdminMobileNav = [
     { label: "Home", href: `/m/${slug}/admin` },
     { label: "Classes", href: `/m/${slug}/admin/programs` },
-    { label: "Inbox", href: `/m/${slug}/admin/enrollments` },
+    { label: "Members", href: `/m/${slug}/admin/students` },
     { label: "Me", href: `/m/${slug}/admin/settings` },
   ];
 
