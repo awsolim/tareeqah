@@ -33,10 +33,14 @@ export type Database = {
           description: string | null;
           is_active: boolean;
           is_paid: boolean;
+          offers_monthly_payment: boolean;
+          offers_annual_payment: boolean;
           thumbnail_url: string | null;
           price_monthly_cents: number | null;
+          price_annual_cents: number | null;
           stripe_product_id: string | null;
           stripe_price_id: string | null;
+          stripe_annual_price_id: string | null;
           audience_gender: string | null;
           age_range_text: string | null;
           schedule: Json | null;
@@ -132,7 +136,9 @@ export type Database = {
           reviewed_by: string | null;
           reviewed_at: string | null;
           review_note: string | null;
+          payment_type: string;
           approved_price_monthly_cents: number | null;
+          approved_price_annual_cents: number | null;
           payment_bypassed: boolean;
           decision_note: string | null;
           admission_completed_at: string | null;
@@ -256,6 +262,7 @@ export type Database = {
           stripe_subscription_id: string | null;
           stripe_checkout_session_id: string | null;
           stripe_price_id: string | null;
+          payment_type: string;
           status: string;
           current_period_start: string | null;
           current_period_end: string | null;
@@ -403,6 +410,7 @@ export type Database = {
           program_id: string;
           student_profile_id: string;
           program_track_id: string | null;
+          status: string;
           created_at: string;
         };
         Insert: Partial<Database["public"]["Tables"]["enrollments"]["Row"]>;

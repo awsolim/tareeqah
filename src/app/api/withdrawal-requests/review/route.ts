@@ -120,14 +120,14 @@ export async function POST(request: Request) {
       return Response.json({ error: updateError.message }, { status: 500 });
     }
 
-    const { error: enrollmentDeleteError } = await supabase
+    const { error: enrollmentUpdateError } = await supabase
       .from("enrollments")
-      .delete()
+      .update({ status: "withdrawn" })
       .eq("program_id", withdrawalRequest.program_id)
       .eq("student_profile_id", withdrawalRequest.student_profile_id);
 
-    if (enrollmentDeleteError) {
-      return Response.json({ error: enrollmentDeleteError.message }, { status: 500 });
+    if (enrollmentUpdateError) {
+      return Response.json({ error: enrollmentUpdateError.message }, { status: 500 });
     }
 
     return Response.json({ ok: true });

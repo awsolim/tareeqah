@@ -77,6 +77,7 @@ export async function POST(request: Request) {
     const programId = metadata.program_id;
     const studentProfileId = metadata.student_profile_id;
     const parentProfileId = metadata.parent_profile_id || null;
+    const paymentType = metadata.payment_type === "annual" ? "annual" : "monthly";
 
     if (!enrollmentRequestId || !mosqueId || !programId || !studentProfileId) {
       return Response.json({ error: "Checkout session is missing enrollment details." }, { status: 400 });
@@ -115,8 +116,9 @@ export async function POST(request: Request) {
         stripe_customer_id: typeof session.customer === "string" ? session.customer : session.customer?.id ?? null,
         stripe_subscription_id: subscriptionId,
         stripe_checkout_session_id: session.id,
-        stripe_price_id: subscription?.items.data[0]?.price.id ?? null,
-        status: subscription?.status ?? "active",
+        stripe_price_id: subscription?.items.data[0]?.price.id ?? metadata.stripe_price_id ?? null,
+        payment_type: paymentType,
+        status: subscription?.status ?? (paymentType === "annual" ? "paid" : "active"),
         current_period_start: period.start,
         current_period_end: period.end,
         cancel_at_period_end: subscription?.cancel_at_period_end ?? false,
@@ -130,6 +132,7 @@ export async function POST(request: Request) {
         program_id: programId,
         student_profile_id: studentProfileId,
         program_track_id: trackIds[0] ?? enrollmentRequest.program_track_id,
+        status: "active",
       },
       { onConflict: "program_id,student_profile_id" },
     ).select("id").single();

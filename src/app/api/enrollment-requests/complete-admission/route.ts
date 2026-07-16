@@ -68,6 +68,7 @@ export async function POST(request: Request) {
         program_id: enrollmentRequest.program_id,
         student_profile_id: enrollmentRequest.student_profile_id,
         program_track_id: trackIds[0] ?? enrollmentRequest.program_track_id,
+        status: "active",
       },
       { onConflict: "program_id,student_profile_id" },
     ).select("id").single();

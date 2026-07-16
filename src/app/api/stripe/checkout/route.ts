@@ -101,9 +101,13 @@ export async function POST(request: Request) {
       return Response.json({ error: "Payment is not required for this registration." }, { status: 409 });
     }
 
-    const approvedAmount = enrollmentRequest.approved_price_monthly_cents ?? program.price_monthly_cents;
+    const paymentType = enrollmentRequest.payment_type === "annual" ? "annual" : "monthly";
+    const approvedAmount =
+      paymentType === "annual"
+        ? enrollmentRequest.approved_price_annual_cents ?? program.price_annual_cents
+        : enrollmentRequest.approved_price_monthly_cents ?? program.price_monthly_cents;
     if (!approvedAmount || approvedAmount < 50) {
-      return Response.json({ error: "This approval does not have a valid monthly price." }, { status: 409 });
+      return Response.json({ error: `This approval does not have a valid ${paymentType === "annual" ? "one-time annual" : "monthly"} price.` }, { status: 409 });
     }
 
     const stripeRequestOptions = shouldUseStripeConnect() && mosque.stripe_account_id ? { stripeAccount: mosque.stripe_account_id } : undefined;
@@ -119,45 +123,41 @@ export async function POST(request: Request) {
     const dynamicPrice = await stripe.prices.create(
       {
         product: productId,
-        currency: "usd",
+        currency: "cad",
         unit_amount: approvedAmount,
-        recurring: { interval: "month" },
+        ...(paymentType === "monthly" ? { recurring: { interval: "month" as const } } : {}),
         metadata: {
           enrollment_request_id: enrollmentRequest.id,
           mosque_id: enrollmentRequest.mosque_id,
           program_id: enrollmentRequest.program_id,
           student_profile_id: enrollmentRequest.student_profile_id,
+          payment_type: paymentType,
         },
       },
       stripeRequestOptions,
     );
 
+    const checkoutMetadata = {
+      enrollment_request_id: enrollmentRequest.id,
+      mosque_id: enrollmentRequest.mosque_id,
+      program_id: enrollmentRequest.program_id,
+      student_profile_id: enrollmentRequest.student_profile_id,
+      parent_profile_id: enrollmentRequest.parent_profile_id ?? "",
+      stripe_account_id: mosque.stripe_account_id,
+      payment_type: paymentType,
+      stripe_price_id: dynamicPrice.id,
+    };
+
     const session = await stripe.checkout.sessions.create(
       {
-        mode: "subscription",
+        mode: paymentType === "annual" ? "payment" : "subscription",
         line_items: [{ price: dynamicPrice.id, quantity: 1 }],
         customer_email: profile?.email ?? user.email ?? undefined,
         client_reference_id: enrollmentRequest.id,
         success_url: `${origin}${returnPath}?payment=success&session_id={CHECKOUT_SESSION_ID}`,
         cancel_url: `${origin}${returnPath}?payment=cancelled`,
-        subscription_data: {
-          metadata: {
-            enrollment_request_id: enrollmentRequest.id,
-            mosque_id: enrollmentRequest.mosque_id,
-            program_id: enrollmentRequest.program_id,
-            student_profile_id: enrollmentRequest.student_profile_id,
-            parent_profile_id: enrollmentRequest.parent_profile_id ?? "",
-            stripe_account_id: mosque.stripe_account_id,
-          },
-        },
-        metadata: {
-          enrollment_request_id: enrollmentRequest.id,
-          mosque_id: enrollmentRequest.mosque_id,
-          program_id: enrollmentRequest.program_id,
-          student_profile_id: enrollmentRequest.student_profile_id,
-          parent_profile_id: enrollmentRequest.parent_profile_id ?? "",
-          stripe_account_id: mosque.stripe_account_id,
-        },
+        ...(paymentType === "monthly" ? { subscription_data: { metadata: checkoutMetadata } } : {}),
+        metadata: checkoutMetadata,
       },
       stripeRequestOptions,
     );
@@ -172,6 +172,7 @@ export async function POST(request: Request) {
         stripe_account_id: mosque.stripe_account_id,
         stripe_checkout_session_id: session.id,
         stripe_price_id: dynamicPrice.id,
+        payment_type: paymentType,
         status: "checkout_started",
         updated_at: new Date().toISOString(),
       },
