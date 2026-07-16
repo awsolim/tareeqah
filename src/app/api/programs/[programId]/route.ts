@@ -5,8 +5,43 @@ import type { Json } from "@/lib/supabase/types";
 export const runtime = "nodejs";
 
 type UpdateProgramBody = {
+  internalName?: string | null;
   title?: string;
+  summary?: string | null;
   description?: string | null;
+  category?: string | null;
+  programType?: string;
+  publicationStatus?: string;
+  applicationStatus?: string;
+  lifecycleStatus?: string;
+  applicationMode?: string;
+  acceptingApplications?: boolean;
+  applicationOpenAt?: string | null;
+  applicationCloseAt?: string | null;
+  waitlistEnabled?: boolean;
+  capacityBehavior?: string;
+  defaultCapacity?: number | null;
+  durationType?: string;
+  startNow?: boolean;
+  startDate?: string | null;
+  endDate?: string | null;
+  durationMonths?: number | null;
+  schedulePattern?: string;
+  registrationDeadlineAt?: string | null;
+  location?: string | null;
+  room?: string | null;
+  paymentKind?: string;
+  billingStartBehavior?: string;
+  billingEndBehavior?: string;
+  billingDurationMonths?: number | null;
+  allowCustomPrices?: boolean;
+  allowWaivedPayments?: boolean;
+  manualPaymentNote?: string | null;
+  financialAssistanceNote?: string | null;
+  receiptNote?: string | null;
+  contactName?: string | null;
+  contactEmail?: string | null;
+  contactPhone?: string | null;
   isPaid?: boolean;
   offersMonthlyPayment?: boolean;
   offersAnnualPayment?: boolean;
@@ -21,6 +56,7 @@ type UpdateProgramBody = {
   trackSelectionMode?: string;
   trackSelectionCount?: number;
   directorProfileId?: string | null;
+  tags?: unknown;
 };
 
 function shouldUseStripeConnect() {
@@ -33,6 +69,33 @@ function cleanTitle(value: unknown) {
 
 function cleanDescription(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim().slice(0, 2000) : null;
+}
+
+function cleanText(value: unknown, max = 500) {
+  return typeof value === "string" && value.trim() ? value.trim().slice(0, max) : null;
+}
+
+function pickAllowed(value: unknown, allowed: string[], fallback: string) {
+  return typeof value === "string" && allowed.includes(value) ? value : fallback;
+}
+
+function cleanDateTime(value: unknown) {
+  if (typeof value !== "string" || !value.trim()) {
+    return null;
+  }
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function cleanTags(value: unknown) {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const tags = value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim().slice(0, 40))
+    .filter(Boolean);
+  return tags.length ? Array.from(new Set(tags)).slice(0, 12) : null;
 }
 
 async function getAuthenticatedUserId(request: Request) {
@@ -77,9 +140,17 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
     }
 
     const body = (await request.json()) as UpdateProgramBody;
+    const internalName = cleanText(body.internalName, 160);
     const title = cleanTitle(body.title);
+    const summary = cleanText(body.summary, 400);
     const description = cleanDescription(body.description);
-    const isPaid = Boolean(body.isPaid);
+    const publicationStatus = pickAllowed(body.publicationStatus, ["draft", "published", "hidden", "archived"], "published");
+    const applicationStatus = pickAllowed(body.applicationStatus, ["accepting", "not_accepting", "waitlist_only", "closed", "invite_only"], "accepting");
+    const lifecycleStatus = pickAllowed(body.lifecycleStatus, ["upcoming", "active", "completed", "cancelled", "archived"], "upcoming");
+    const applicationMode = pickAllowed(body.applicationMode, ["application_required", "open_enrollment", "invite_only", "hidden_private"], "application_required");
+    const durationType = pickAllowed(body.durationType, ["ongoing", "fixed_months"], "ongoing");
+    const paymentKind = pickAllowed(body.paymentKind, ["free", "tareeqah", "manual"], "free");
+    const isPaid = paymentKind === "tareeqah";
     const offersMonthlyPayment = isPaid ? body.offersMonthlyPayment !== false : false;
     const offersAnnualPayment = isPaid ? Boolean(body.offersAnnualPayment) : false;
     const priceMonthlyCents = Number.isFinite(body.priceMonthlyCents) ? Number(body.priceMonthlyCents) : null;
@@ -87,20 +158,21 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
     const trackSelectionMode = body.trackSelectionMode === "minimum" || body.trackSelectionMode === "maximum" ? body.trackSelectionMode : "exact";
     const trackSelectionCount = Number.isFinite(body.trackSelectionCount) ? Math.max(1, Math.round(Number(body.trackSelectionCount))) : 1;
     const requestedDirectorProfileId = typeof body.directorProfileId === "string" && body.directorProfileId.trim() ? body.directorProfileId.trim() : null;
+    const isDraft = publicationStatus === "draft";
 
-    if (!title) {
-      return Response.json({ error: "Program title is required." }, { status: 400 });
+    if (!title && !internalName) {
+      return Response.json({ error: "Add an internal name or public title before saving." }, { status: 400 });
     }
 
-    if (isPaid && !offersMonthlyPayment && !offersAnnualPayment) {
+    if (!isDraft && isPaid && !offersMonthlyPayment && !offersAnnualPayment) {
       return Response.json({ error: "Choose at least one payment option." }, { status: 400 });
     }
 
-    if (isPaid && offersMonthlyPayment && (!priceMonthlyCents || priceMonthlyCents < 50)) {
+    if (!isDraft && isPaid && offersMonthlyPayment && (!priceMonthlyCents || priceMonthlyCents < 50)) {
       return Response.json({ error: "Monthly payment needs a valid price." }, { status: 400 });
     }
 
-    if (isPaid && offersAnnualPayment && (!priceAnnualCents || priceAnnualCents < 50)) {
+    if (!isDraft && isPaid && offersAnnualPayment && (!priceAnnualCents || priceAnnualCents < 50)) {
       return Response.json({ error: "One-time annual payment needs a valid price." }, { status: 400 });
     }
 
@@ -150,13 +222,13 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
     const mosque = Array.isArray(existingProgram.mosques) ? existingProgram.mosques[0] : existingProgram.mosques;
     const stripeRequestOptions = shouldUseStripeConnect() && mosque?.stripe_account_id ? { stripeAccount: mosque.stripe_account_id } : undefined;
 
-    if (isPaid) {
+    if (isPaid && !isDraft) {
       const stripe = getStripe();
       if (stripeProductId) {
         await stripe.products.update(
           stripeProductId,
           {
-            name: title,
+            name: title || internalName || "Untitled Program",
             description: description ?? undefined,
           },
           stripeRequestOptions,
@@ -164,7 +236,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
       } else {
         const product = await stripe.products.create(
           {
-            name: title,
+            name: title || internalName || "Untitled Program",
             description: description ?? undefined,
             metadata: {
               mosque_id: existingProgram.mosque_id,
@@ -221,11 +293,49 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
     }
 
     const updatePayload = {
-      title,
+      internal_name: internalName,
+      title: title || internalName || "Untitled Draft",
+      summary,
       description,
+      category: cleanText(body.category, 80),
+      program_type: pickAllowed(body.programType, ["recurring", "event"], "recurring"),
+      publication_status: publicationStatus,
+      application_status: publicationStatus === "draft" ? "not_accepting" : applicationStatus,
+      lifecycle_status: lifecycleStatus,
+      application_mode: applicationMode,
+      accepting_applications: publicationStatus !== "draft" && body.acceptingApplications !== false,
+      application_open_at: cleanDateTime(body.applicationOpenAt),
+      application_close_at: cleanDateTime(body.applicationCloseAt),
+      waitlist_enabled: body.waitlistEnabled !== false,
+      capacity_behavior: pickAllowed(body.capacityBehavior, ["manual_review", "close_when_full", "allow_waitlist"], "manual_review"),
+      default_capacity: Number.isFinite(body.defaultCapacity) ? Math.max(0, Math.round(Number(body.defaultCapacity))) : null,
+      tags: cleanTags(body.tags),
+      duration_type: durationType,
+      start_now: Boolean(body.startNow),
+      start_date: body.startNow ? null : typeof body.startDate === "string" && body.startDate.trim() ? body.startDate : null,
+      end_date: null,
+      duration_months: Number.isFinite(body.durationMonths) ? Math.max(1, Math.round(Number(body.durationMonths))) : null,
+      is_ongoing: durationType === "ongoing",
+      schedule_pattern: pickAllowed(body.schedulePattern, ["weekly", "custom_dates"], "weekly"),
+      registration_deadline_at: cleanDateTime(body.registrationDeadlineAt),
+      location: cleanText(body.location, 180),
+      room: cleanText(body.room, 120),
+      is_active: publicationStatus !== "draft" && lifecycleStatus !== "cancelled" && lifecycleStatus !== "archived",
       is_paid: isPaid,
+      payment_kind: paymentKind,
       offers_monthly_payment: isPaid ? offersMonthlyPayment : false,
       offers_annual_payment: isPaid ? offersAnnualPayment : false,
+      billing_start_behavior: pickAllowed(body.billingStartBehavior, ["on_payment", "program_start"], "on_payment"),
+      billing_end_behavior: pickAllowed(body.billingEndBehavior, ["manual_cancel", "program_end", "fixed_months"], "fixed_months"),
+      billing_duration_months: Number.isFinite(body.billingDurationMonths) ? Math.max(1, Math.round(Number(body.billingDurationMonths))) : 10,
+      allow_custom_prices: body.allowCustomPrices !== false,
+      allow_waived_payments: body.allowWaivedPayments !== false,
+      manual_payment_note: cleanText(body.manualPaymentNote, 1000),
+      financial_assistance_note: cleanText(body.financialAssistanceNote, 1000),
+      receipt_note: cleanText(body.receiptNote, 1000),
+      contact_name: cleanText(body.contactName, 120),
+      contact_email: cleanText(body.contactEmail, 180),
+      contact_phone: cleanText(body.contactPhone, 60),
       thumbnail_url: typeof body.thumbnailUrl === "string" && body.thumbnailUrl.trim() ? body.thumbnailUrl.trim() : null,
       audience_gender: typeof body.audienceGender === "string" && body.audienceGender.trim() ? body.audienceGender.trim() : null,
       age_range_text: typeof body.ageRangeText === "string" && body.ageRangeText.trim() ? body.ageRangeText.trim() : null,

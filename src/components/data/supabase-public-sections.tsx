@@ -25,6 +25,7 @@ type ProgramFaq = Database["public"]["Tables"]["program_faqs"]["Row"];
 type ProgramContentSection = Database["public"]["Tables"]["program_content_sections"]["Row"];
 type ProgramMedia = Database["public"]["Tables"]["program_media"]["Row"];
 type ProgramTrack = Database["public"]["Tables"]["program_tracks"]["Row"];
+type ProgramSession = Database["public"]["Tables"]["program_sessions"]["Row"];
 type ProgramStudentNote = Database["public"]["Tables"]["program_student_notes"]["Row"];
 type Enrollment = Database["public"]["Tables"]["enrollments"]["Row"];
 type EnrollmentRequest = Database["public"]["Tables"]["enrollment_requests"]["Row"];
@@ -39,6 +40,7 @@ type ProgramSessionCancellation = Database["public"]["Tables"]["program_session_
 type TeacherDisplay = Pick<Profile, "id" | "full_name" | "avatar_url" | "teacher_credentials" | "teacher_whatsapp_number">;
 type StudentDisplay = Pick<Profile, "id" | "full_name" | "email" | "phone_number" | "avatar_url" | "age" | "gender" | "date_of_birth" | "account_type">;
 type ParentDisplay = Pick<Profile, "id" | "full_name" | "email" | "phone_number" | "avatar_url">;
+type DirectorOption = Pick<Profile, "id" | "full_name" | "email" | "phone_number" | "teacher_credentials" | "teacher_whatsapp_number">;
 
 type ProgramWithTeacher = Program & {
   teacher?: TeacherDisplay | null;
@@ -48,6 +50,50 @@ type TeacherProgramRole = "director" | "instructor";
 type PaymentType = "monthly" | "annual";
 type ProgramEditorMediaRow = { id: string; url: string; title: string; mediaType: string; file?: File | null; previewUrl?: string };
 type ProgramEditorFaqRow = { id: string; question: string; answer: string };
+type ProgramEditorTrackRow = {
+  id: string;
+  name: string;
+  sessions: ProgramScheduleRow[];
+  location?: string;
+  room?: string;
+  capacity?: string;
+};
+type ProgramBuilderStep = "basics" | "public" | "schedule" | "pricing" | "review";
+type ProgramBuilderStatus = {
+  internalName: string;
+  summary: string;
+  category: string;
+  programType: "recurring" | "event";
+  publicationStatus: "draft" | "published" | "hidden" | "archived";
+  applicationStatus: "accepting" | "not_accepting" | "waitlist_only" | "closed" | "invite_only";
+  lifecycleStatus: "upcoming" | "active" | "completed" | "cancelled" | "archived";
+  applicationMode: "application_required" | "open_enrollment" | "invite_only" | "hidden_private";
+  acceptingApplications: boolean;
+  waitlistEnabled: boolean;
+  capacityBehavior: "manual_review" | "close_when_full" | "allow_waitlist";
+  defaultCapacity: string;
+  durationType: "ongoing" | "fixed_months";
+  startNow: boolean;
+  startDate: string;
+  endDate: string;
+  durationMonths: string;
+  schedulePattern: "weekly" | "custom_dates";
+  registrationDeadline: string;
+  location: string;
+  room: string;
+  paymentKind: "free" | "tareeqah" | "manual";
+  billingStartBehavior: "on_payment" | "program_start";
+  billingEndBehavior: "manual_cancel" | "program_end" | "fixed_months";
+  billingDurationMonths: string;
+  allowCustomPrices: boolean;
+  allowWaivedPayments: boolean;
+  manualPaymentNote: string;
+  financialAssistanceNote: string;
+  receiptNote: string;
+  contactName: string;
+  contactEmail: string;
+  contactPhone: string;
+};
 
 type AnnouncementWithContext = Database["public"]["Tables"]["program_announcements"]["Row"] & {
   program?: Program | null;
@@ -75,6 +121,194 @@ const defaultProgramFaqRows: ProgramEditorFaqRow[] = [
   },
 ];
 
+const programBuilderSteps: Array<{ id: ProgramBuilderStep; label: string }> = [
+  { id: "basics", label: "Basics" },
+  { id: "public", label: "Public Page" },
+  { id: "schedule", label: "Schedule" },
+  { id: "pricing", label: "Pricing" },
+  { id: "review", label: "Review" },
+];
+
+function defaultBuilderStatus(): ProgramBuilderStatus {
+  return {
+    internalName: "",
+    summary: "",
+    category: "",
+    programType: "recurring",
+    publicationStatus: "draft",
+    applicationStatus: "accepting",
+    lifecycleStatus: "upcoming",
+    applicationMode: "application_required",
+    acceptingApplications: true,
+    waitlistEnabled: true,
+    capacityBehavior: "manual_review",
+    defaultCapacity: "",
+    durationType: "ongoing",
+    startNow: false,
+    startDate: "",
+    endDate: "",
+    durationMonths: "10",
+    schedulePattern: "weekly",
+    registrationDeadline: "",
+    location: "",
+    room: "",
+    paymentKind: "free",
+    billingStartBehavior: "on_payment",
+    billingEndBehavior: "fixed_months",
+    billingDurationMonths: "",
+    allowCustomPrices: true,
+    allowWaivedPayments: true,
+    manualPaymentNote: "",
+    financialAssistanceNote: "Financial assistance or custom payment arrangements may be available. Please apply and contact the program Director for details.",
+    receiptNote: "Receipt eligibility may depend on program type and masjid policy. Please contact administration for details.",
+    contactName: "",
+    contactEmail: "",
+    contactPhone: "",
+  };
+}
+
+function defaultProgramBuilderColumns(): Pick<Program,
+  | "internal_name"
+  | "summary"
+  | "category"
+  | "program_type"
+  | "publication_status"
+  | "application_status"
+  | "lifecycle_status"
+  | "application_mode"
+  | "accepting_applications"
+  | "application_open_at"
+  | "application_close_at"
+  | "waitlist_enabled"
+  | "capacity_behavior"
+  | "default_capacity"
+  | "duration_type"
+  | "start_now"
+  | "start_date"
+  | "end_date"
+  | "duration_months"
+  | "is_ongoing"
+  | "schedule_pattern"
+  | "registration_deadline_at"
+  | "location"
+  | "room"
+  | "payment_kind"
+  | "billing_start_behavior"
+  | "billing_end_behavior"
+  | "billing_duration_months"
+  | "allow_custom_prices"
+  | "allow_waived_payments"
+  | "manual_payment_note"
+  | "financial_assistance_note"
+  | "receipt_note"
+  | "contact_name"
+  | "contact_email"
+  | "contact_phone"
+> {
+  const defaults = defaultBuilderStatus();
+  return {
+    internal_name: null,
+    summary: null,
+    category: null,
+    program_type: defaults.programType,
+    publication_status: defaults.publicationStatus,
+    application_status: defaults.applicationStatus,
+    lifecycle_status: defaults.lifecycleStatus,
+    application_mode: defaults.applicationMode,
+    accepting_applications: defaults.acceptingApplications,
+    application_open_at: null,
+    application_close_at: null,
+    waitlist_enabled: defaults.waitlistEnabled,
+    capacity_behavior: defaults.capacityBehavior,
+    default_capacity: null,
+    duration_type: defaults.durationType,
+    start_now: defaults.startNow,
+    start_date: null,
+    end_date: null,
+    duration_months: Number(defaults.durationMonths),
+    is_ongoing: defaults.durationType === "ongoing",
+    schedule_pattern: defaults.schedulePattern,
+    registration_deadline_at: null,
+    location: null,
+    room: null,
+    payment_kind: defaults.paymentKind,
+    billing_start_behavior: defaults.billingStartBehavior,
+    billing_end_behavior: defaults.billingEndBehavior,
+    billing_duration_months: Number(defaults.billingDurationMonths || "10"),
+    allow_custom_prices: true,
+    allow_waived_payments: true,
+    manual_payment_note: null,
+    financial_assistance_note: defaults.financialAssistanceNote,
+    receipt_note: defaults.receiptNote,
+    contact_name: null,
+    contact_email: null,
+    contact_phone: null,
+  };
+}
+
+function defaultProgramTrackBuilderColumns(): Pick<ProgramTrack, "gender_override" | "age_min" | "age_max" | "location" | "room" | "capacity" | "pricing_override_enabled" | "price_monthly_cents" | "price_annual_cents"> {
+  return {
+    gender_override: null,
+    age_min: null,
+    age_max: null,
+    location: null,
+    room: null,
+    capacity: null,
+    pricing_override_enabled: false,
+    price_monthly_cents: null,
+    price_annual_cents: null,
+  };
+}
+
+function formatRequiredLabel(label: string, required?: boolean) {
+  return (
+    <>
+      {label}
+      {required ? <span className="ml-1 text-[#C83F31]" aria-hidden>*</span> : null}
+    </>
+  );
+}
+
+function estimateEndMonth(startDate: string, months: string) {
+  const count = Number(months || "0");
+  if (!startDate || !Number.isFinite(count) || count <= 0) {
+    return "";
+  }
+  const date = new Date(`${startDate}T12:00:00`);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  date.setMonth(date.getMonth() + Math.round(count));
+  return date.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+}
+
+function formatMonthlyCycle(priceText: string, monthsText: string) {
+  const monthly = Number(priceText || "0");
+  const months = Number(monthsText || "0");
+  if (!monthly || !months) {
+    return "";
+  }
+  return `$${monthly.toFixed(2)} x ${months} months = $${(monthly * months).toFixed(2)} CAD for one cycle.`;
+}
+
+function formatAnnualSavings(priceText: string, annualText: string, monthsText: string) {
+  const monthly = Number(priceText || "0");
+  const annual = Number(annualText || "0");
+  const months = Number(monthsText || "0");
+  if (!monthly || !annual || !months) {
+    return "";
+  }
+  const monthlyTotal = monthly * months;
+  const diff = Math.abs(monthlyTotal - annual);
+  if (annual < monthlyTotal) {
+    return `One-time saves $${diff.toFixed(2)} CAD compared with monthly.`;
+  }
+  if (annual > monthlyTotal) {
+    return `Monthly saves $${diff.toFixed(2)} CAD compared with one-time.`;
+  }
+  return "Monthly and one-time totals match.";
+}
+
 type RequestWithContext = EnrollmentRequest & {
   program?: Program | null;
   student?: StudentDisplay | null;
@@ -98,6 +332,7 @@ type InstructorLifecycleNotification = {
 };
 
 type ProgramScheduleRow = {
+  date?: string;
   day: (typeof scheduleDayOptions)[number];
   start: string;
   end: string;
@@ -648,6 +883,16 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
         return;
       }
 
+      if (
+        section === "public" &&
+        programData &&
+        !["published", "hidden"].includes(programData.publication_status ?? "published")
+      ) {
+        setError("This program is not published yet.");
+        setLoading(false);
+        return;
+      }
+
       let teacher: TeacherDisplay | null = null;
       const directorProfileId = programData?.director_profile_id ?? programData?.teacher_profile_id ?? null;
       if (directorProfileId) {
@@ -797,6 +1042,12 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
   const learningIntro = details?.learning_intro?.trim() ?? "";
   const learningOutcomes = outcomes.map((item) => item.text);
   const hasLearningSection = Boolean(learningIntro) || learningOutcomes.length > 0;
+  const publicInfoRows = [
+    { title: "Topics Covered", body: details?.topics_intro?.trim() ?? "" },
+    { title: "Requirements", body: details?.requirements_text?.trim() ?? "" },
+    { title: "What To Bring", body: details?.what_to_bring_text?.trim() ?? "" },
+    { title: "Policies", body: details?.policies_text?.trim() ?? "" },
+  ].filter((row) => row.body);
   const classContent = contentSections;
   const hasContentSection = classContent.length > 0;
   const galleryItems = mediaItems;
@@ -812,6 +1063,27 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
       : childStatuses;
   const viewerHasActiveEnrollment =
     isEnrolled || (accountType === "parent" && Object.values(childStatuses).some((status) => status.enrolled));
+  const applicationStatus = program.accepting_applications === false ? "not_accepting" : program.application_status ?? (program.is_active ? "accepting" : "closed");
+  const now = Date.now();
+  const applicationOpenAt = program.application_open_at ? new Date(program.application_open_at).getTime() : null;
+  const applicationCloseAt = program.application_close_at ? new Date(program.application_close_at).getTime() : null;
+  const applicationsHaveOpened = applicationOpenAt === null || applicationOpenAt <= now;
+  const applicationsHaveNotClosed = applicationCloseAt === null || applicationCloseAt >= now;
+  const canRequestApplication =
+    program.publication_status !== "draft" &&
+    applicationsHaveOpened &&
+    applicationsHaveNotClosed &&
+    (applicationStatus === "accepting" || applicationStatus === "waitlist_only");
+  const applicationUnavailableMessage =
+    applicationStatus === "waitlist_only"
+      ? "This class is accepting waitlist requests."
+      : applicationStatus === "invite_only"
+        ? "This class is invite only."
+        : !applicationsHaveOpened
+          ? "Applications are not open yet."
+          : !applicationsHaveNotClosed
+            ? "Applications are closed."
+            : "This class is not currently accepting applications.";
 
   async function requestEnrollment() {
     if (!currentUserId || !mosque || !program) {
@@ -820,6 +1092,11 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
 
     setRequestBusy(true);
     setRequestMessage(null);
+    if (!canRequestApplication) {
+      setRequestMessage(applicationUnavailableMessage);
+      setRequestBusy(false);
+      return;
+    }
     const supabase = createSupabaseBrowserClient();
     const trackValidation = validateTrackSelection(program, tracks, selectedTrackIds);
     if (!trackValidation.valid) {
@@ -1018,6 +1295,19 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
               </DetailSection>
             ) : null}
 
+            {publicInfoRows.length ? (
+              <DetailSection title="Program Details">
+                <div className="divide-y divide-[#E6ECEF]">
+                  {publicInfoRows.map((row) => (
+                    <div key={row.title} className="py-3 first:pt-0 last:pb-0">
+                      <h3 className="text-sm font-semibold text-[#26323A]">{row.title}</h3>
+                      <p className="mt-1 whitespace-pre-wrap text-sm leading-7 text-[#52616A]">{row.body}</p>
+                    </div>
+                  ))}
+                </div>
+              </DetailSection>
+            ) : null}
+
             {hasMediaSection ? <ProgramMediaGallery items={galleryItems} /> : null}
           </div>
 
@@ -1040,6 +1330,10 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
                 ) : accountType === "teacher" ? (
                   <div className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#EEF6F8] px-4 text-sm font-semibold text-[#2F6F83] ring-1 ring-[#CFE2E8]">
                     Teacher Account
+                  </div>
+                ) : !canRequestApplication && accountType === "parent" ? (
+                  <div className="mt-4 rounded-2xl bg-[#F6F8F9] p-4 text-sm leading-6 text-[#52616A] ring-1 ring-[#DDE6EA]">
+                    {applicationUnavailableMessage}
                   </div>
                 ) : accountType === "parent" ? (
                   <>
@@ -1096,6 +1390,10 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
                 ) : requestStatus === "waitlisted" ? (
                   <div className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-white px-4 text-sm font-semibold text-[#8A6418] ring-1 ring-[#FFE3A3]">
                     Waitlisted
+                  </div>
+                ) : !canRequestApplication ? (
+                  <div className="mt-4 rounded-2xl bg-[#F6F8F9] p-4 text-sm leading-6 text-[#52616A] ring-1 ring-[#DDE6EA]">
+                    {applicationUnavailableMessage}
                   </div>
                 ) : !selfEligibility.eligible ? (
                   <div className="mt-4 rounded-2xl bg-[#FFF7E6] p-4 text-sm leading-6 text-[#8A5A00] ring-1 ring-[#F3D28A]">
@@ -1155,7 +1453,7 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
                     Go to Schedule Options from your class card to view different schedule options.
                   </div>
                 ) : null}
-                <SidebarFact label="Status" value={program.is_active ? "Open" : "Closed"} />
+                <SidebarFact label="Applications" value={canRequestApplication ? (applicationStatus === "waitlist_only" ? "Waitlist only" : "Open") : "Closed"} />
               </dl>
             </aside>
 
@@ -3713,6 +4011,9 @@ export function TeacherAnnouncementData({ slug, programId }: { slug: string; pro
 }
 
 const scheduleDayOptions = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"] as const;
+function formatDayAbbreviation(day: string) {
+  return day.slice(0, 3);
+}
 const scheduleTimeOptions = Array.from({ length: 33 }, (_, index) => {
   const totalMinutes = 6 * 60 + index * 30;
   const hours = Math.floor(totalMinutes / 60);
@@ -3864,7 +4165,7 @@ export function TeacherScheduleData({ slug, programId }: { slug: string; program
                     selected ? "border-[#17624F] bg-[#17624F] text-white" : "border-[#D6DCE0] bg-white text-[#26323A] hover:border-[#8ABFB3]",
                   )}
                 >
-                  {day.slice(0, 3)}
+                  {formatDayAbbreviation(day)}
                 </button>
               );
             })}
@@ -4204,6 +4505,7 @@ export function AdminMasjidData({ slug }: { slug: string }) {
             <h2 className="mt-3 text-2xl font-semibold leading-7 text-[#26323A]">{mosque.name}</h2>
           </div>
           <div className="divide-y divide-[#E3E8EC] border-t border-[#E3E8EC]">
+            <TeacherActionLink href={`/m/${slug}/admin/settings`} icon={<EditClassIcon />} label="Masjid Information" />
             <TeacherActionLink href={`/m/${slug}/admin/students`} icon={<StudentsIcon />} label="Manage Members" />
             <TeacherActionLink href={`/m/${slug}/admin/finances`} icon={<FinanceIcon />} label="Manage Finances" />
           </div>
@@ -4313,7 +4615,7 @@ export function TeacherInstructorsData({ slug, programId }: { slug: string; prog
         return;
       }
 
-      setProgram(programRow ?? null);
+        setProgram(programRow ?? null);
       setIsDirector(Boolean(directorAllowed));
       setLoading(false);
     }
@@ -4345,29 +4647,46 @@ export function TeacherInstructorsData({ slug, programId }: { slug: string; prog
 }
 
 export function TeacherProgramCreateData({ slug }: { slug: string }) {
+  const [builderStep, setBuilderStep] = useState<ProgramBuilderStep>("basics");
+  const [builderStatus, setBuilderStatus] = useState<ProgramBuilderStatus>(() => defaultBuilderStatus());
   const [creatorAccountType, setCreatorAccountType] = useState<string | null>(null);
-  const [directorOptions, setDirectorOptions] = useState<Array<Pick<Profile, "id" | "full_name" | "email">>>([]);
+  const [directorOptions, setDirectorOptions] = useState<DirectorOption[]>([]);
   const [selectedDirectorId, setSelectedDirectorId] = useState("");
   const [title, setTitle] = useState("");
+  const [tagDraft, setTagDraft] = useState("");
+  const [tagRows, setTagRows] = useState<string[]>([]);
   const [description, setDescription] = useState("");
   const [thumbnailUrl, setThumbnailUrl] = useState("");
   const [thumbnailFile, setThumbnailFile] = useState<File | null>(null);
-  const [allAges, setAllAges] = useState(true);
+  const [allAges, setAllAges] = useState(false);
   const [ageStart, setAgeStart] = useState("");
   const [ageEnd, setAgeEnd] = useState("");
+  const [noRegistrationDeadline, setNoRegistrationDeadline] = useState(false);
+  const [roomVisible, setRoomVisible] = useState(false);
+  const [eventTimeVisible, setEventTimeVisible] = useState(false);
   const [audienceGender, setAudienceGender] = useState("all");
   const [isPaid, setIsPaid] = useState(false);
   const [price, setPrice] = useState("");
   const [offersMonthlyPayment, setOffersMonthlyPayment] = useState(true);
   const [offersAnnualPayment, setOffersAnnualPayment] = useState(false);
   const [annualPrice, setAnnualPrice] = useState("");
+  const [eventDate, setEventDate] = useState("");
   const [learningVisible, setLearningVisible] = useState(true);
   const [learningTitle, setLearningTitle] = useState("What You Will Learn");
   const [learningIntro, setLearningIntro] = useState("");
-  const [outcomeRows, setOutcomeRows] = useState<Array<{ id: string; text: string }>>([{ id: crypto.randomUUID(), text: "Add a learning outcome" }]);
+  const [learningDescriptionVisible, setLearningDescriptionVisible] = useState(false);
+  const [topicsIntro, setTopicsIntro] = useState("");
+  const [requirementsText, setRequirementsText] = useState("");
+  const [whatToBringText, setWhatToBringText] = useState("");
+  const [policiesText, setPoliciesText] = useState("");
+  const [outcomeRows, setOutcomeRows] = useState<Array<{ id: string; text: string }>>([
+    { id: crypto.randomUUID(), text: "Learning outcome #1" },
+    { id: crypto.randomUUID(), text: "Learning outcome #2" },
+    { id: crypto.randomUUID(), text: "Learning outcome #3" },
+  ]);
   const [faqRows, setFaqRows] = useState<ProgramEditorFaqRow[]>(defaultProgramFaqRows);
   const [mediaRows, setMediaRows] = useState<ProgramEditorMediaRow[]>([]);
-  const [trackRows, setTrackRows] = useState<Array<{ id: string; name: string; sessions: ProgramScheduleRow[] }>>([
+  const [trackRows, setTrackRows] = useState<ProgramEditorTrackRow[]>([
     { id: crypto.randomUUID(), name: "Main Track", sessions: [{ day: "Monday", start: "18:00", end: "20:00" }] },
   ]);
   const [trackSelectionMode, setTrackSelectionMode] = useState<TrackSelectionMode>("exact");
@@ -4380,6 +4699,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
   const [previewOpen, setPreviewOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const thumbnailInputRef = useRef<HTMLInputElement | null>(null);
+  const pricingDurationMonths = builderStatus.durationType === "fixed_months" ? builderStatus.durationMonths : builderStatus.billingDurationMonths;
 
   useEffect(() => {
     async function loadDefaults() {
@@ -4396,8 +4716,13 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
       setCreatorAccountType(data?.account_type ?? null);
       setInstructorDisplayName(data?.full_name ?? "");
       setInstructorContactPhone(data?.phone_number ?? data?.teacher_whatsapp_number ?? "");
+      const { data: mosque } = await supabase.from("mosques").select("*").eq("slug", slug).maybeSingle();
+      if (mosque) {
+        const mosqueAddress = typeof mosque.address === "string" && mosque.address.trim() ? mosque.address.trim() : "";
+        const defaultLocation = mosqueAddress ? `${mosque.name} - ${mosqueAddress}` : mosque.name;
+        setBuilderStatus((current) => current.location ? current : { ...current, location: defaultLocation });
+      }
       if (data?.account_type === "admin") {
-        const { data: mosque } = await supabase.from("mosques").select("id").eq("slug", slug).maybeSingle();
         if (!mosque) {
           return;
         }
@@ -4409,8 +4734,8 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
           .eq("status", "active");
         const teacherIds = (teacherMemberships ?? []).map((membership) => membership.profile_id);
         const { data: teachers } = teacherIds.length
-          ? await supabase.from("profiles").select("id, full_name, email").eq("account_type", "teacher").in("id", teacherIds).order("full_name", { ascending: true })
-          : { data: [] as Array<Pick<Profile, "id" | "full_name" | "email">> };
+          ? await supabase.from("profiles").select("id, full_name, email, phone_number, teacher_credentials, teacher_whatsapp_number").eq("account_type", "teacher").in("id", teacherIds).order("full_name", { ascending: true })
+          : { data: [] as DirectorOption[] };
         setDirectorOptions(teachers ?? []);
         setSelectedDirectorId((current) => current || teachers?.[0]?.id || "");
       }
@@ -4418,6 +4743,20 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
 
     void loadDefaults();
   }, [slug]);
+
+  useEffect(() => {
+    if (creatorAccountType !== "admin" || !selectedDirectorId) {
+      return;
+    }
+    const director = directorOptions.find((teacher) => teacher.id === selectedDirectorId);
+    if (!director) {
+      return;
+    }
+    setInstructorDisplayName(director.full_name ?? "");
+    setInstructorCredentials(director.teacher_credentials ?? "");
+    setInstructorContactPhone(director.phone_number ?? director.teacher_whatsapp_number ?? "");
+    setBuilderStatus((current) => ({ ...current, contactEmail: director.email ?? "" }));
+  }, [creatorAccountType, directorOptions, selectedDirectorId]);
 
   function handleThumbnailFile(file: File | null) {
     if (!file) {
@@ -4439,6 +4778,15 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
 
   function addMedia() {
     setMediaRows((current) => [...current, { id: crypto.randomUUID(), url: "", title: "", mediaType: "photo", file: null }]);
+  }
+
+  function addTag() {
+    const tag = tagDraft.trim();
+    if (!tag) {
+      return;
+    }
+    setTagRows((current) => Array.from(new Set([...current, tag])).slice(0, 12));
+    setTagDraft("");
   }
 
   function setCreateMediaFile(rowId: string, file: File | null) {
@@ -4473,11 +4821,32 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
     return result.url;
   }
 
-  async function saveNewProgram() {
+  async function saveNewProgram(statusOverride?: Partial<ProgramBuilderStatus>) {
+    const effectiveBuilderStatus = { ...builderStatus, ...statusOverride };
     setMessage(null);
     setToast(null);
-    if (!title.trim()) {
-      setToast({ tone: "error", message: "Class title is required." });
+    if (!title.trim() && !effectiveBuilderStatus.internalName.trim()) {
+      setToast({ tone: "error", message: "Add an internal name or public title before saving." });
+      return;
+    }
+    if (effectiveBuilderStatus.publicationStatus !== "draft" && !title.trim()) {
+      setToast({ tone: "error", message: "Public title is required before publishing." });
+      setBuilderStep("basics");
+      return;
+    }
+    if (effectiveBuilderStatus.publicationStatus !== "draft" && !description.trim() && !effectiveBuilderStatus.summary.trim()) {
+      setToast({ tone: "error", message: "Add a summary or description before publishing." });
+      setBuilderStep("basics");
+      return;
+    }
+    if (effectiveBuilderStatus.publicationStatus !== "draft" && effectiveBuilderStatus.programType === "event" && !eventDate) {
+      setToast({ tone: "error", message: "Choose an event date before publishing." });
+      setBuilderStep("schedule");
+      return;
+    }
+    if (effectiveBuilderStatus.publicationStatus !== "draft" && effectiveBuilderStatus.programType === "recurring" && effectiveBuilderStatus.schedulePattern === "custom_dates" && trackRows.some((track) => track.sessions.some((session) => !session.date))) {
+      setToast({ tone: "error", message: "Custom session dates need a date for each meeting." });
+      setBuilderStep("schedule");
       return;
     }
     if (creatorAccountType === "admin" && !selectedDirectorId) {
@@ -4496,8 +4865,27 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
       setToast({ tone: "error", message: "FAQ questions and answers cannot be blank." });
       return;
     }
-    if (trackRows.some((track) => !track.name.trim() || track.sessions.some((session) => session.end <= session.start))) {
+    if (effectiveBuilderStatus.publicationStatus !== "draft" && trackRows.some((track) => !track.name.trim() || track.sessions.some((session) => session.end <= session.start))) {
       setToast({ tone: "error", message: "Each track needs a name and an end time after start time." });
+      setBuilderStep("schedule");
+      return;
+    }
+    const eventPayment = effectiveBuilderStatus.programType === "event";
+    const savedOffersMonthlyPayment = eventPayment ? false : offersMonthlyPayment;
+    const savedOffersAnnualPayment = eventPayment ? true : offersAnnualPayment;
+    if (effectiveBuilderStatus.publicationStatus !== "draft" && effectiveBuilderStatus.paymentKind === "tareeqah" && !savedOffersMonthlyPayment && !savedOffersAnnualPayment) {
+      setToast({ tone: "error", message: "Choose at least one payment option before publishing." });
+      setBuilderStep("pricing");
+      return;
+    }
+    if (effectiveBuilderStatus.publicationStatus !== "draft" && effectiveBuilderStatus.paymentKind === "tareeqah" && savedOffersMonthlyPayment && Number(price || "0") <= 0) {
+      setToast({ tone: "error", message: "Add a valid monthly price before publishing." });
+      setBuilderStep("pricing");
+      return;
+    }
+    if (effectiveBuilderStatus.publicationStatus !== "draft" && effectiveBuilderStatus.paymentKind === "tareeqah" && savedOffersAnnualPayment && Number(annualPrice || "0") <= 0) {
+      setToast({ tone: "error", message: effectiveBuilderStatus.programType === "event" ? "Add a valid one-time price before publishing." : "Add a valid one-time annual price before publishing." });
+      setBuilderStep("pricing");
       return;
     }
     const savedTrackSelectionCount = Math.min(Math.max(1, trackSelectionCount), Math.max(1, trackRows.length));
@@ -4518,16 +4906,50 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
         body: JSON.stringify({
           mosqueSlug: slug,
+          internalName: effectiveBuilderStatus.internalName.trim() || null,
           title: title.trim(),
+          summary: effectiveBuilderStatus.summary.trim() || null,
           description: description.trim() || null,
+          category: tagRows.join(", ") || null,
+          tags: tagRows,
+          programType: effectiveBuilderStatus.programType,
+          publicationStatus: effectiveBuilderStatus.publicationStatus,
+          applicationStatus: effectiveBuilderStatus.acceptingApplications ? effectiveBuilderStatus.applicationStatus : "not_accepting",
+          lifecycleStatus: effectiveBuilderStatus.lifecycleStatus,
+          applicationMode: effectiveBuilderStatus.applicationMode,
+          acceptingApplications: effectiveBuilderStatus.acceptingApplications,
+          waitlistEnabled: effectiveBuilderStatus.waitlistEnabled,
+          capacityBehavior: effectiveBuilderStatus.capacityBehavior,
+          defaultCapacity: null,
+          durationType: effectiveBuilderStatus.durationType,
+          startNow: effectiveBuilderStatus.startNow,
+          startDate: effectiveBuilderStatus.startNow ? null : effectiveBuilderStatus.startDate || null,
+          endDate: null,
+          durationMonths: effectiveBuilderStatus.durationType === "fixed_months" && effectiveBuilderStatus.durationMonths ? Number(effectiveBuilderStatus.durationMonths) : null,
+          schedulePattern: effectiveBuilderStatus.schedulePattern,
+          registrationDeadlineAt: noRegistrationDeadline ? null : effectiveBuilderStatus.registrationDeadline || null,
+          location: effectiveBuilderStatus.location.trim() || null,
+          room: effectiveBuilderStatus.room.trim() || null,
+          paymentKind: effectiveBuilderStatus.paymentKind,
+          billingStartBehavior: effectiveBuilderStatus.billingStartBehavior,
+          billingEndBehavior: effectiveBuilderStatus.billingEndBehavior,
+          billingDurationMonths: effectiveBuilderStatus.billingDurationMonths ? Number(effectiveBuilderStatus.billingDurationMonths) : 10,
+          allowCustomPrices: true,
+          allowWaivedPayments: true,
+          manualPaymentNote: effectiveBuilderStatus.manualPaymentNote.trim() || null,
+          financialAssistanceNote: effectiveBuilderStatus.financialAssistanceNote.trim() || null,
+          receiptNote: effectiveBuilderStatus.receiptNote.trim() || null,
+          contactName: effectiveBuilderStatus.contactName.trim() || null,
+          contactEmail: effectiveBuilderStatus.contactEmail.trim() || null,
+          contactPhone: effectiveBuilderStatus.contactPhone.trim() || null,
           thumbnailUrl: thumbnailFile ? null : thumbnailUrl.trim() || null,
           audienceGender,
           ageRangeText: allAges ? null : formatAgeRangeForSave(ageStart, ageEnd),
-          isPaid,
-          offersMonthlyPayment,
-          offersAnnualPayment,
-          priceMonthlyCents: isPaid ? Math.max(0, Math.round(Number(price || "0") * 100)) : null,
-          priceAnnualCents: isPaid ? Math.max(0, Math.round(Number(annualPrice || "0") * 100)) : null,
+          isPaid: effectiveBuilderStatus.paymentKind === "tareeqah",
+          offersMonthlyPayment: savedOffersMonthlyPayment,
+          offersAnnualPayment: savedOffersAnnualPayment,
+          priceMonthlyCents: effectiveBuilderStatus.paymentKind === "tareeqah" && savedOffersMonthlyPayment ? Math.max(0, Math.round(Number(price || "0") * 100)) : null,
+          priceAnnualCents: effectiveBuilderStatus.paymentKind === "tareeqah" ? Math.max(0, Math.round(Number(annualPrice || "0") * 100)) : null,
           schedule,
           scheduleTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
           trackSelectionMode,
@@ -4548,16 +4970,50 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
           method: "PATCH",
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
           body: JSON.stringify({
+            internalName: effectiveBuilderStatus.internalName.trim() || null,
             title: program.title,
+            summary: effectiveBuilderStatus.summary.trim() || null,
             description: program.description,
+            category: tagRows.join(", ") || null,
+            tags: tagRows,
+            programType: effectiveBuilderStatus.programType,
+            publicationStatus: effectiveBuilderStatus.publicationStatus,
+            applicationStatus: effectiveBuilderStatus.acceptingApplications ? effectiveBuilderStatus.applicationStatus : "not_accepting",
+            lifecycleStatus: effectiveBuilderStatus.lifecycleStatus,
+            applicationMode: effectiveBuilderStatus.applicationMode,
+            acceptingApplications: effectiveBuilderStatus.acceptingApplications,
+            waitlistEnabled: effectiveBuilderStatus.waitlistEnabled,
+            capacityBehavior: effectiveBuilderStatus.capacityBehavior,
+            defaultCapacity: null,
+            durationType: effectiveBuilderStatus.durationType,
+            startNow: effectiveBuilderStatus.startNow,
+            startDate: effectiveBuilderStatus.startNow ? null : effectiveBuilderStatus.startDate || null,
+            endDate: null,
+            durationMonths: effectiveBuilderStatus.durationType === "fixed_months" && effectiveBuilderStatus.durationMonths ? Number(effectiveBuilderStatus.durationMonths) : null,
+            schedulePattern: effectiveBuilderStatus.schedulePattern,
+            registrationDeadlineAt: noRegistrationDeadline ? null : effectiveBuilderStatus.registrationDeadline || null,
+            location: effectiveBuilderStatus.location.trim() || null,
+            room: effectiveBuilderStatus.room.trim() || null,
+            paymentKind: effectiveBuilderStatus.paymentKind,
+            billingStartBehavior: effectiveBuilderStatus.billingStartBehavior,
+            billingEndBehavior: effectiveBuilderStatus.billingEndBehavior,
+            billingDurationMonths: effectiveBuilderStatus.billingDurationMonths ? Number(effectiveBuilderStatus.billingDurationMonths) : 10,
+            allowCustomPrices: true,
+            allowWaivedPayments: true,
+            manualPaymentNote: effectiveBuilderStatus.manualPaymentNote.trim() || null,
+            financialAssistanceNote: effectiveBuilderStatus.financialAssistanceNote.trim() || null,
+            receiptNote: effectiveBuilderStatus.receiptNote.trim() || null,
+            contactName: effectiveBuilderStatus.contactName.trim() || null,
+            contactEmail: effectiveBuilderStatus.contactEmail.trim() || null,
+            contactPhone: effectiveBuilderStatus.contactPhone.trim() || null,
             thumbnailUrl: nextThumbnailUrl,
             audienceGender: program.audience_gender,
             ageRangeText: program.age_range_text,
-            isPaid: program.is_paid,
-            offersMonthlyPayment: program.offers_monthly_payment,
-            offersAnnualPayment: program.offers_annual_payment,
-            priceMonthlyCents: program.price_monthly_cents,
-            priceAnnualCents: program.price_annual_cents,
+            isPaid: effectiveBuilderStatus.paymentKind === "tareeqah",
+            offersMonthlyPayment: savedOffersMonthlyPayment,
+            offersAnnualPayment: savedOffersAnnualPayment,
+            priceMonthlyCents: effectiveBuilderStatus.paymentKind === "tareeqah" && savedOffersMonthlyPayment ? Math.max(0, Math.round(Number(price || "0") * 100)) : null,
+            priceAnnualCents: effectiveBuilderStatus.paymentKind === "tareeqah" ? Math.max(0, Math.round(Number(annualPrice || "0") * 100)) : null,
             schedule: program.schedule,
             scheduleTimezone: program.schedule_timezone,
             scheduleNotes: program.schedule_notes,
@@ -4576,6 +5032,10 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
         program_id: program.id,
         learning_title: learningVisible ? learningTitle.trim() : "What You Will Learn",
         learning_intro: learningVisible ? learningIntro.trim() || null : null,
+        topics_intro: topicsIntro.trim() || null,
+        requirements_text: requirementsText.trim() || null,
+        what_to_bring_text: whatToBringText.trim() || null,
+        policies_text: policiesText.trim() || null,
         instructor_display_name: instructorDisplayName.trim() || null,
         instructor_credentials: instructorCredentials.trim() || null,
         instructor_contact_phone: instructorContactPhone.trim() || null,
@@ -4603,9 +5063,54 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
           throw new Error(faqsError.message);
         }
       }
-      const { error: tracksError } = await supabase.from("program_tracks").insert(trackRows.map((track, index) => ({ program_id: program.id, sort_order: index + 1, name: track.name.trim(), description: null, schedule: track.sessions as unknown as Json, is_active: true })));
+      const { data: insertedTracks, error: tracksError } = await supabase
+        .from("program_tracks")
+        .insert(trackRows.map((track, index) => ({
+          program_id: program.id,
+          sort_order: index + 1,
+          name: track.name.trim(),
+          description: null,
+          schedule: track.sessions as unknown as Json,
+          location: track.location?.trim() || effectiveBuilderStatus.location.trim() || null,
+          room: track.room?.trim() || effectiveBuilderStatus.room.trim() || null,
+          capacity: track.capacity ? Number(track.capacity) : null,
+          pricing_override_enabled: false,
+          price_monthly_cents: null,
+          price_annual_cents: null,
+          is_active: true,
+        })))
+        .select("id, sort_order");
       if (tracksError) {
         throw new Error(tracksError.message);
+      }
+      if ((effectiveBuilderStatus.programType === "event" && eventDate) || effectiveBuilderStatus.schedulePattern === "custom_dates") {
+        const sessionRows = trackRows.flatMap((track, trackIndex) => {
+          const insertedTrack = (insertedTracks ?? []).find((row) => row.sort_order === trackIndex + 1);
+          const sessions = effectiveBuilderStatus.programType === "event" ? track.sessions.slice(0, 1) : track.sessions;
+          return sessions.flatMap((session) => {
+            const sessionDate = effectiveBuilderStatus.programType === "event" ? eventDate : session.date;
+            if (!sessionDate) {
+              return [];
+            }
+            return [{
+            program_id: program.id,
+            program_track_id: insertedTrack?.id ?? null,
+            session_date: sessionDate,
+            start_time: session.start,
+            end_time: session.end,
+            title: track.name.trim() || program.title,
+            location: track.location?.trim() || effectiveBuilderStatus.location.trim() || null,
+            room: track.room?.trim() || effectiveBuilderStatus.room.trim() || null,
+            capacity: track.capacity ? Number(track.capacity) : null,
+          }];
+          });
+        });
+        if (sessionRows.length) {
+          const { error: sessionsError } = await supabase.from("program_sessions").insert(sessionRows);
+          if (sessionsError) {
+            throw new Error(sessionsError.message);
+          }
+        }
       }
 
       const uploadedMedia = [];
@@ -4644,10 +5149,10 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
           audienceGender,
           ageRangeText: allAges ? null : formatAgeRangeForSave(ageStart, ageEnd),
           isPaid,
-          offersMonthlyPayment,
-          offersAnnualPayment,
-          priceMonthlyCents: isPaid ? Math.max(0, Math.round(Number(price || "0") * 100)) : null,
-          priceAnnualCents: isPaid ? Math.max(0, Math.round(Number(annualPrice || "0") * 100)) : null,
+          offersMonthlyPayment: builderStatus.programType === "event" ? false : offersMonthlyPayment,
+          offersAnnualPayment: builderStatus.programType === "event" ? true : offersAnnualPayment,
+          priceMonthlyCents: builderStatus.paymentKind === "tareeqah" && builderStatus.programType !== "event" ? Math.max(0, Math.round(Number(price || "0") * 100)) : null,
+          priceAnnualCents: builderStatus.paymentKind === "tareeqah" ? Math.max(0, Math.round(Number(annualPrice || "0") * 100)) : null,
           schedule: trackRows[0]?.sessions as unknown as Json,
           trackSelectionMode,
           trackSelectionCount,
@@ -4669,21 +5174,790 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
   return (
     <div className="space-y-5 bg-[var(--workspace)] p-4 pb-40">
       <EditorToast toast={toast} onClose={() => setToast(null)} />
+      <ProgramBuilderStepper activeStep={builderStep} />
+
+      <section className="rounded-[22px] border border-[#DDE7EA] bg-white p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[#7B858C]">Program Builder</p>
+            <h1 className="mt-2 text-2xl font-semibold text-[#26323A]">{programBuilderSteps.find((step) => step.id === builderStep)?.label}</h1>
+          </div>
+          <ProgramStatusBadge status={builderStatus.publicationStatus} />
+        </div>
+
+        {builderStep === "basics" ? (
+          <div className="mt-5 grid gap-3">
+            <EditBox label="Internal name" required value={builderStatus.internalName} onChange={(value) => setBuilderStatus((current) => ({ ...current, internalName: value }))} />
+            <EditBox label="Public name" required value={title} onChange={setTitle} />
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("Program type", true)}</span>
+              <select value={builderStatus.programType} onChange={(event) => setBuilderStatus((current) => ({ ...current, programType: event.target.value as ProgramBuilderStatus["programType"] }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
+                <option value="recurring">Recurring program</option>
+                <option value="event">One-time event</option>
+              </select>
+            </label>
+            <EditBox label="Short summary / tagline" value={builderStatus.summary} onChange={(value) => setBuilderStatus((current) => ({ ...current, summary: value }))} />
+            <p className="text-xs leading-5 text-[#6B747B]">Internal name is only for staff. Public title is what parents see.</p>
+          </div>
+        ) : null}
+
+        {builderStep === "schedule" ? (
+          <div className="mt-5 grid gap-3 md:grid-cols-2">
+            {builderStatus.programType === "recurring" ? (
+              <label className="block">
+                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("Duration Type", true)}</span>
+                <select value={builderStatus.durationType} onChange={(event) => { const value = event.target.value as ProgramBuilderStatus["durationType"]; setBuilderStatus((current) => ({ ...current, durationType: value, billingEndBehavior: value === "ongoing" && current.billingEndBehavior === "program_end" ? "manual_cancel" : current.billingEndBehavior, billingDurationMonths: value === "fixed_months" ? current.durationMonths || current.billingDurationMonths : current.billingDurationMonths })); }} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
+                  <option value="ongoing">Ongoing until manually ended</option>
+                  <option value="fixed_months">Fixed number of months</option>
+                </select>
+              </label>
+            ) : null}
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{builderStatus.programType === "event" ? "Event date" : "Start date"}</span>
+              {builderStatus.programType === "event" ? (
+                <input type="date" value={eventDate} onChange={(event) => setEventDate(event.target.value)} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]" />
+              ) : (
+                <>
+                  <input type={builderStatus.startNow ? "text" : "date"} disabled={builderStatus.startNow} value={builderStatus.startNow ? "Start Immediately" : builderStatus.startDate} onChange={(event) => setBuilderStatus((current) => ({ ...current, startDate: event.target.value }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3] disabled:bg-[#F2F6F7] disabled:text-[#52616A]" />
+                  <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs font-semibold text-[#52616A]">
+                    <input type="checkbox" checked={builderStatus.startNow} onChange={(event) => setBuilderStatus((current) => ({ ...current, startNow: event.target.checked }))} />
+                    Start now after publishing
+                  </label>
+                </>
+              )}
+            </label>
+            {builderStatus.programType === "recurring" && builderStatus.durationType === "fixed_months" ? (
+              <label className="block">
+                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Duration (number of months)</span>
+                <input value={builderStatus.durationMonths} onChange={(event) => { const value = event.target.value.replace(/\D/g, ""); setBuilderStatus((current) => ({ ...current, durationMonths: value, billingDurationMonths: current.billingEndBehavior === "fixed_months" ? value : current.billingDurationMonths })); }} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]" />
+                {estimateEndMonth(builderStatus.startDate, builderStatus.durationMonths) ? <span className="mt-1 block text-xs leading-5 text-[#6B747B]">Estimated end: {estimateEndMonth(builderStatus.startDate, builderStatus.durationMonths)}</span> : null}
+              </label>
+            ) : null}
+            {builderStatus.programType === "recurring" ? (
+              <label className="block">
+                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Schedule pattern</span>
+                <select value={builderStatus.schedulePattern} onChange={(event) => setBuilderStatus((current) => ({ ...current, schedulePattern: event.target.value as ProgramBuilderStatus["schedulePattern"] }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
+                  <option value="weekly">Weekly repeating</option>
+                  <option value="custom_dates">Custom session dates</option>
+                </select>
+              </label>
+            ) : null}
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Registration deadline</span>
+              <input type={noRegistrationDeadline ? "text" : "datetime-local"} disabled={noRegistrationDeadline} value={noRegistrationDeadline ? "None" : builderStatus.registrationDeadline} onChange={(event) => setBuilderStatus((current) => ({ ...current, registrationDeadline: event.target.value }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3] disabled:bg-[#F2F6F7] disabled:text-[#52616A]" />
+              <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs font-semibold text-[#52616A]">
+                <input type="checkbox" checked={noRegistrationDeadline} onChange={(event) => { setNoRegistrationDeadline(event.target.checked); if (event.target.checked) setBuilderStatus((current) => ({ ...current, registrationDeadline: "" })); }} />
+                No registration deadline
+              </label>
+            </label>
+            <EditBox label="Location" value={builderStatus.location} onChange={(value) => setBuilderStatus((current) => ({ ...current, location: value }))} />
+            <div className="space-y-2">
+              {roomVisible ? <EditBox label="Room" value={builderStatus.room} onChange={(value) => setBuilderStatus((current) => ({ ...current, room: value }))} /> : <button type="button" onClick={() => setRoomVisible(true)} className="mt-6 text-sm font-semibold text-[#2F8FB3]">Add room</button>}
+              {builderStatus.programType === "event" && !eventTimeVisible ? <button type="button" onClick={() => setEventTimeVisible(true)} className="block text-sm font-semibold text-[#2F8FB3]">Add start and end time</button> : null}
+            </div>
+          </div>
+        ) : null}
+
+        {builderStep === "pricing" ? (
+          <div className="mt-5 grid gap-3 md:grid-cols-2">
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("How payments are handled", true)}</span>
+              <select value={builderStatus.paymentKind} onChange={(event) => { const value = event.target.value as ProgramBuilderStatus["paymentKind"]; setBuilderStatus((current) => ({ ...current, paymentKind: value })); setIsPaid(value === "tareeqah"); }} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
+                <option value="free">Free</option>
+                <option value="tareeqah">Paid through Tareeqah</option>
+                <option value="manual">Handled outside Tareeqah</option>
+              </select>
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Application mode</span>
+              <select value={builderStatus.applicationMode} onChange={(event) => setBuilderStatus((current) => ({ ...current, applicationMode: event.target.value as ProgramBuilderStatus["applicationMode"], acceptingApplications: event.target.value === "application_required" ? current.acceptingApplications : false }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
+                <option value="application_required">Application required</option>
+                <option value="open_enrollment">Open enrollment</option>
+                <option value="invite_only">Invite only</option>
+                <option value="hidden_private">Hidden/private</option>
+              </select>
+            </label>
+            {builderStatus.applicationMode === "application_required" ? (
+              <label className="flex items-center gap-2 text-sm font-semibold text-[#26323A]">
+                <input type="checkbox" checked={builderStatus.acceptingApplications} onChange={(event) => setBuilderStatus((current) => ({ ...current, acceptingApplications: event.target.checked }))} />
+                Accepting applications now
+              </label>
+            ) : null}
+            {builderStatus.paymentKind === "tareeqah" && builderStatus.programType !== "event" && offersMonthlyPayment && builderStatus.billingEndBehavior === "fixed_months" ? (
+              <label className="block">
+                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Number of months in billing cycle</span>
+                <input value={builderStatus.billingDurationMonths} onChange={(event) => setBuilderStatus((current) => ({ ...current, billingDurationMonths: event.target.value.replace(/\D/g, "") }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]" />
+              </label>
+            ) : null}
+          </div>
+        ) : null}
+      </section>
+
+      {builderStep === "basics" ? (
+        <section className="overflow-hidden rounded-[28px] bg-white shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
+          <div className="relative">
+            <ProgramHero program={{ id: "new", mosque_id: "", teacher_profile_id: null, director_profile_id: null, ...defaultProgramBuilderColumns(), title: title || "New Class", description: description || null, is_active: true, is_paid: builderStatus.paymentKind === "tareeqah", offers_monthly_payment: offersMonthlyPayment, offers_annual_payment: offersAnnualPayment, thumbnail_url: thumbnailUrl || null, price_monthly_cents: null, price_annual_cents: null, stripe_product_id: null, stripe_price_id: null, stripe_annual_price_id: null, audience_gender: audienceGender, age_range_text: allAges ? null : formatAgeRangeForSave(ageStart, ageEnd), schedule: null, schedule_timezone: null, schedule_notes: null, track_selection_mode: trackSelectionMode, track_selection_count: trackSelectionCount, tags: tagRows, created_at: "", updated_at: "" }} />
+            <input ref={thumbnailInputRef} type="file" accept="image/*" className="hidden" onChange={(event) => handleThumbnailFile(event.target.files?.[0] ?? null)} />
+            <button type="button" onClick={() => thumbnailInputRef.current?.click()} className="absolute right-3 top-3 flex h-10 w-10 items-center justify-center rounded-full bg-white text-[#26323A] shadow-lg" aria-label="Replace thumbnail">
+              <PhotoIcon />
+            </button>
+          </div>
+          <div className="space-y-3 p-4">
+            <EditBox label="Description" value={description} onChange={setDescription} multiline />
+          </div>
+        </section>
+      ) : null}
+
+      {builderStep === "basics" && creatorAccountType === "admin" ? (
+        <section className="space-y-2 bg-white px-4 py-3">
+          <label className="block text-xs font-semibold uppercase tracking-wide text-[#6B747B]" htmlFor="edit-program-director">Class Director</label>
+          <select id="edit-program-director" value={selectedDirectorId} onChange={(event) => setSelectedDirectorId(event.target.value)} className="h-12 w-full rounded-[10px] border border-[#B9C3C8] bg-white px-3 text-sm font-semibold text-[#26323A] outline-none focus:border-[#2F8FB3]">
+            <option value="">Choose director</option>
+            {directorOptions.map((teacher) => <option key={teacher.id} value={teacher.id}>{teacher.full_name || teacher.email || "Unnamed teacher"}</option>)}
+          </select>
+        </section>
+      ) : null}
+
+      <ProgramEditorFields
+        activeStep={builderStep}
+        programType={builderStatus.programType}
+        schedulePattern={builderStatus.schedulePattern}
+        previewProgram={buildProgramPreview({
+          id: "new",
+          title: title || "New Class",
+          description,
+          thumbnailUrl,
+          audienceGender,
+          ageRangeText: allAges ? null : formatAgeRangeForSave(ageStart, ageEnd),
+          isPaid: builderStatus.paymentKind === "tareeqah",
+          offersMonthlyPayment: builderStatus.programType === "event" ? false : offersMonthlyPayment,
+          offersAnnualPayment: builderStatus.programType === "event" ? true : offersAnnualPayment,
+          priceMonthlyCents: builderStatus.paymentKind === "tareeqah" && builderStatus.programType !== "event" ? Math.max(0, Math.round(Number(price || "0") * 100)) : null,
+          priceAnnualCents: builderStatus.paymentKind === "tareeqah" ? Math.max(0, Math.round(Number(annualPrice || "0") * 100)) : null,
+          schedule: trackRows[0]?.sessions as unknown as Json,
+          trackSelectionMode,
+          trackSelectionCount,
+        })}
+        eventDate={eventDate}
+        setEventDate={setEventDate}
+        eventTimeVisible={eventTimeVisible}
+        setEventTimeVisible={setEventTimeVisible}
+        learningVisible={learningVisible}
+        setLearningVisible={setLearningVisible}
+        learningTitle={learningTitle}
+        setLearningTitle={setLearningTitle}
+        learningIntro={learningIntro}
+        setLearningIntro={setLearningIntro}
+        learningDescriptionVisible={learningDescriptionVisible}
+        setLearningDescriptionVisible={setLearningDescriptionVisible}
+        topicsIntro={topicsIntro}
+        setTopicsIntro={setTopicsIntro}
+        requirementsText={requirementsText}
+        setRequirementsText={setRequirementsText}
+        whatToBringText={whatToBringText}
+        setWhatToBringText={setWhatToBringText}
+        policiesText={policiesText}
+        setPoliciesText={setPoliciesText}
+        outcomeRows={outcomeRows}
+        setOutcomeRows={setOutcomeRows}
+        faqRows={faqRows}
+        setFaqRows={setFaqRows}
+        mediaRows={mediaRows}
+        setMediaRows={setMediaRows}
+        onMediaFile={setCreateMediaFile}
+        addMedia={addMedia}
+        trackRows={trackRows}
+        setTrackRows={setTrackRows}
+        addTrack={addTrack}
+        trackSelectionMode={trackSelectionMode}
+        setTrackSelectionMode={setTrackSelectionMode}
+        trackSelectionCount={trackSelectionCount}
+        setTrackSelectionCount={setTrackSelectionCount}
+        allAges={allAges}
+        setAllAges={setAllAges}
+        ageStart={ageStart}
+        setAgeStart={setAgeStart}
+        ageEnd={ageEnd}
+        setAgeEnd={setAgeEnd}
+        audienceGender={audienceGender}
+        setAudienceGender={setAudienceGender}
+        paymentKind={builderStatus.paymentKind}
+        durationMonthsForPricing={pricingDurationMonths}
+        isPaid={builderStatus.paymentKind === "tareeqah"}
+        setIsPaid={setIsPaid}
+        offersMonthlyPayment={offersMonthlyPayment}
+        setOffersMonthlyPayment={setOffersMonthlyPayment}
+        offersAnnualPayment={offersAnnualPayment}
+        setOffersAnnualPayment={setOffersAnnualPayment}
+        price={price}
+        setPrice={setPrice}
+        annualPrice={annualPrice}
+        setAnnualPrice={setAnnualPrice}
+        instructorDisplayName={instructorDisplayName}
+        setInstructorDisplayName={setInstructorDisplayName}
+        instructorCredentials={instructorCredentials}
+        setInstructorCredentials={setInstructorCredentials}
+        instructorContactPhone={instructorContactPhone}
+        setInstructorContactPhone={setInstructorContactPhone}
+        contactEmail={builderStatus.contactEmail}
+        setContactEmail={(value) => setBuilderStatus((current) => ({ ...current, contactEmail: value }))}
+      />
+
+      <div className="sticky bottom-[92px] z-10 space-y-2 bg-white py-2 md:bottom-4">
+        {message ? <p className="text-sm font-medium text-[#52616A]">{message}</p> : null}
+        <div className="grid grid-cols-3 gap-2">
+          <button type="button" disabled={busy} onClick={() => { const draftOverride = { publicationStatus: "draft", applicationStatus: "not_accepting", acceptingApplications: false } as const; setBuilderStatus((current) => ({ ...current, ...draftOverride })); void saveNewProgram(draftOverride); }} className="min-h-11 rounded-[10px] bg-[#2F8FB3] px-4 text-sm font-semibold text-white shadow-[0_8px_18px_rgba(47,143,179,0.20)] disabled:opacity-60">
+            Save Draft
+          </button>
+          <button type="button" disabled={busy || builderStep === "basics"} onClick={() => { const index = programBuilderSteps.findIndex((step) => step.id === builderStep); setBuilderStep(programBuilderSteps[Math.max(0, index - 1)]?.id ?? "basics"); }} className="min-h-11 rounded-[10px] border border-[#B9C3C8] bg-white px-4 text-sm font-semibold text-[#26323A] disabled:opacity-40">
+            Back
+          </button>
+          <button type="button" disabled={busy} onClick={() => { if (builderStep !== "review") { const index = programBuilderSteps.findIndex((step) => step.id === builderStep); setBuilderStep(programBuilderSteps[Math.min(programBuilderSteps.length - 1, index + 1)]?.id ?? "review"); return; } const publishOverride = { publicationStatus: "published" } as const; setBuilderStatus((current) => ({ ...current, ...publishOverride, applicationStatus: current.acceptingApplications ? current.applicationStatus : "not_accepting" })); void saveNewProgram(publishOverride); }} className="min-h-11 rounded-[10px] bg-[#17624F] px-5 text-sm font-semibold text-white disabled:opacity-60">
+            {busy ? "Saving..." : builderStep === "review" ? "Publish" : "Continue"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="space-y-5 bg-[var(--workspace)] p-4 pb-40">
+      <EditorToast toast={toast} onClose={() => setToast(null)} />
+      <ProgramBuilderStepper activeStep={builderStep} />
+
+      <section className="rounded-[22px] border border-[#DDE7EA] bg-white p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[#7B858C]">Program Builder</p>
+            <h1 className="mt-2 text-2xl font-semibold text-[#26323A]">{programBuilderSteps.find((step) => step.id === builderStep)?.label}</h1>
+          </div>
+          <ProgramStatusBadge status={builderStatus.publicationStatus} />
+        </div>
+
+        {builderStep === "basics" ? (
+          <div className="mt-5 grid gap-3">
+            <EditBox label="Internal name" required value={builderStatus.internalName} onChange={(value) => setBuilderStatus((current) => ({ ...current, internalName: value }))} />
+            <EditBox label="Public name" required value={title} onChange={setTitle} />
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("Program type", true)}</span>
+              <select value={builderStatus.programType} onChange={(event) => setBuilderStatus((current) => ({ ...current, programType: event.target.value as ProgramBuilderStatus["programType"] }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
+                <option value="recurring">Recurring program</option>
+                <option value="event">One-time event</option>
+              </select>
+            </label>
+            <EditBox label="Short summary / tagline" value={builderStatus.summary} onChange={(value) => setBuilderStatus((current) => ({ ...current, summary: value }))} />
+            <p className="text-xs leading-5 text-[#6B747B]">Internal name is only for staff. Public title is what parents see.</p>
+          </div>
+        ) : null}
+
+        {builderStep === "pricing" ? (
+          <div className="mt-5 grid gap-3 md:grid-cols-2">
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("How payments are handled", true)}</span>
+              <select value={builderStatus.paymentKind} onChange={(event) => { const value = event.target.value as ProgramBuilderStatus["paymentKind"]; setBuilderStatus((current) => ({ ...current, paymentKind: value })); setIsPaid(value === "tareeqah"); }} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
+                <option value="free">Free</option>
+                <option value="tareeqah">Paid through Tareeqah</option>
+                <option value="manual">Handled outside Tareeqah</option>
+              </select>
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Application mode</span>
+              <select value={builderStatus.applicationMode} onChange={(event) => setBuilderStatus((current) => ({ ...current, applicationMode: event.target.value as ProgramBuilderStatus["applicationMode"], acceptingApplications: event.target.value === "application_required" ? current.acceptingApplications : false }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
+                <option value="application_required">Application required</option>
+                <option value="open_enrollment">Open enrollment</option>
+                <option value="invite_only">Invite only</option>
+                <option value="hidden_private">Hidden/private</option>
+              </select>
+            </label>
+            {builderStatus.applicationMode === "application_required" ? (
+              <label className="flex items-center gap-2 text-sm font-semibold text-[#26323A]">
+                <input type="checkbox" checked={builderStatus.acceptingApplications} onChange={(event) => setBuilderStatus((current) => ({ ...current, acceptingApplications: event.target.checked }))} />
+                Accepting applications now
+              </label>
+            ) : null}
+            <label className="flex items-center gap-2 text-sm font-semibold text-[#26323A]">
+              <input type="checkbox" checked={builderStatus.waitlistEnabled} onChange={(event) => setBuilderStatus((current) => ({ ...current, waitlistEnabled: event.target.checked }))} />
+              Waitlist enabled
+            </label>
+            {builderStatus.paymentKind === "manual" ? (
+              <div className="md:col-span-2">
+                <EditBox label="Manual payment note" value={builderStatus.manualPaymentNote} onChange={(value) => setBuilderStatus((current) => ({ ...current, manualPaymentNote: value }))} multiline />
+                <p className="mt-1 text-xs leading-5 text-[#6B747B]">Use this only when payments are handled outside Tareeqah, such as office payment or e-transfer instructions.</p>
+              </div>
+            ) : null}
+            {builderStatus.paymentKind === "tareeqah" && builderStatus.programType !== "event" && offersMonthlyPayment ? (
+              <>
+                <label className="block">
+                  <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Billing starts</span>
+                  <select value={builderStatus.billingStartBehavior} onChange={(event) => setBuilderStatus((current) => ({ ...current, billingStartBehavior: event.target.value as ProgramBuilderStatus["billingStartBehavior"] }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
+                    <option value="on_payment">On first payment</option>
+                    <option value="program_start">On program start date</option>
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Billing ends</span>
+                  <select value={builderStatus.billingEndBehavior} onChange={(event) => setBuilderStatus((current) => ({ ...current, billingEndBehavior: event.target.value as ProgramBuilderStatus["billingEndBehavior"] }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
+                    <option value="fixed_months">After fixed number of months</option>
+                    {builderStatus.durationType !== "ongoing" ? <option value="program_end">On program end date</option> : null}
+                    <option value="manual_cancel">Continue until manually cancelled</option>
+                  </select>
+                </label>
+                {builderStatus.billingEndBehavior === "fixed_months" ? (
+                  <label className="block">
+                    <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Number of months in billing cycle</span>
+                    <input value={builderStatus.billingDurationMonths} onChange={(event) => setBuilderStatus((current) => ({ ...current, billingDurationMonths: event.target.value.replace(/\D/g, "") }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]" />
+                  </label>
+                ) : null}
+              </>
+            ) : null}
+          </div>
+        ) : null}
+
+        {builderStep === "schedule" ? (
+          <div className="mt-5 grid gap-3 md:grid-cols-2">
+            {builderStatus.programType === "recurring" ? (
+              <label className="block">
+                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("Duration Type", true)}</span>
+                <select value={builderStatus.durationType} onChange={(event) => { const value = event.target.value as ProgramBuilderStatus["durationType"]; setBuilderStatus((current) => ({ ...current, durationType: value, billingEndBehavior: value === "ongoing" && current.billingEndBehavior === "program_end" ? "manual_cancel" : current.billingEndBehavior, billingDurationMonths: value === "fixed_months" ? current.durationMonths || current.billingDurationMonths : current.billingDurationMonths })); }} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
+                  <option value="ongoing">Ongoing until manually ended</option>
+                  <option value="fixed_months">Fixed number of months</option>
+                </select>
+              </label>
+            ) : null}
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{builderStatus.programType === "event" ? "Event date" : "Start date"}</span>
+              {builderStatus.programType === "event" ? (
+                <input type="date" value={eventDate} onChange={(event) => setEventDate(event.target.value)} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]" />
+              ) : (
+                <>
+                  <input type={builderStatus.startNow ? "text" : "date"} disabled={builderStatus.startNow} value={builderStatus.startNow ? "Start Immediately" : builderStatus.startDate} onChange={(event) => setBuilderStatus((current) => ({ ...current, startDate: event.target.value }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3] disabled:bg-[#F2F6F7] disabled:text-[#52616A]" />
+                  <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs font-semibold text-[#52616A]">
+                    <input type="checkbox" checked={builderStatus.startNow} onChange={(event) => setBuilderStatus((current) => ({ ...current, startNow: event.target.checked }))} />
+                    Start now after publishing
+                  </label>
+                </>
+              )}
+            </label>
+            {builderStatus.programType === "recurring" && builderStatus.durationType === "fixed_months" ? (
+              <label className="block">
+                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Duration (number of months)</span>
+                <input value={builderStatus.durationMonths} onChange={(event) => { const value = event.target.value.replace(/\D/g, ""); setBuilderStatus((current) => ({ ...current, durationMonths: value, billingDurationMonths: current.billingEndBehavior === "fixed_months" ? value : current.billingDurationMonths })); }} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]" />
+                {estimateEndMonth(builderStatus.startDate, builderStatus.durationMonths) ? <span className="mt-1 block text-xs leading-5 text-[#6B747B]">Estimated end: {estimateEndMonth(builderStatus.startDate, builderStatus.durationMonths)}</span> : null}
+              </label>
+            ) : null}
+            {builderStatus.programType === "recurring" ? (
+              <label className="block">
+                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Schedule pattern</span>
+                <select value={builderStatus.schedulePattern} onChange={(event) => setBuilderStatus((current) => ({ ...current, schedulePattern: event.target.value as ProgramBuilderStatus["schedulePattern"] }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
+                  <option value="weekly">Weekly repeating</option>
+                  <option value="custom_dates">Custom session dates</option>
+                </select>
+              </label>
+            ) : null}
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Registration deadline</span>
+              <input type={noRegistrationDeadline ? "text" : "datetime-local"} disabled={noRegistrationDeadline} value={noRegistrationDeadline ? "None" : builderStatus.registrationDeadline} onChange={(event) => setBuilderStatus((current) => ({ ...current, registrationDeadline: event.target.value }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3] disabled:bg-[#F2F6F7] disabled:text-[#52616A]" />
+              <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs font-semibold text-[#52616A]">
+                <input type="checkbox" checked={noRegistrationDeadline} onChange={(event) => { setNoRegistrationDeadline(event.target.checked); if (event.target.checked) setBuilderStatus((current) => ({ ...current, registrationDeadline: "" })); }} />
+                No registration deadline
+              </label>
+            </label>
+            <EditBox label="Location" value={builderStatus.location} onChange={(value) => setBuilderStatus((current) => ({ ...current, location: value }))} />
+            <div className="space-y-2">
+              {roomVisible ? (
+                <EditBox label="Room" value={builderStatus.room} onChange={(value) => setBuilderStatus((current) => ({ ...current, room: value }))} />
+              ) : (
+                <button type="button" onClick={() => setRoomVisible(true)} className="mt-6 text-sm font-semibold text-[#2F8FB3]">Add room</button>
+              )}
+              {builderStatus.programType === "event" && !eventTimeVisible ? <button type="button" onClick={() => setEventTimeVisible(true)} className="block text-sm font-semibold text-[#2F8FB3]">Add start and end time</button> : null}
+            </div>
+          </div>
+        ) : null}
+      </section>
+
+      {builderStep === "basics" ? (
+        <section className="overflow-hidden rounded-[28px] bg-white shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
+          <div className="relative">
+            <ProgramHero program={{ id: "new", mosque_id: "", teacher_profile_id: null, director_profile_id: null, ...defaultProgramBuilderColumns(), title: title || "New Class", description: description || null, is_active: true, is_paid: builderStatus.paymentKind === "tareeqah", offers_monthly_payment: offersMonthlyPayment, offers_annual_payment: offersAnnualPayment, thumbnail_url: thumbnailUrl || null, price_monthly_cents: null, price_annual_cents: null, stripe_product_id: null, stripe_price_id: null, stripe_annual_price_id: null, audience_gender: audienceGender, age_range_text: allAges ? null : formatAgeRangeForSave(ageStart, ageEnd), schedule: null, schedule_timezone: null, schedule_notes: null, track_selection_mode: trackSelectionMode, track_selection_count: trackSelectionCount, tags: tagRows, created_at: "", updated_at: "" }} />
+            <input ref={thumbnailInputRef} type="file" accept="image/*" className="hidden" onChange={(event) => handleThumbnailFile(event.target.files?.[0] ?? null)} />
+            <div className="absolute right-3 top-3 flex gap-2">
+              <button type="button" onClick={() => thumbnailInputRef.current?.click()} className="flex h-10 w-10 items-center justify-center rounded-full bg-white text-[#26323A] shadow-lg" aria-label="Replace thumbnail">
+                <PhotoIcon />
+              </button>
+              {thumbnailUrl ? (
+                <button type="button" onClick={() => setThumbnailUrl("")} className="flex h-10 w-10 items-center justify-center rounded-full bg-white text-[#C83F31] shadow-lg" aria-label="Remove thumbnail">x</button>
+              ) : null}
+            </div>
+          </div>
+          <div className="space-y-3 p-4">
+            <EditBox label="Description" value={description} onChange={setDescription} multiline />
+          </div>
+        </section>
+      ) : null}
+
+      {builderStep === "basics" && creatorAccountType === "admin" ? (
+        <section className="space-y-2 bg-white px-4 py-3">
+          <label className="block text-xs font-semibold uppercase tracking-wide text-[#6B747B]" htmlFor="program-director">
+            Class Director
+          </label>
+          <select id="program-director" value={selectedDirectorId} onChange={(event) => setSelectedDirectorId(event.target.value)} className="h-12 w-full rounded-[10px] border border-[#B9C3C8] bg-white px-3 text-sm font-semibold text-[#26323A] outline-none focus:border-[#2F8FB3]">
+            <option value="">Choose director</option>
+            {directorOptions.map((teacher) => (
+              <option key={teacher.id} value={teacher.id}>
+                {teacher.full_name || teacher.email || "Unnamed teacher"}
+              </option>
+            ))}
+          </select>
+        </section>
+      ) : null}
+
+      <ProgramEditorFields
+        activeStep={builderStep}
+        programType={builderStatus.programType}
+        schedulePattern={builderStatus.schedulePattern}
+        previewProgram={buildProgramPreview({
+          id: "new",
+          title: title || "New Class",
+          description,
+          thumbnailUrl,
+          audienceGender,
+          ageRangeText: allAges ? null : formatAgeRangeForSave(ageStart, ageEnd),
+          isPaid: builderStatus.paymentKind === "tareeqah",
+          offersMonthlyPayment: builderStatus.programType === "event" ? false : offersMonthlyPayment,
+          offersAnnualPayment: builderStatus.programType === "event" ? true : offersAnnualPayment,
+          priceMonthlyCents: builderStatus.paymentKind === "tareeqah" && builderStatus.programType !== "event" ? Math.max(0, Math.round(Number(price || "0") * 100)) : null,
+          priceAnnualCents: builderStatus.paymentKind === "tareeqah" ? Math.max(0, Math.round(Number(annualPrice || "0") * 100)) : null,
+          schedule: trackRows[0]?.sessions as unknown as Json,
+          trackSelectionMode,
+          trackSelectionCount,
+        })}
+        eventDate={eventDate}
+        setEventDate={setEventDate}
+        eventTimeVisible={eventTimeVisible}
+        setEventTimeVisible={setEventTimeVisible}
+        learningVisible={learningVisible}
+        setLearningVisible={setLearningVisible}
+        learningTitle={learningTitle}
+        setLearningTitle={setLearningTitle}
+        learningIntro={learningIntro}
+        setLearningIntro={setLearningIntro}
+        learningDescriptionVisible={learningDescriptionVisible}
+        setLearningDescriptionVisible={setLearningDescriptionVisible}
+        topicsIntro={topicsIntro}
+        setTopicsIntro={setTopicsIntro}
+        requirementsText={requirementsText}
+        setRequirementsText={setRequirementsText}
+        whatToBringText={whatToBringText}
+        setWhatToBringText={setWhatToBringText}
+        policiesText={policiesText}
+        setPoliciesText={setPoliciesText}
+        outcomeRows={outcomeRows}
+        setOutcomeRows={setOutcomeRows}
+        faqRows={faqRows}
+        setFaqRows={setFaqRows}
+        mediaRows={mediaRows}
+        setMediaRows={setMediaRows}
+        onMediaFile={setCreateMediaFile}
+        addMedia={addMedia}
+        trackRows={trackRows}
+        setTrackRows={setTrackRows}
+        addTrack={addTrack}
+        trackSelectionMode={trackSelectionMode}
+        setTrackSelectionMode={setTrackSelectionMode}
+        trackSelectionCount={trackSelectionCount}
+        setTrackSelectionCount={setTrackSelectionCount}
+        allAges={allAges}
+        setAllAges={setAllAges}
+        ageStart={ageStart}
+        setAgeStart={setAgeStart}
+        ageEnd={ageEnd}
+        setAgeEnd={setAgeEnd}
+        audienceGender={audienceGender}
+        setAudienceGender={setAudienceGender}
+        paymentKind={builderStatus.paymentKind}
+        durationMonthsForPricing={pricingDurationMonths}
+        isPaid={builderStatus.paymentKind === "tareeqah"}
+        setIsPaid={setIsPaid}
+        offersMonthlyPayment={offersMonthlyPayment}
+        setOffersMonthlyPayment={setOffersMonthlyPayment}
+        offersAnnualPayment={offersAnnualPayment}
+        setOffersAnnualPayment={setOffersAnnualPayment}
+        price={price}
+        setPrice={setPrice}
+        annualPrice={annualPrice}
+        setAnnualPrice={setAnnualPrice}
+        instructorDisplayName={instructorDisplayName}
+        setInstructorDisplayName={setInstructorDisplayName}
+        instructorCredentials={instructorCredentials}
+        setInstructorCredentials={setInstructorCredentials}
+        instructorContactPhone={instructorContactPhone}
+        setInstructorContactPhone={setInstructorContactPhone}
+        contactEmail={builderStatus.contactEmail}
+        setContactEmail={(value) => setBuilderStatus((current) => ({ ...current, contactEmail: value }))}
+      />
+
+      <div className="sticky bottom-[92px] z-10 space-y-2 bg-white py-2 md:bottom-4">
+        {message ? <p className="text-sm font-medium text-[#52616A]">{message}</p> : null}
+        <div className="grid grid-cols-3 gap-2">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              const draftOverride = { publicationStatus: "draft", applicationStatus: "not_accepting", acceptingApplications: false } as const;
+              setBuilderStatus((current) => ({ ...current, ...draftOverride }));
+              void saveNewProgram(draftOverride);
+            }}
+            className="min-h-11 rounded-[10px] bg-[#2F8FB3] px-4 text-sm font-semibold text-white shadow-[0_8px_18px_rgba(47,143,179,0.20)] disabled:opacity-60"
+          >
+            Save Draft
+          </button>
+          <button
+            type="button"
+            disabled={busy || builderStep === "basics"}
+            onClick={() => {
+              const index = programBuilderSteps.findIndex((step) => step.id === builderStep);
+              setBuilderStep(programBuilderSteps[Math.max(0, index - 1)]?.id ?? "basics");
+            }}
+            className="min-h-11 rounded-[10px] border border-[#B9C3C8] bg-white px-4 text-sm font-semibold text-[#26323A] disabled:opacity-40"
+          >
+            Back
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              if (builderStep !== "review") {
+                const index = programBuilderSteps.findIndex((step) => step.id === builderStep);
+                setBuilderStep(programBuilderSteps[Math.min(programBuilderSteps.length - 1, index + 1)]?.id ?? "review");
+                return;
+              }
+              const publishOverride = { publicationStatus: "published" } as const;
+              setBuilderStatus((current) => ({ ...current, ...publishOverride, applicationStatus: current.acceptingApplications ? current.applicationStatus : "not_accepting" }));
+              void saveNewProgram(publishOverride);
+            }}
+            className="min-h-11 rounded-[10px] bg-[#17624F] px-5 text-sm font-semibold text-white disabled:opacity-60"
+          >
+            {busy ? "Saving..." : builderStep === "review" ? "Publish" : "Continue"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="space-y-5 bg-[var(--workspace)] p-4 pb-40">
+      <EditorToast toast={toast} onClose={() => setToast(null)} />
+      <ProgramBuilderStepper activeStep={builderStep} />
+      <section className="rounded-[22px] border border-[#DDE7EA] bg-white p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[#7B858C]">Program Builder</p>
+            <h1 className="mt-2 text-2xl font-semibold text-[#26323A]">{programBuilderSteps.find((step) => step.id === builderStep)?.label}</h1>
+          </div>
+          <ProgramStatusBadge status={builderStatus.publicationStatus} />
+        </div>
+        {builderStep === "basics" ? (
+          <div className="mt-5 grid gap-3 md:grid-cols-2">
+            <EditBox label="Internal name" required value={builderStatus.internalName} onChange={(value) => setBuilderStatus((current) => ({ ...current, internalName: value }))} />
+            <EditBox label="Public name" required value={title} onChange={setTitle} />
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("Program type", true)}</span>
+              <select value={builderStatus.programType} onChange={(event) => setBuilderStatus((current) => ({ ...current, programType: event.target.value as ProgramBuilderStatus["programType"] }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
+                <option value="recurring">Recurring program</option>
+                <option value="event">One-time event</option>
+              </select>
+            </label>
+            <div className="md:col-span-2">
+              <EditBox label="Short summary / tagline" value={builderStatus.summary} onChange={(value) => setBuilderStatus((current) => ({ ...current, summary: value }))} />
+              <p className="mt-2 text-xs leading-5 text-[#6B747B]">Internal name is only for staff. Public title is what parents see.</p>
+            </div>
+            <div className="md:col-span-2">
+              <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Tags</p>
+              <div className="flex gap-2">
+                <input
+                  value={tagDraft}
+                  onChange={(event) => setTagDraft(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      addTag();
+                    }
+                  }}
+                  className="h-10 min-w-0 flex-1 rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]"
+                  placeholder="Fiqh, Aqidah, Hifz, Seerah"
+                />
+                <button type="button" onClick={addTag} className="h-10 rounded-[8px] bg-[#E9F4F8] px-4 text-sm font-semibold text-[#2F6077]">Add</button>
+              </div>
+              {tagRows.length ? (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {tagRows.map((tag) => (
+                    <button key={tag} type="button" onClick={() => setTagRows((current) => current.filter((item) => item !== tag))} className="rounded-full bg-[#EFF5F2] px-3 py-1 text-xs font-semibold text-[#17624F]">
+                      {tag} x
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+        {builderStep === "pricing" ? (
+          <div className="mt-5 grid gap-3 md:grid-cols-2">
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("How payments are handled", true)}</span>
+              <select value={builderStatus.paymentKind} onChange={(event) => { const value = event.target.value as ProgramBuilderStatus["paymentKind"]; setBuilderStatus((current) => ({ ...current, paymentKind: value })); setIsPaid(value === "tareeqah"); }} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
+                <option value="free">Free</option>
+                <option value="tareeqah">Paid through Tareeqah</option>
+                <option value="manual">Handled outside Tareeqah</option>
+              </select>
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Application mode</span>
+              <select value={builderStatus.applicationMode} onChange={(event) => setBuilderStatus((current) => ({ ...current, applicationMode: event.target.value as ProgramBuilderStatus["applicationMode"], acceptingApplications: event.target.value === "application_required" ? current.acceptingApplications : false }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
+                <option value="application_required">Application required</option>
+                <option value="open_enrollment">Open enrollment</option>
+                <option value="invite_only">Invite only</option>
+                <option value="hidden_private">Hidden/private</option>
+              </select>
+            </label>
+            {builderStatus.applicationMode === "application_required" ? <label className="flex items-center gap-2 text-sm font-semibold text-[#26323A]">
+              <input type="checkbox" checked={builderStatus.acceptingApplications} onChange={(event) => setBuilderStatus((current) => ({ ...current, acceptingApplications: event.target.checked }))} />
+              Accepting applications now
+            </label> : null}
+            {builderStatus.applicationMode === "invite_only" ? (
+              <p className="rounded-[12px] bg-[#F2F7F8] px-3 py-2 text-xs font-semibold leading-5 text-[#52616A]">
+                Invite-only classes will use a class invite code after creation.
+              </p>
+            ) : null}
+            <label className="flex items-center gap-2 text-sm font-semibold text-[#26323A]">
+              <input type="checkbox" checked={builderStatus.waitlistEnabled} onChange={(event) => setBuilderStatus((current) => ({ ...current, waitlistEnabled: event.target.checked }))} />
+              Waitlist enabled
+            </label>
+            {builderStatus.paymentKind === "manual" ? <div className="md:col-span-2">
+              <EditBox label="Manual payment note" value={builderStatus.manualPaymentNote} onChange={(value) => setBuilderStatus((current) => ({ ...current, manualPaymentNote: value }))} multiline />
+              <p className="mt-1 text-xs leading-5 text-[#6B747B]">Use this only when payments are handled outside Tareeqah, such as office payment or e-transfer instructions.</p>
+            </div> : null}
+            {builderStatus.paymentKind === "tareeqah" && builderStatus.programType !== "event" && offersMonthlyPayment ? (
+              <>
+                <label className="block">
+                  <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Billing starts</span>
+                  <select value={builderStatus.billingStartBehavior} onChange={(event) => setBuilderStatus((current) => ({ ...current, billingStartBehavior: event.target.value as ProgramBuilderStatus["billingStartBehavior"] }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
+                    <option value="on_payment">On first payment</option>
+                    <option value="program_start">On program start date</option>
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Billing ends</span>
+                  <select value={builderStatus.billingEndBehavior} onChange={(event) => setBuilderStatus((current) => ({ ...current, billingEndBehavior: event.target.value as ProgramBuilderStatus["billingEndBehavior"] }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
+                    <option value="fixed_months">After fixed number of months</option>
+                    {builderStatus.durationType !== "ongoing" ? <option value="program_end">On program end date</option> : null}
+                    <option value="manual_cancel">Continue until manually cancelled</option>
+                  </select>
+                </label>
+                {builderStatus.billingEndBehavior === "fixed_months" ? (
+                  <label className="block">
+                    <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Number of months in billing cycle</span>
+                    <input value={builderStatus.billingDurationMonths} onChange={(event) => setBuilderStatus((current) => ({ ...current, billingDurationMonths: event.target.value.replace(/\D/g, "") }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]" />
+                  </label>
+                ) : null}
+              </>
+            ) : null}
+          </div>
+        ) : null}
+        {builderStep === "schedule" ? (
+          <div className="mt-5 grid gap-3 md:grid-cols-2">
+            {builderStatus.programType === "recurring" ? (
+              <label className="block">
+                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("Duration Type", true)}</span>
+                <select
+                  value={builderStatus.durationType}
+                  onChange={(event) => {
+                    const value = event.target.value as ProgramBuilderStatus["durationType"];
+                    setBuilderStatus((current) => ({
+                      ...current,
+                      durationType: value,
+                      billingEndBehavior: value === "ongoing" && current.billingEndBehavior === "program_end" ? "manual_cancel" : current.billingEndBehavior,
+                      billingDurationMonths: value === "fixed_months" ? current.durationMonths || current.billingDurationMonths : current.billingDurationMonths,
+                    }));
+                  }}
+                  className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]"
+                >
+                  <option value="ongoing">Ongoing until manually ended</option>
+                  <option value="fixed_months">Fixed number of months</option>
+                </select>
+              </label>
+            ) : null}
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{builderStatus.programType === "event" ? "Event date" : "Start date"}</span>
+              {builderStatus.programType === "event" ? (
+                <input type="date" value={eventDate} onChange={(event) => setEventDate(event.target.value)} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]" />
+              ) : (
+                <>
+                  <input type={builderStatus.startNow ? "text" : "date"} disabled={builderStatus.startNow} value={builderStatus.startNow ? "Start Immediately" : builderStatus.startDate} onChange={(event) => setBuilderStatus((current) => ({ ...current, startDate: event.target.value }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3] disabled:bg-[#F2F6F7] disabled:text-[#52616A]" />
+                  <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs font-semibold text-[#52616A]">
+                    <input type="checkbox" checked={builderStatus.startNow} onChange={(event) => setBuilderStatus((current) => ({ ...current, startNow: event.target.checked }))} />
+                    Start now after publishing
+                  </label>
+                </>
+              )}
+            </label>
+            {builderStatus.programType === "recurring" && builderStatus.durationType === "fixed_months" ? (
+              <label className="block">
+                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Duration (number of months)</span>
+                <input value={builderStatus.durationMonths} onChange={(event) => { const value = event.target.value.replace(/\D/g, ""); setBuilderStatus((current) => ({ ...current, durationMonths: value, billingDurationMonths: current.billingEndBehavior === "fixed_months" ? value : current.billingDurationMonths })); }} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]" />
+                {estimateEndMonth(builderStatus.startDate, builderStatus.durationMonths) ? <span className="mt-1 block text-xs leading-5 text-[#6B747B]">Estimated end: {estimateEndMonth(builderStatus.startDate, builderStatus.durationMonths)}</span> : null}
+              </label>
+            ) : null}
+            {builderStatus.programType === "recurring" ? (
+              <label className="block">
+                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Schedule pattern</span>
+                <select value={builderStatus.schedulePattern} onChange={(event) => setBuilderStatus((current) => ({ ...current, schedulePattern: event.target.value as ProgramBuilderStatus["schedulePattern"] }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
+                  <option value="weekly">Weekly repeating</option>
+                  <option value="custom_dates">Custom session dates</option>
+                </select>
+              </label>
+            ) : null}
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Registration deadline</span>
+              <input type={noRegistrationDeadline ? "text" : "datetime-local"} disabled={noRegistrationDeadline} value={noRegistrationDeadline ? "None" : builderStatus.registrationDeadline} onChange={(event) => setBuilderStatus((current) => ({ ...current, registrationDeadline: event.target.value }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3] disabled:bg-[#F2F6F7] disabled:text-[#52616A]" />
+              <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs font-semibold text-[#52616A]">
+                <input type="checkbox" checked={noRegistrationDeadline} onChange={(event) => { setNoRegistrationDeadline(event.target.checked); if (event.target.checked) setBuilderStatus((current) => ({ ...current, registrationDeadline: "" })); }} />
+                No registration deadline
+              </label>
+            </label>
+            <EditBox label="Location" value={builderStatus.location} onChange={(value) => setBuilderStatus((current) => ({ ...current, location: value }))} />
+            <div className="space-y-2">
+              {roomVisible ? (
+                <EditBox label="Room" value={builderStatus.room} onChange={(value) => setBuilderStatus((current) => ({ ...current, room: value }))} />
+              ) : (
+                <button type="button" onClick={() => setRoomVisible(true)} className="mt-6 text-sm font-semibold text-[#2F8FB3]">
+                  Add room
+                </button>
+              )}
+              {builderStatus.programType === "event" && !eventTimeVisible ? (
+                <button type="button" onClick={() => setEventTimeVisible(true)} className="block text-sm font-semibold text-[#2F8FB3]">
+                  Add start and end time
+                </button>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+      </section>
+      {builderStep === "basics" ? (
       <section className="overflow-hidden rounded-[28px] bg-white shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
         <div className="relative">
-          <ProgramHero program={{ id: "new", mosque_id: "", teacher_profile_id: null, director_profile_id: null, title: title || "New Class", description: description || null, is_active: true, is_paid: isPaid, offers_monthly_payment: offersMonthlyPayment, offers_annual_payment: offersAnnualPayment, thumbnail_url: thumbnailUrl || null, price_monthly_cents: null, price_annual_cents: null, stripe_product_id: null, stripe_price_id: null, stripe_annual_price_id: null, audience_gender: audienceGender, age_range_text: allAges ? null : formatAgeRangeForSave(ageStart, ageEnd), schedule: null, schedule_timezone: null, schedule_notes: null, track_selection_mode: trackSelectionMode, track_selection_count: trackSelectionCount, tags: null, created_at: "", updated_at: "" }} />
+          <ProgramHero program={{ id: "new", mosque_id: "", teacher_profile_id: null, director_profile_id: null, ...defaultProgramBuilderColumns(), title: title || "New Class", description: description || null, is_active: true, is_paid: builderStatus.paymentKind === "tareeqah", offers_monthly_payment: offersMonthlyPayment, offers_annual_payment: offersAnnualPayment, thumbnail_url: thumbnailUrl || null, price_monthly_cents: null, price_annual_cents: null, stripe_product_id: null, stripe_price_id: null, stripe_annual_price_id: null, audience_gender: audienceGender, age_range_text: allAges ? null : formatAgeRangeForSave(ageStart, ageEnd), schedule: null, schedule_timezone: null, schedule_notes: null, track_selection_mode: trackSelectionMode, track_selection_count: trackSelectionCount, tags: tagRows, created_at: "", updated_at: "" }} />
           <input ref={thumbnailInputRef} type="file" accept="image/*" className="hidden" onChange={(event) => handleThumbnailFile(event.target.files?.[0] ?? null)} />
           <button type="button" onClick={() => thumbnailInputRef.current?.click()} className="absolute right-3 top-3 flex h-10 w-10 items-center justify-center rounded-full bg-white text-[#26323A] shadow-lg" aria-label="Upload thumbnail">
             <PhotoIcon />
           </button>
         </div>
         <div className="space-y-3 p-4">
-          <EditBox label="Title" required value={title} onChange={setTitle} />
           <EditBox label="Description" value={description} onChange={setDescription} multiline />
         </div>
       </section>
+      ) : null}
 
-      {creatorAccountType === "admin" ? (
+      {builderStep === "basics" && creatorAccountType === "admin" ? (
         <section className="space-y-2 bg-white px-4 py-3">
           <label className="block text-xs font-semibold uppercase tracking-wide text-[#6B747B]" htmlFor="program-director">
             Class Director
@@ -4708,12 +5982,45 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
       ) : null}
 
       <ProgramEditorFields
+        activeStep={builderStep}
+        programType={builderStatus.programType}
+        schedulePattern={builderStatus.schedulePattern}
+        previewProgram={buildProgramPreview({
+          id: "new",
+          title: title || "New Class",
+          description,
+          thumbnailUrl,
+          audienceGender,
+          ageRangeText: allAges ? null : formatAgeRangeForSave(ageStart, ageEnd),
+          isPaid: builderStatus.paymentKind === "tareeqah",
+          offersMonthlyPayment: builderStatus.programType === "event" ? false : offersMonthlyPayment,
+          offersAnnualPayment: builderStatus.programType === "event" ? true : offersAnnualPayment,
+          priceMonthlyCents: builderStatus.paymentKind === "tareeqah" && builderStatus.programType !== "event" ? Math.max(0, Math.round(Number(price || "0") * 100)) : null,
+          priceAnnualCents: builderStatus.paymentKind === "tareeqah" ? Math.max(0, Math.round(Number(annualPrice || "0") * 100)) : null,
+          schedule: trackRows[0]?.sessions as unknown as Json,
+          trackSelectionMode,
+          trackSelectionCount,
+        })}
+        eventDate={eventDate}
+        setEventDate={setEventDate}
+        eventTimeVisible={eventTimeVisible}
+        setEventTimeVisible={setEventTimeVisible}
         learningVisible={learningVisible}
         setLearningVisible={setLearningVisible}
         learningTitle={learningTitle}
         setLearningTitle={setLearningTitle}
         learningIntro={learningIntro}
         setLearningIntro={setLearningIntro}
+        learningDescriptionVisible={learningDescriptionVisible}
+        setLearningDescriptionVisible={setLearningDescriptionVisible}
+        topicsIntro={topicsIntro}
+        setTopicsIntro={setTopicsIntro}
+        requirementsText={requirementsText}
+        setRequirementsText={setRequirementsText}
+        whatToBringText={whatToBringText}
+        setWhatToBringText={setWhatToBringText}
+        policiesText={policiesText}
+        setPoliciesText={setPoliciesText}
         outcomeRows={outcomeRows}
         setOutcomeRows={setOutcomeRows}
         faqRows={faqRows}
@@ -4737,7 +6044,9 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
         setAgeEnd={setAgeEnd}
         audienceGender={audienceGender}
         setAudienceGender={setAudienceGender}
-        isPaid={isPaid}
+        paymentKind={builderStatus.paymentKind}
+        durationMonthsForPricing={pricingDurationMonths}
+        isPaid={builderStatus.paymentKind === "tareeqah"}
         setIsPaid={setIsPaid}
         offersMonthlyPayment={offersMonthlyPayment}
         setOffersMonthlyPayment={setOffersMonthlyPayment}
@@ -4753,16 +6062,52 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
         setInstructorCredentials={setInstructorCredentials}
         instructorContactPhone={instructorContactPhone}
         setInstructorContactPhone={setInstructorContactPhone}
+        contactEmail={builderStatus.contactEmail}
+        setContactEmail={(value) => setBuilderStatus((current) => ({ ...current, contactEmail: value }))}
       />
 
       <div className="sticky bottom-[92px] z-10 space-y-2 bg-white py-2 md:bottom-4">
         {message ? <p className="text-sm font-medium text-[#52616A]">{message}</p> : null}
-        <div className="grid grid-cols-[0.9fr_1.1fr] gap-2">
-          <button type="button" disabled={busy} onClick={() => setPreviewOpen(true)} className="min-h-11 rounded-[10px] border border-[#B9C3C8] bg-white px-4 text-sm font-semibold text-[#26323A] disabled:opacity-60">
-            Preview page
+        <div className="grid grid-cols-3 gap-2">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              const draftOverride = { publicationStatus: "draft", applicationStatus: "not_accepting", acceptingApplications: false } as const;
+              setBuilderStatus((current) => ({ ...current, ...draftOverride }));
+              void saveNewProgram(draftOverride);
+            }}
+            className="min-h-11 rounded-[10px] bg-[#2F8FB3] px-4 text-sm font-semibold text-white shadow-[0_8px_18px_rgba(47,143,179,0.20)] disabled:opacity-60"
+          >
+            Save Draft
           </button>
-          <button type="button" disabled={busy} onClick={saveNewProgram} className="min-h-11 rounded-[10px] bg-[#17624F] px-5 text-sm font-semibold text-white disabled:opacity-60">
-            {busy ? "Creating..." : "Create class"}
+          <button
+            type="button"
+            disabled={busy || builderStep === "basics"}
+            onClick={() => {
+              const index = programBuilderSteps.findIndex((step) => step.id === builderStep);
+              setBuilderStep(programBuilderSteps[Math.max(0, index - 1)]?.id ?? "basics");
+            }}
+            className="min-h-11 rounded-[10px] border border-[#B9C3C8] bg-white px-4 text-sm font-semibold text-[#26323A] disabled:opacity-40"
+          >
+            Back
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              if (builderStep !== "review") {
+                const index = programBuilderSteps.findIndex((step) => step.id === builderStep);
+                setBuilderStep(programBuilderSteps[Math.min(programBuilderSteps.length - 1, index + 1)]?.id ?? "review");
+                return;
+              }
+              const publishOverride = { publicationStatus: "published" } as const;
+              setBuilderStatus((current) => ({ ...current, ...publishOverride, applicationStatus: current.acceptingApplications ? current.applicationStatus : "not_accepting" }));
+              void saveNewProgram(publishOverride);
+            }}
+            className="min-h-11 rounded-[10px] bg-[#17624F] px-5 text-sm font-semibold text-white disabled:opacity-60"
+          >
+            {busy ? "Saving..." : builderStep === "review" ? "Publish" : "Continue"}
           </button>
         </div>
       </div>
@@ -4771,11 +6116,13 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
 }
 
 export function TeacherProgramSettingsData({ slug, programId, returnHref }: { slug: string; programId: string; returnHref?: string }) {
+  const [builderStep, setBuilderStep] = useState<ProgramBuilderStep>("basics");
+  const [builderStatus, setBuilderStatus] = useState<ProgramBuilderStatus>(() => defaultBuilderStatus());
   const [program, setProgram] = useState<Program | null>(null);
   const [details, setDetails] = useState<ProgramDetails | null>(null);
   const [isDirector, setIsDirector] = useState(false);
   const [isAdminEditor, setIsAdminEditor] = useState(false);
-  const [directorOptions, setDirectorOptions] = useState<Array<Pick<Profile, "id" | "full_name" | "email">>>([]);
+  const [directorOptions, setDirectorOptions] = useState<DirectorOption[]>([]);
   const [selectedDirectorId, setSelectedDirectorId] = useState("");
   const [loading, setLoading] = useState(true);
   const [title, setTitle] = useState("");
@@ -4784,33 +6131,40 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
   const [allAges, setAllAges] = useState(true);
   const [ageStart, setAgeStart] = useState("");
   const [ageEnd, setAgeEnd] = useState("");
+  const [noRegistrationDeadline, setNoRegistrationDeadline] = useState(false);
+  const [roomVisible, setRoomVisible] = useState(false);
+  const [eventTimeVisible, setEventTimeVisible] = useState(false);
   const [audienceGender, setAudienceGender] = useState("");
   const [isPaid, setIsPaid] = useState(false);
   const [price, setPrice] = useState("");
   const [offersMonthlyPayment, setOffersMonthlyPayment] = useState(true);
   const [offersAnnualPayment, setOffersAnnualPayment] = useState(false);
   const [annualPrice, setAnnualPrice] = useState("");
+  const [eventDate, setEventDate] = useState("");
   const [learningVisible, setLearningVisible] = useState(true);
   const [learningTitle, setLearningTitle] = useState("What You Will Learn");
   const [learningIntro, setLearningIntro] = useState("");
+  const [learningDescriptionVisible, setLearningDescriptionVisible] = useState(false);
+  const [topicsIntro, setTopicsIntro] = useState("");
+  const [requirementsText, setRequirementsText] = useState("");
+  const [whatToBringText, setWhatToBringText] = useState("");
+  const [policiesText, setPoliciesText] = useState("");
   const [outcomeRows, setOutcomeRows] = useState<Array<{ id: string; text: string }>>([]);
   const [faqRows, setFaqRows] = useState<ProgramEditorFaqRow[]>(defaultProgramFaqRows);
-  const [mediaRows, setMediaRows] = useState<Array<{ id: string; url: string; title: string; mediaType: string }>>([]);
-  const [trackRows, setTrackRows] = useState<Array<{ id: string; name: string; sessions: ProgramScheduleRow[] }>>([]);
+  const [mediaRows, setMediaRows] = useState<ProgramEditorMediaRow[]>([]);
+  const [trackRows, setTrackRows] = useState<ProgramEditorTrackRow[]>([]);
   const [trackSelectionMode, setTrackSelectionMode] = useState<TrackSelectionMode>("exact");
   const [trackSelectionCount, setTrackSelectionCount] = useState(1);
   const [instructorDisplayName, setInstructorDisplayName] = useState("");
   const [instructorCredentials, setInstructorCredentials] = useState("");
   const [instructorContactPhone, setInstructorContactPhone] = useState("");
-  const [deleteText, setDeleteText] = useState("");
-  const [deleteOpen, setDeleteOpen] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [toast, setToast] = useState<EditorToastState | null>(null);
-  const [previewOpen, setPreviewOpen] = useState(false);
-  const [initialEditorSignature, setInitialEditorSignature] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const thumbnailInputRef = useRef<HTMLInputElement | null>(null);
+  const loadedDirectorRef = useRef<string | null>(null);
+  const pricingDurationMonths = builderStatus.durationType === "fixed_months" ? builderStatus.durationMonths : builderStatus.billingDurationMonths;
 
   useEffect(() => {
     const supabase = createSupabaseBrowserClient();
@@ -4826,7 +6180,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         return;
       }
 
-      const [{ data: programRow, error: programError }, { data: directorAllowed }, detailResult, outcomeResult, faqResult, mediaResult, trackResult] = await Promise.all([
+      const [{ data: programRow, error: programError }, { data: directorAllowed }, detailResult, outcomeResult, faqResult, mediaResult, trackResult, sessionResult] = await Promise.all([
         supabase.from("programs").select("*").eq("id", programId).eq("mosque_id", mosque.id).maybeSingle(),
         supabase.rpc("is_program_director", { check_program_id: programId }),
         supabase.from("program_details").select("*").eq("program_id", programId).maybeSingle(),
@@ -4834,6 +6188,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         supabase.from("program_faqs").select("*").eq("program_id", programId).order("sort_order", { ascending: true }),
         supabase.from("program_media").select("*").eq("program_id", programId).order("sort_order", { ascending: true }),
         supabase.from("program_tracks").select("*").eq("program_id", programId).order("sort_order", { ascending: true }),
+        supabase.from("program_sessions").select("*").eq("program_id", programId).order("session_date", { ascending: true }).order("start_time", { ascending: true }),
       ]);
 
       if (programError) {
@@ -4850,6 +6205,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
       if (programRow) {
         const directorProfileId = programRow.director_profile_id ?? programRow.teacher_profile_id;
         setSelectedDirectorId(directorProfileId ?? "");
+        loadedDirectorRef.current = directorProfileId ?? "";
         const session = await loadCachedSession();
         const viewerId = session?.user.id ?? null;
         if (viewerId) {
@@ -4877,7 +6233,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
             if (teacherIds.length) {
               const { data: teachers } = await supabase
                 .from("profiles")
-                .select("id, full_name, email")
+                .select("id, full_name, email, phone_number, teacher_credentials, teacher_whatsapp_number")
                 .in("id", teacherIds)
                 .eq("account_type", "teacher")
                 .order("full_name", { ascending: true });
@@ -4886,7 +6242,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
           }
         }
         const { data: directorProfile } = directorProfileId
-          ? await supabase.from("profiles").select("full_name, teacher_credentials, teacher_whatsapp_number").eq("id", directorProfileId).maybeSingle()
+          ? await supabase.from("profiles").select("full_name, email, phone_number, teacher_credentials, teacher_whatsapp_number").eq("id", directorProfileId).maybeSingle()
           : { data: null };
         const rows = parseProgramSchedule(programRow.schedule);
         const firstRow = rows[0];
@@ -4894,31 +6250,89 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         const nextLearningVisible = Boolean(detailResult.data || (outcomeResult.data ?? []).length);
         const nextLearningTitle = detailResult.data?.learning_title?.trim() || "What You Will Learn";
         const nextLearningIntro = detailResult.data?.learning_intro ?? "";
+        setLearningDescriptionVisible(Boolean(nextLearningIntro.trim()));
+        setTopicsIntro(detailResult.data?.topics_intro ?? "");
+        setRequirementsText(detailResult.data?.requirements_text ?? "");
+        setWhatToBringText(detailResult.data?.what_to_bring_text ?? "");
+        setPoliciesText(detailResult.data?.policies_text ?? "");
         const nextInstructorDisplayName = detailResult.data?.instructor_display_name ?? directorProfile?.full_name ?? "";
         const nextInstructorCredentials = detailResult.data?.instructor_credentials ?? "";
-        const nextInstructorContactPhone = detailResult.data?.instructor_contact_phone ?? directorProfile?.teacher_whatsapp_number ?? "";
+        const nextInstructorContactPhone = detailResult.data?.instructor_contact_phone ?? directorProfile?.phone_number ?? directorProfile?.teacher_whatsapp_number ?? "";
         const nextTrackSelectionMode = normalizeTrackSelectionMode(programRow.track_selection_mode);
         const nextTrackSelectionCount = programRow.track_selection_count ?? 1;
+        setNoRegistrationDeadline(!programRow.registration_deadline_at);
+        setRoomVisible(Boolean(programRow.room));
+        setEventTimeVisible(programRow.program_type === "event" && Boolean((sessionResult.data ?? [])[0]));
+        setEventDate((sessionResult.data ?? [])[0]?.session_date ?? programRow.start_date ?? "");
+        setBuilderStatus({
+          internalName: programRow.internal_name ?? "",
+          summary: programRow.summary ?? "",
+          category: programRow.category ?? "",
+          programType: programRow.program_type === "event" ? "event" : "recurring",
+          publicationStatus: ["draft", "published", "hidden", "archived"].includes(programRow.publication_status) ? programRow.publication_status as ProgramBuilderStatus["publicationStatus"] : "published",
+          applicationStatus: ["accepting", "not_accepting", "waitlist_only", "closed", "invite_only"].includes(programRow.application_status) ? programRow.application_status as ProgramBuilderStatus["applicationStatus"] : "accepting",
+          lifecycleStatus: ["upcoming", "active", "completed", "cancelled", "archived"].includes(programRow.lifecycle_status) ? programRow.lifecycle_status as ProgramBuilderStatus["lifecycleStatus"] : "upcoming",
+          applicationMode: ["application_required", "open_enrollment", "invite_only", "hidden_private"].includes(programRow.application_mode) ? programRow.application_mode as ProgramBuilderStatus["applicationMode"] : "application_required",
+          acceptingApplications: programRow.accepting_applications !== false,
+          waitlistEnabled: programRow.waitlist_enabled !== false,
+          capacityBehavior: ["manual_review", "close_when_full", "allow_waitlist"].includes(programRow.capacity_behavior) ? programRow.capacity_behavior as ProgramBuilderStatus["capacityBehavior"] : "manual_review",
+          defaultCapacity: programRow.default_capacity ? String(programRow.default_capacity) : "",
+          durationType: ["ongoing", "fixed_months"].includes(programRow.duration_type) ? programRow.duration_type as ProgramBuilderStatus["durationType"] : "ongoing",
+          startNow: programRow.start_now ?? false,
+          startDate: programRow.start_date ?? "",
+          endDate: programRow.end_date ?? "",
+          durationMonths: programRow.duration_months ? String(programRow.duration_months) : "10",
+          schedulePattern: ["weekly", "custom_dates"].includes(programRow.schedule_pattern) ? programRow.schedule_pattern as ProgramBuilderStatus["schedulePattern"] : "weekly",
+          registrationDeadline: programRow.registration_deadline_at ? programRow.registration_deadline_at.slice(0, 16) : "",
+          location: programRow.location ?? "",
+          room: programRow.room ?? "",
+          paymentKind: ["free", "tareeqah", "manual"].includes(programRow.payment_kind) ? programRow.payment_kind as ProgramBuilderStatus["paymentKind"] : (programRow.is_paid ? "tareeqah" : "free"),
+          billingStartBehavior: ["on_payment", "program_start"].includes(programRow.billing_start_behavior) ? programRow.billing_start_behavior as ProgramBuilderStatus["billingStartBehavior"] : "on_payment",
+          billingEndBehavior: ["manual_cancel", "program_end", "fixed_months"].includes(programRow.billing_end_behavior) ? programRow.billing_end_behavior as ProgramBuilderStatus["billingEndBehavior"] : "fixed_months",
+          billingDurationMonths: programRow.billing_duration_months ? String(programRow.billing_duration_months) : "",
+          allowCustomPrices: programRow.allow_custom_prices !== false,
+          allowWaivedPayments: programRow.allow_waived_payments !== false,
+          manualPaymentNote: programRow.manual_payment_note ?? "",
+          financialAssistanceNote: programRow.financial_assistance_note ?? defaultBuilderStatus().financialAssistanceNote,
+          receiptNote: programRow.receipt_note ?? defaultBuilderStatus().receiptNote,
+          contactName: programRow.contact_name ?? "",
+          contactEmail: programRow.contact_email ?? directorProfile?.email ?? "",
+          contactPhone: programRow.contact_phone ?? "",
+        });
         const nextOutcomeRows = (outcomeResult.data ?? []).map((row) => ({ id: row.id, text: row.text }));
         const nextFaqRows = (faqResult.data ?? []).length
           ? (faqResult.data ?? []).map((row) => ({ id: row.id, question: row.question, answer: row.answer }))
           : defaultProgramFaqRows;
         const nextMediaRows = (mediaResult.data ?? []).map((row) => ({ id: row.id, url: row.url, title: row.title ?? "", mediaType: row.media_type }));
-        const nextTrackRows =
-          (trackResult.data ?? []).length
+        const storedSessions: ProgramScheduleRow[] = (sessionResult.data ?? []).map((session) => ({
+          day: "Monday" as const,
+          date: session.session_date,
+          start: String(session.start_time).slice(0, 5),
+          end: String(session.end_time ?? session.start_time).slice(0, 5),
+        }));
+        const defaultSession: ProgramScheduleRow = firstRow ?? { day: "Monday", start: "18:00", end: "20:00" };
+        const nextTrackRows: ProgramEditorTrackRow[] =
+          programRow.program_type === "event"
+            ? [{ id: "event", name: "Event", sessions: [storedSessions[0] ?? defaultSession] }]
+            : programRow.schedule_pattern === "custom_dates"
+              ? [{ id: "sessions", name: "Sessions", sessions: storedSessions.length ? storedSessions : [{ ...defaultSession, date: "" }] }]
+              : (trackResult.data ?? []).length
             ? (trackResult.data ?? []).map((track) => {
                 const trackSchedule = parseProgramSchedule(track.schedule);
                 return {
                   id: track.id,
                   name: track.name,
-                  sessions: trackSchedule.length ? trackSchedule : [firstRow ?? { day: "Monday", start: "18:00", end: "20:00" }],
+                  sessions: trackSchedule.length ? trackSchedule : [defaultSession],
+                  location: track.location ?? "",
+                  room: track.room ?? "",
+                  capacity: track.capacity ? String(track.capacity) : "",
                 };
               })
             : [
                 {
                   id: "default",
                   name: "Main Track",
-                  sessions: [firstRow ?? { day: "Monday", start: "18:00", end: "20:00" }],
+                  sessions: [defaultSession],
                 },
               ];
         setTitle(programRow.title);
@@ -4945,39 +6359,27 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         setFaqRows(nextFaqRows);
         setMediaRows(nextMediaRows);
         setTrackRows(nextTrackRows);
-        setInitialEditorSignature(serializeProgramEditorState({
-          title: programRow.title,
-          description: programRow.description ?? "",
-          thumbnailUrl: programRow.thumbnail_url ?? "",
-          allAges: parsedAge.allAges,
-          ageStart: parsedAge.start,
-          ageEnd: parsedAge.end,
-          audienceGender: normalizeAudienceGender(programRow.audience_gender),
-          isPaid: Boolean(programRow.is_paid),
-          offersMonthlyPayment: programRow.offers_monthly_payment !== false,
-          offersAnnualPayment: Boolean(programRow.offers_annual_payment),
-          price: programRow.price_monthly_cents ? String(programRow.price_monthly_cents / 100) : "",
-          annualPrice: programRow.price_annual_cents ? String(programRow.price_annual_cents / 100) : "",
-          learningVisible: nextLearningVisible,
-          learningTitle: nextLearningTitle,
-          learningIntro: nextLearningIntro,
-          outcomeRows: nextOutcomeRows,
-          faqRows: nextFaqRows,
-          mediaRows: nextMediaRows,
-          trackRows: nextTrackRows,
-          trackSelectionMode: nextTrackSelectionMode,
-          trackSelectionCount: nextTrackSelectionCount,
-          selectedDirectorId: directorProfileId ?? "",
-          instructorDisplayName: nextInstructorDisplayName,
-          instructorCredentials: nextInstructorCredentials,
-          instructorContactPhone: nextInstructorContactPhone,
-        }));
       }
       setLoading(false);
     }
 
     void load();
   }, [programId, slug]);
+
+  useEffect(() => {
+    if (!isAdminEditor || !selectedDirectorId || loading || loadedDirectorRef.current === selectedDirectorId) {
+      return;
+    }
+    const director = directorOptions.find((teacher) => teacher.id === selectedDirectorId);
+    if (!director) {
+      return;
+    }
+    setInstructorDisplayName(director.full_name ?? "");
+    setInstructorCredentials(director.teacher_credentials ?? "");
+    setInstructorContactPhone(director.phone_number ?? director.teacher_whatsapp_number ?? "");
+    setBuilderStatus((current) => ({ ...current, contactEmail: director.email ?? "" }));
+    loadedDirectorRef.current = selectedDirectorId;
+  }, [directorOptions, isAdminEditor, loading, selectedDirectorId]);
 
   function handleThumbnailFile(file: File | null) {
     if (!file) {
@@ -4997,7 +6399,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
     setLearningVisible(true);
     setLearningTitle("What You Will Learn");
     setLearningIntro("Describe what students will gain from this program.");
-    setOutcomeRows([{ id: crypto.randomUUID(), text: "Add a learning outcome" }]);
+    setOutcomeRows([{ id: crypto.randomUUID(), text: "learning outcome #1" }]);
   }
 
   function addTrack() {
@@ -5045,15 +6447,30 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
     setMessage("Photo uploaded. Save changes to publish it.");
   }
 
-  async function saveProgram() {
+  async function saveProgram(statusOverride?: Partial<ProgramBuilderStatus>) {
     if (!program) {
       return;
     }
 
+    const effectiveBuilderStatus = { ...builderStatus, ...statusOverride };
+    const savedOffersMonthlyPayment = effectiveBuilderStatus.programType === "event" ? false : offersMonthlyPayment;
+    const savedOffersAnnualPayment = effectiveBuilderStatus.programType === "event" ? true : offersAnnualPayment;
+    const savedTrackSelectionCount = Math.min(Math.max(1, trackSelectionCount), Math.max(1, trackRows.length));
+
     setMessage(null);
     setToast(null);
-    if (!title.trim()) {
-      setToast({ tone: "error", message: "Class title is required." });
+    if (!title.trim() && !effectiveBuilderStatus.internalName.trim()) {
+      setToast({ tone: "error", message: "Add an internal name or public title before saving." });
+      return;
+    }
+    if (effectiveBuilderStatus.publicationStatus !== "draft" && !title.trim()) {
+      setToast({ tone: "error", message: "Public title is required before publishing." });
+      setBuilderStep("basics");
+      return;
+    }
+    if (effectiveBuilderStatus.publicationStatus !== "draft" && !description.trim() && !effectiveBuilderStatus.summary.trim()) {
+      setToast({ tone: "error", message: "Add a summary or description before publishing." });
+      setBuilderStep("basics");
       return;
     }
 
@@ -5072,15 +6489,40 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
       return;
     }
 
-    if (trackRows.some((track) => !track.name.trim() || track.sessions.length === 0 || track.sessions.some((session) => session.end <= session.start))) {
+    if (effectiveBuilderStatus.publicationStatus !== "draft" && effectiveBuilderStatus.programType === "event" && !eventDate) {
+      setToast({ tone: "error", message: "Choose an event date before publishing." });
+      setBuilderStep("schedule");
+      return;
+    }
+    if (effectiveBuilderStatus.publicationStatus !== "draft" && effectiveBuilderStatus.schedulePattern === "custom_dates" && effectiveBuilderStatus.programType !== "event" && trackRows.every((track) => track.sessions.every((session) => !session.date))) {
+      setToast({ tone: "error", message: "Add at least one session date before publishing." });
+      setBuilderStep("schedule");
+      return;
+    }
+    if (effectiveBuilderStatus.publicationStatus !== "draft" && trackRows.some((track) => !track.name.trim() || track.sessions.length === 0 || track.sessions.some((session) => session.end <= session.start))) {
       setToast({ tone: "error", message: "Each track needs a name and an end time after the start time." });
+      setBuilderStep("schedule");
+      return;
+    }
+    if (effectiveBuilderStatus.publicationStatus !== "draft" && effectiveBuilderStatus.paymentKind === "tareeqah" && !savedOffersMonthlyPayment && !savedOffersAnnualPayment) {
+      setToast({ tone: "error", message: "Choose at least one payment option before publishing." });
+      setBuilderStep("pricing");
+      return;
+    }
+    if (effectiveBuilderStatus.publicationStatus !== "draft" && effectiveBuilderStatus.paymentKind === "tareeqah" && savedOffersMonthlyPayment && Number(price || "0") <= 0) {
+      setToast({ tone: "error", message: "Add a valid monthly price before publishing." });
+      setBuilderStep("pricing");
+      return;
+    }
+    if (effectiveBuilderStatus.publicationStatus !== "draft" && effectiveBuilderStatus.paymentKind === "tareeqah" && savedOffersAnnualPayment && Number(annualPrice || "0") <= 0) {
+      setToast({ tone: "error", message: "Add a valid one-time annual price before publishing." });
+      setBuilderStep("pricing");
       return;
     }
     if (isAdminEditor && !selectedDirectorId) {
       setToast({ tone: "error", message: "Choose a director for this class." });
       return;
     }
-    const savedTrackSelectionCount = Math.min(Math.max(1, trackSelectionCount), Math.max(1, trackRows.length));
     if (savedTrackSelectionCount < 1 || savedTrackSelectionCount > trackRows.length) {
       setToast({ tone: "error", message: "Track selection amount must fit the number of available tracks." });
       return;
@@ -5103,16 +6545,49 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         Authorization: `Bearer ${accessToken}`,
       },
       body: JSON.stringify({
+        internalName: effectiveBuilderStatus.internalName.trim() || null,
         title: title.trim(),
+        summary: effectiveBuilderStatus.summary.trim() || null,
         description: description.trim() || null,
+        category: effectiveBuilderStatus.category.trim() || null,
+        programType: effectiveBuilderStatus.programType,
+        publicationStatus: effectiveBuilderStatus.publicationStatus,
+        applicationStatus: effectiveBuilderStatus.acceptingApplications ? effectiveBuilderStatus.applicationStatus : "not_accepting",
+        lifecycleStatus: effectiveBuilderStatus.lifecycleStatus,
+        applicationMode: effectiveBuilderStatus.applicationMode,
+        acceptingApplications: effectiveBuilderStatus.acceptingApplications,
+        waitlistEnabled: effectiveBuilderStatus.waitlistEnabled,
+        capacityBehavior: effectiveBuilderStatus.capacityBehavior,
+        defaultCapacity: null,
+        durationType: effectiveBuilderStatus.programType === "event" ? "ongoing" : effectiveBuilderStatus.durationType,
+        startNow: effectiveBuilderStatus.programType === "recurring" && effectiveBuilderStatus.startNow,
+        startDate: effectiveBuilderStatus.programType === "event" ? eventDate || null : effectiveBuilderStatus.startNow ? null : effectiveBuilderStatus.startDate || null,
+        endDate: null,
+        durationMonths: effectiveBuilderStatus.programType === "recurring" && effectiveBuilderStatus.durationType === "fixed_months" && effectiveBuilderStatus.durationMonths ? Number(effectiveBuilderStatus.durationMonths) : null,
+        schedulePattern: effectiveBuilderStatus.programType === "event" ? "custom_dates" : effectiveBuilderStatus.schedulePattern,
+        registrationDeadlineAt: noRegistrationDeadline ? null : effectiveBuilderStatus.registrationDeadline || null,
+        location: effectiveBuilderStatus.location.trim() || null,
+        room: effectiveBuilderStatus.room.trim() || null,
+        paymentKind: effectiveBuilderStatus.paymentKind,
+        billingStartBehavior: effectiveBuilderStatus.billingStartBehavior,
+        billingEndBehavior: effectiveBuilderStatus.billingEndBehavior,
+        billingDurationMonths: effectiveBuilderStatus.billingDurationMonths ? Number(effectiveBuilderStatus.billingDurationMonths) : null,
+        allowCustomPrices: true,
+        allowWaivedPayments: true,
+        manualPaymentNote: effectiveBuilderStatus.manualPaymentNote.trim() || null,
+        financialAssistanceNote: effectiveBuilderStatus.financialAssistanceNote.trim() || null,
+        receiptNote: effectiveBuilderStatus.receiptNote.trim() || null,
+        contactName: effectiveBuilderStatus.contactName.trim() || null,
+        contactEmail: effectiveBuilderStatus.contactEmail.trim() || null,
+        contactPhone: effectiveBuilderStatus.contactPhone.trim() || null,
         thumbnailUrl: thumbnailUrl.trim() || null,
         audienceGender: audienceGender || null,
         ageRangeText: nextAgeRangeText,
-        isPaid,
-        offersMonthlyPayment,
-        offersAnnualPayment,
-        priceMonthlyCents: isPaid ? Math.max(0, Math.round(Number(price || "0") * 100)) : null,
-        priceAnnualCents: isPaid ? Math.max(0, Math.round(Number(annualPrice || "0") * 100)) : null,
+        isPaid: effectiveBuilderStatus.paymentKind === "tareeqah",
+        offersMonthlyPayment: savedOffersMonthlyPayment,
+        offersAnnualPayment: savedOffersAnnualPayment,
+        priceMonthlyCents: effectiveBuilderStatus.paymentKind === "tareeqah" && savedOffersMonthlyPayment ? Math.max(0, Math.round(Number(price || "0") * 100)) : null,
+        priceAnnualCents: effectiveBuilderStatus.paymentKind === "tareeqah" && savedOffersAnnualPayment ? Math.max(0, Math.round(Number(annualPrice || "0") * 100)) : null,
         schedule,
         scheduleTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         scheduleNotes: null,
@@ -5134,6 +6609,10 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
       program_id: program.id,
       learning_title: learningVisible ? learningTitle.trim() : "What You Will Learn",
       learning_intro: learningVisible ? learningIntro.trim() || null : null,
+      topics_intro: topicsIntro.trim() || null,
+      requirements_text: requirementsText.trim() || null,
+      what_to_bring_text: whatToBringText.trim() || null,
+      policies_text: policiesText.trim() || null,
       instructor_display_name: instructorDisplayName.trim() || null,
       instructor_credentials: instructorCredentials.trim() || null,
       instructor_contact_phone: instructorContactPhone.trim() || null,
@@ -5200,22 +6679,60 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
       }
     }
 
+    await supabase.from("program_sessions").delete().eq("program_id", program.id);
     await supabase.from("program_tracks").delete().eq("program_id", program.id);
     if (trackRows.length) {
-      const { error: tracksError } = await supabase.from("program_tracks").insert(
+      const { data: insertedTracks, error: tracksError } = await supabase.from("program_tracks").insert(
         trackRows.map((track, index) => ({
           program_id: program.id,
           sort_order: index + 1,
           name: track.name.trim(),
           description: null,
           schedule: track.sessions as unknown as Json,
+          location: track.location?.trim() || effectiveBuilderStatus.location.trim() || null,
+          room: track.room?.trim() || effectiveBuilderStatus.room.trim() || null,
+          capacity: track.capacity ? Number(track.capacity) : null,
+          pricing_override_enabled: false,
+          price_monthly_cents: null,
+          price_annual_cents: null,
           is_active: true,
         })),
-      );
+      ).select("id, sort_order");
       if (tracksError) {
         setToast({ tone: "error", message: tracksError.message });
         setBusy(false);
         return;
+      }
+      if ((effectiveBuilderStatus.programType === "event" && eventDate) || effectiveBuilderStatus.schedulePattern === "custom_dates") {
+        const sessionRows = trackRows.flatMap((track, trackIndex) => {
+          const insertedTrack = (insertedTracks ?? []).find((row) => row.sort_order === trackIndex + 1);
+          const sessions = effectiveBuilderStatus.programType === "event" ? track.sessions.slice(0, 1) : track.sessions;
+          return sessions.flatMap((session) => {
+            const sessionDate = effectiveBuilderStatus.programType === "event" ? eventDate : session.date;
+            if (!sessionDate) {
+              return [];
+            }
+            return [{
+              program_id: program.id,
+              program_track_id: insertedTrack?.id ?? null,
+              session_date: sessionDate,
+              start_time: session.start,
+              end_time: session.end,
+              title: track.name.trim() || title.trim(),
+              location: track.location?.trim() || effectiveBuilderStatus.location.trim() || null,
+              room: track.room?.trim() || effectiveBuilderStatus.room.trim() || null,
+              capacity: track.capacity ? Number(track.capacity) : null,
+            }];
+          });
+        });
+        if (sessionRows.length) {
+          const { error: sessionsError } = await supabase.from("program_sessions").insert(sessionRows);
+          if (sessionsError) {
+            setToast({ tone: "error", message: sessionsError.message });
+            setBusy(false);
+            return;
+          }
+        }
       }
     }
 
@@ -5224,39 +6741,6 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
     mosqueProgramsCache.delete(slug);
     window.dispatchEvent(new Event("tareeqah:programs-changed"));
     queueEditorToast({ tone: "success", message: "Changes saved successfully." });
-    window.location.href = returnHref ?? `/m/${slug}/teacher/classes`;
-  }
-
-  async function deleteProgram() {
-    if (!program || deleteText !== program.title) {
-      setMessage(`Type "${program?.title ?? "the class title"}" exactly to delete this class.`);
-      return;
-    }
-
-    setBusy(true);
-    setMessage(null);
-    const accessToken = await getCurrentAccessToken();
-    if (!accessToken) {
-      setMessage("Log in required.");
-      setBusy(false);
-      return;
-    }
-
-    const response = await fetch(`/api/programs/${program.id}`, {
-      method: "DELETE",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-      },
-    });
-
-    const result = (await response.json().catch(() => ({}))) as { error?: string };
-    setBusy(false);
-    if (!response.ok) {
-      setMessage(result.error ?? "Could not delete class.");
-      return;
-    }
-
-    mosqueProgramsCache.clear();
     window.location.href = returnHref ?? `/m/${slug}/teacher/classes`;
   }
 
@@ -5276,367 +6760,248 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
     return <EmptyState title="Director access required" text="Only the program director can edit this class." />;
   }
 
-  const currentEditorSignature = serializeProgramEditorState({
-    title,
-    description,
-    thumbnailUrl,
-    allAges,
-    ageStart,
-    ageEnd,
-    audienceGender,
-    isPaid,
-    offersMonthlyPayment,
-    offersAnnualPayment,
-    price,
-    annualPrice,
-    learningVisible,
-    learningTitle,
-    learningIntro,
-    outcomeRows,
-    faqRows,
-    mediaRows,
-    trackRows,
-    trackSelectionMode,
-    trackSelectionCount,
-    selectedDirectorId: isAdminEditor ? selectedDirectorId : "",
-    instructorDisplayName,
-    instructorCredentials,
-    instructorContactPhone,
-  });
-  const hasUnsavedChanges = initialEditorSignature !== null && currentEditorSignature !== initialEditorSignature;
+  const editWizardContent = (
+    <>
+      <ProgramBuilderStepper activeStep={builderStep} />
+      <section className="rounded-[22px] border border-[#DDE7EA] bg-white p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[#7B858C]">Program Builder</p>
+            <h1 className="mt-2 text-2xl font-semibold text-[#26323A]">{programBuilderSteps.find((step) => step.id === builderStep)?.label}</h1>
+          </div>
+          <ProgramStatusBadge status={builderStatus.publicationStatus} />
+        </div>
 
-  if (previewOpen) {
-    return (
-      <ProgramEditorPreview
-        program={buildProgramPreview({
+        {builderStep === "basics" ? (
+          <div className="mt-5 grid gap-3">
+            <EditBox label="Internal name" required value={builderStatus.internalName} onChange={(value) => setBuilderStatus((current) => ({ ...current, internalName: value }))} />
+            <EditBox label="Public name" required value={title} onChange={setTitle} />
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("Program type", true)}</span>
+              <select value={builderStatus.programType} onChange={(event) => setBuilderStatus((current) => ({ ...current, programType: event.target.value as ProgramBuilderStatus["programType"] }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
+                <option value="recurring">Recurring program</option>
+                <option value="event">One-time event</option>
+              </select>
+            </label>
+            <EditBox label="Short summary / tagline" value={builderStatus.summary} onChange={(value) => setBuilderStatus((current) => ({ ...current, summary: value }))} />
+          </div>
+        ) : null}
+
+        {builderStep === "schedule" ? (
+          <div className="mt-5 grid gap-3 md:grid-cols-2">
+            {builderStatus.programType === "recurring" ? (
+              <label className="block">
+                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Duration Type</span>
+                <select value={builderStatus.durationType} onChange={(event) => { const value = event.target.value as ProgramBuilderStatus["durationType"]; setBuilderStatus((current) => ({ ...current, durationType: value, billingEndBehavior: value === "ongoing" && current.billingEndBehavior === "program_end" ? "manual_cancel" : current.billingEndBehavior })); }} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
+                  <option value="ongoing">Ongoing until manually ended</option>
+                  <option value="fixed_months">Fixed number of months</option>
+                </select>
+              </label>
+            ) : null}
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{builderStatus.programType === "event" ? "Event date" : "Start date"}</span>
+              {builderStatus.programType === "event" ? (
+                <input type="date" value={eventDate} onChange={(event) => setEventDate(event.target.value)} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]" />
+              ) : (
+                <input type={builderStatus.startNow ? "text" : "date"} disabled={builderStatus.startNow} value={builderStatus.startNow ? "Start Immediately" : builderStatus.startDate} onChange={(event) => setBuilderStatus((current) => ({ ...current, startDate: event.target.value }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3] disabled:bg-[#F2F6F7]" />
+              )}
+            </label>
+            <EditBox label="Location" value={builderStatus.location} onChange={(value) => setBuilderStatus((current) => ({ ...current, location: value }))} />
+          </div>
+        ) : null}
+
+        {builderStep === "pricing" ? (
+          <div className="mt-5 grid gap-3 md:grid-cols-2">
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">How payments are handled</span>
+              <select value={builderStatus.paymentKind} onChange={(event) => { const value = event.target.value as ProgramBuilderStatus["paymentKind"]; setBuilderStatus((current) => ({ ...current, paymentKind: value })); setIsPaid(value === "tareeqah"); }} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
+                <option value="free">Free</option>
+                <option value="tareeqah">Paid through Tareeqah</option>
+                <option value="manual">Handled outside Tareeqah</option>
+              </select>
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Application mode</span>
+              <select value={builderStatus.applicationMode} onChange={(event) => setBuilderStatus((current) => ({ ...current, applicationMode: event.target.value as ProgramBuilderStatus["applicationMode"] }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
+                <option value="application_required">Application required</option>
+                <option value="open_enrollment">Open enrollment</option>
+                <option value="invite_only">Invite only</option>
+                <option value="hidden_private">Hidden/private</option>
+              </select>
+            </label>
+          </div>
+        ) : null}
+      </section>
+    </>
+  );
+
+  return (
+    <div className="space-y-5 bg-[var(--workspace)] p-4 pb-40">
+      <EditorToast toast={toast} onClose={() => setToast(null)} />
+      {editWizardContent}
+
+      {builderStep === "basics" ? (
+        <section className="overflow-hidden rounded-[28px] bg-white shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
+          <div className="relative">
+            <ProgramHero program={{ ...program, title, thumbnail_url: thumbnailUrl || null }} />
+            <input ref={thumbnailInputRef} type="file" accept="image/*" className="hidden" onChange={(event) => handleThumbnailFile(event.target.files?.[0] ?? null)} />
+            <button type="button" onClick={() => thumbnailInputRef.current?.click()} className="absolute right-3 top-3 flex h-10 w-10 items-center justify-center rounded-full bg-white text-[#26323A] shadow-lg" aria-label="Replace thumbnail">
+              <PhotoIcon />
+            </button>
+          </div>
+          <div className="space-y-3 p-4">
+            <EditBox label="Description" value={description} onChange={setDescription} multiline />
+          </div>
+        </section>
+      ) : null}
+
+      {builderStep === "basics" && isAdminEditor ? (
+        <section className="space-y-2 bg-white px-4 py-3">
+          <label className="block text-xs font-semibold uppercase tracking-wide text-[#6B747B]" htmlFor="edit-program-director">
+            Class Director
+          </label>
+          <select id="edit-program-director" value={selectedDirectorId} onChange={(event) => setSelectedDirectorId(event.target.value)} className="h-12 w-full rounded-[10px] border border-[#B9C3C8] bg-white px-3 text-sm font-semibold text-[#26323A] outline-none focus:border-[#2F8FB3]">
+            <option value="">Choose director</option>
+            {directorOptions.map((teacher) => (
+              <option key={teacher.id} value={teacher.id}>
+                {teacher.full_name || teacher.email || "Unnamed teacher"}
+              </option>
+            ))}
+          </select>
+        </section>
+      ) : null}
+
+      <ProgramEditorFields
+        activeStep={builderStep}
+        programType={builderStatus.programType}
+        schedulePattern={builderStatus.schedulePattern}
+        previewProgram={buildProgramPreview({
           id: program.id,
           title: title || program.title,
           description,
           thumbnailUrl,
           audienceGender,
           ageRangeText: allAges ? null : formatAgeRangeForSave(ageStart, ageEnd),
-          isPaid,
-          offersMonthlyPayment,
-          offersAnnualPayment,
-          priceMonthlyCents: isPaid ? Math.max(0, Math.round(Number(price || "0") * 100)) : null,
-          priceAnnualCents: isPaid ? Math.max(0, Math.round(Number(annualPrice || "0") * 100)) : null,
+          isPaid: builderStatus.paymentKind === "tareeqah",
+          offersMonthlyPayment: builderStatus.programType === "event" ? false : offersMonthlyPayment,
+          offersAnnualPayment: builderStatus.programType === "event" ? true : offersAnnualPayment,
+          priceMonthlyCents: builderStatus.paymentKind === "tareeqah" && builderStatus.programType !== "event" ? Math.max(0, Math.round(Number(price || "0") * 100)) : null,
+          priceAnnualCents: builderStatus.paymentKind === "tareeqah" ? Math.max(0, Math.round(Number(annualPrice || "0") * 100)) : null,
           schedule: trackRows[0]?.sessions as unknown as Json,
           trackSelectionMode,
           trackSelectionCount,
           base: program,
         })}
-        learningTitle={learningVisible ? learningTitle : ""}
-        learningIntro={learningVisible ? learningIntro : ""}
-        outcomes={learningVisible ? outcomeRows.map((row) => row.text).filter((text) => text.trim()) : []}
+        eventDate={eventDate}
+        setEventDate={setEventDate}
+        eventTimeVisible={eventTimeVisible}
+        setEventTimeVisible={setEventTimeVisible}
+        learningVisible={learningVisible}
+        setLearningVisible={setLearningVisible}
+        learningTitle={learningTitle}
+        setLearningTitle={setLearningTitle}
+        learningIntro={learningIntro}
+        setLearningIntro={setLearningIntro}
+        learningDescriptionVisible={learningDescriptionVisible}
+        setLearningDescriptionVisible={setLearningDescriptionVisible}
+        topicsIntro={topicsIntro}
+        setTopicsIntro={setTopicsIntro}
+        requirementsText={requirementsText}
+        setRequirementsText={setRequirementsText}
+        whatToBringText={whatToBringText}
+        setWhatToBringText={setWhatToBringText}
+        policiesText={policiesText}
+        setPoliciesText={setPoliciesText}
+        outcomeRows={outcomeRows}
+        setOutcomeRows={setOutcomeRows}
         faqRows={faqRows}
+        setFaqRows={setFaqRows}
         mediaRows={mediaRows}
+        setMediaRows={setMediaRows}
+        onMediaFile={uploadProgramMedia}
+        addMedia={addMedia}
         trackRows={trackRows}
+        setTrackRows={setTrackRows}
+        addTrack={addTrack}
+        trackSelectionMode={trackSelectionMode}
+        setTrackSelectionMode={setTrackSelectionMode}
+        trackSelectionCount={trackSelectionCount}
+        setTrackSelectionCount={setTrackSelectionCount}
+        allAges={allAges}
+        setAllAges={setAllAges}
+        ageStart={ageStart}
+        setAgeStart={setAgeStart}
+        ageEnd={ageEnd}
+        setAgeEnd={setAgeEnd}
+        audienceGender={audienceGender}
+        setAudienceGender={setAudienceGender}
+        paymentKind={builderStatus.paymentKind}
+        durationMonthsForPricing={pricingDurationMonths}
+        isPaid={builderStatus.paymentKind === "tareeqah"}
+        setIsPaid={setIsPaid}
+        offersMonthlyPayment={offersMonthlyPayment}
+        setOffersMonthlyPayment={setOffersMonthlyPayment}
+        offersAnnualPayment={offersAnnualPayment}
+        setOffersAnnualPayment={setOffersAnnualPayment}
+        price={price}
+        setPrice={setPrice}
+        annualPrice={annualPrice}
+        setAnnualPrice={setAnnualPrice}
         instructorDisplayName={instructorDisplayName}
+        setInstructorDisplayName={setInstructorDisplayName}
         instructorCredentials={instructorCredentials}
+        setInstructorCredentials={setInstructorCredentials}
         instructorContactPhone={instructorContactPhone}
-        onBack={() => setPreviewOpen(false)}
+        setInstructorContactPhone={setInstructorContactPhone}
+        contactEmail={builderStatus.contactEmail}
+        setContactEmail={(value) => setBuilderStatus((current) => ({ ...current, contactEmail: value }))}
       />
-    );
-  }
-
-  return (
-    <div className="space-y-5 bg-[var(--workspace)] p-4 pb-40">
-      <EditorToast toast={toast} onClose={() => setToast(null)} />
-      <section className="overflow-hidden rounded-[28px] bg-white shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
-        <div className="relative">
-          <ProgramHero program={{ ...program, title, thumbnail_url: thumbnailUrl || null }} />
-          <input ref={thumbnailInputRef} type="file" accept="image/*" className="hidden" onChange={(event) => handleThumbnailFile(event.target.files?.[0] ?? null)} />
-          <div className="absolute right-3 top-3 flex gap-2">
-            <button type="button" onClick={() => thumbnailInputRef.current?.click()} className="flex h-10 w-10 items-center justify-center rounded-full bg-white text-[#26323A] shadow-lg" aria-label="Replace thumbnail">
-              <PhotoIcon />
-            </button>
-            {thumbnailUrl ? (
-              <button type="button" onClick={() => setThumbnailUrl("")} className="flex h-10 w-10 items-center justify-center rounded-full bg-white text-[#C83F31] shadow-lg" aria-label="Remove thumbnail">
-                ×
-              </button>
-            ) : null}
-          </div>
-        </div>
-        <div className="space-y-3 p-4">
-          <EditBox label="Title" required value={title} onChange={setTitle} />
-          <EditBox label="Description" value={description} onChange={setDescription} multiline />
-        </div>
-      </section>
-
-      {isAdminEditor ? (
-        <DetailSection title="Class Director">
-          <label className="block">
-            <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Director</span>
-            <select value={selectedDirectorId} onChange={(event) => setSelectedDirectorId(event.target.value)} className="h-11 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm text-[#26323A] outline-none focus:border-[#2F8FB3]">
-              <option value="">Choose director</option>
-              {directorOptions.map((teacher) => (
-                <option key={teacher.id} value={teacher.id}>
-                  {teacher.full_name || teacher.email || "Teacher"}
-                </option>
-              ))}
-            </select>
-          </label>
-        </DetailSection>
-      ) : null}
-
-      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_300px] lg:items-start">
-        <div className="space-y-5">
-          {learningVisible ? (
-            <DetailSection title="Learning Section">
-              <div className="space-y-4">
-                <EditBox label="Section title" required value={learningTitle} onChange={setLearningTitle} />
-                <EditBox label="Section description" value={learningIntro} onChange={setLearningIntro} multiline />
-                <div className="space-y-2">
-                  <p className="text-sm font-semibold text-[#26323A]">Checklist</p>
-                  {outcomeRows.map((row, index) => (
-                    <div key={row.id} className="flex items-start gap-2 border-t border-[#E6ECEF] pt-2 first:border-t-0 first:pt-0">
-                      <textarea
-                        value={row.text}
-                        onChange={(event) => setOutcomeRows((current) => current.map((item) => item.id === row.id ? { ...item, text: event.target.value } : item))}
-                        className="min-h-16 min-w-0 flex-1 resize-y rounded-[8px] border border-[#B9C3C8] px-3 py-2 text-sm leading-6 outline-none focus:border-[#2F8FB3]"
-                        aria-label={`Checklist point ${index + 1}`}
-                      />
-                      <button type="button" onClick={() => setOutcomeRows((current) => current.filter((item) => item.id !== row.id))} className="h-11 rounded-[8px] border border-[#E1C3BF] px-3 text-sm font-semibold text-[#C83F31]">
-                        Delete
-                      </button>
-                    </div>
-                  ))}
-                  <button type="button" onClick={() => setOutcomeRows((current) => [...current, { id: crypto.randomUUID(), text: "New checklist point" }])} className="min-h-10 rounded-[8px] border border-[#D6DCE0] px-4 text-sm font-semibold text-[#26323A]">
-                    Add point
-                  </button>
-                </div>
-                <button type="button" onClick={() => window.confirm("Delete the learning section?") && setLearningVisible(false)} className="min-h-10 rounded-[8px] border border-[#C83F31] px-4 text-sm font-semibold text-[#C83F31]">
-                  Delete learning section
-                </button>
-              </div>
-            </DetailSection>
-          ) : (
-            <button type="button" onClick={addLearningSection} className="min-h-28 w-full rounded-[22px] border border-dashed border-[#9EB4BD] bg-white text-sm font-semibold text-[#2F6077]">
-              Add checklist section
-            </button>
-          )}
-
-          <ProgramFaqEditor faqRows={faqRows} onChange={setFaqRows} />
-
-          <DetailSection title="Program Media">
-            <div className="divide-y divide-[#E6ECEF]">
-              {mediaRows.map((row) => (
-                <div key={row.id} className="grid gap-2 py-3 first:pt-0">
-                  {row.url ? (
-                    <div className="relative h-32 overflow-hidden rounded-[14px] bg-[#E7EEF2]">
-                      <Image src={row.url} alt="" fill className="object-cover" sizes="320px" />
-                    </div>
-                  ) : null}
-                  <label className="inline-flex min-h-10 cursor-pointer items-center justify-center rounded-[8px] border border-[#D6DCE0] bg-white px-3 text-sm font-semibold text-[#26323A]">
-                    {row.url ? "Replace photo" : "Upload photo"}
-                    <input type="file" accept="image/*" className="hidden" onChange={(event) => void uploadProgramMedia(row.id, event.target.files?.[0] ?? null)} />
-                  </label>
-                  <input value={row.title} onChange={(event) => setMediaRows((current) => current.map((item) => item.id === row.id ? { ...item, title: event.target.value } : item))} placeholder="Optional title" className="h-10 rounded-[8px] border border-[#B9C3C8] px-3 text-sm" />
-                  <button type="button" onClick={() => setMediaRows((current) => current.filter((item) => item.id !== row.id))} className="justify-self-start text-sm font-semibold text-[#C83F31]">Remove</button>
-                </div>
-              ))}
-              <button type="button" onClick={addMedia} className="min-h-10 rounded-[8px] border border-[#D6DCE0] px-4 text-sm font-semibold text-[#26323A]">
-                Add media
-              </button>
-            </div>
-          </DetailSection>
-
-          <DetailSection title="Schedule Tracks">
-            <div className="divide-y divide-[#E6ECEF]">
-              <TrackSelectionRuleFields
-                trackCount={trackRows.length}
-                mode={trackSelectionMode}
-                count={trackSelectionCount}
-                onModeChange={setTrackSelectionMode}
-                onCountChange={setTrackSelectionCount}
-              />
-              {trackRows.map((track) => (
-                <div key={track.id} className="space-y-3 py-4 first:pt-0">
-                  <div className="grid grid-cols-[minmax(0,1fr)_36px] items-end gap-2">
-                    <EditBox label="Track name" required value={track.name} onChange={(value) => setTrackRows((current) => current.map((item) => item.id === track.id ? { ...item, name: value } : item))} />
-                    {trackRows.length > 1 ? (
-                      <button type="button" onClick={() => setTrackRows((current) => current.filter((item) => item.id !== track.id))} className="flex h-9 w-9 items-center justify-center rounded-[8px] text-[#C83F31] hover:bg-[#FDEDEA]" aria-label="Remove track">
-                        <TrashIcon />
-                      </button>
-                    ) : null}
-                  </div>
-                  <div className="space-y-2">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">Times</p>
-                    {track.sessions.map((session, sessionIndex) => (
-                      <div key={`${track.id}-${sessionIndex}`} className="grid grid-cols-[90px_8px_84px_16px_84px_28px] items-center gap-1">
-                        <select
-                          value={session.day}
-                          onChange={(event) =>
-                            setTrackRows((current) =>
-                              current.map((item) =>
-                                item.id === track.id
-                                  ? { ...item, sessions: item.sessions.map((row, index) => index === sessionIndex ? { ...row, day: event.target.value as (typeof scheduleDayOptions)[number] } : row) }
-                                  : item,
-                              ),
-                            )
-                          }
-                          className="h-9 rounded-[7px] border border-[#B9C3C8] px-1 text-xs"
-                        >
-                          {scheduleDayOptions.map((day) => <option key={day} value={day}>{day}</option>)}
-                        </select>
-                        <span className="text-sm font-semibold text-[#6B747B]">-</span>
-                        <select
-                          value={session.start}
-                          onChange={(event) =>
-                            setTrackRows((current) =>
-                              current.map((item) =>
-                                item.id === track.id
-                                  ? { ...item, sessions: item.sessions.map((row, index) => index === sessionIndex ? { ...row, start: event.target.value } : row) }
-                                  : item,
-                              ),
-                            )
-                          }
-                          className="h-9 rounded-[7px] border border-[#B9C3C8] px-1 text-xs"
-                        >
-                          {scheduleTimeOptions.map((time) => <option key={time} value={time}>{formatClockLabel(time)}</option>)}
-                        </select>
-                        <span className="text-xs font-semibold text-[#6B747B]">to</span>
-                        <select
-                          value={session.end}
-                          onChange={(event) =>
-                            setTrackRows((current) =>
-                              current.map((item) =>
-                                item.id === track.id
-                                  ? { ...item, sessions: item.sessions.map((row, index) => index === sessionIndex ? { ...row, end: event.target.value } : row) }
-                                  : item,
-                              ),
-                            )
-                          }
-                          className="h-9 rounded-[7px] border border-[#B9C3C8] px-1 text-xs"
-                        >
-                          {scheduleTimeOptions.map((time) => <option key={time} value={time}>{formatClockLabel(time)}</option>)}
-                        </select>
-                        {track.sessions.length > 1 ? (
-                          <button
-                            type="button"
-                            onClick={() => setTrackRows((current) => current.map((item) => item.id === track.id ? { ...item, sessions: item.sessions.filter((_row, index) => index !== sessionIndex) } : item))}
-                            className="flex h-8 w-8 items-center justify-center rounded-[7px] text-[#C83F31] hover:bg-[#FDEDEA]"
-                            aria-label="Remove time"
-                          >
-                            <TrashIcon />
-                          </button>
-                        ) : <span aria-hidden />}
-                      </div>
-                    ))}
-                    <button
-                      type="button"
-                      onClick={() => setTrackRows((current) => current.map((item) => item.id === track.id ? { ...item, sessions: [...item.sessions, { day: "Monday", start: "18:00", end: "20:00" }] } : item))}
-                      className="min-h-9 rounded-[8px] border border-[#D6DCE0] px-3 text-sm font-semibold text-[#26323A]"
-                    >
-                      Add time
-                    </button>
-                  </div>
-                </div>
-              ))}
-              <button type="button" onClick={addTrack} className="mt-3 min-h-10 rounded-[8px] border border-[#D6DCE0] px-4 text-sm font-semibold text-[#26323A]">
-                Add track
-              </button>
-            </div>
-          </DetailSection>
-        </div>
-
-        <div className="space-y-4">
-          <DetailSection title="Target Audience">
-            <label className="flex items-center gap-2 text-sm font-medium text-[#26323A]">
-              <input type="checkbox" checked={allAges} onChange={(event) => setAllAges(event.target.checked)} />
-              All ages
-            </label>
-            {!allAges ? (
-              <div className="mt-3 grid grid-cols-2 gap-3">
-                <EditBox label="From age" value={ageStart} onChange={setAgeStart} />
-                <EditBox label="To age" value={ageEnd} onChange={setAgeEnd} />
-              </div>
-            ) : null}
-            <label className="mt-3 block">
-              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Gender</span>
-              <select value={audienceGender} onChange={(event) => setAudienceGender(event.target.value)} className="h-11 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm text-[#26323A] outline-none focus:border-[#2F8FB3]">
-                <option value="all">All</option>
-                <option value="brothers">Brothers only</option>
-                <option value="sisters">Sisters only</option>
-              </select>
-            </label>
-          </DetailSection>
-
-          <DetailSection title="Price">
-            <label className="flex items-center gap-2 text-sm font-medium text-[#26323A]">
-              <input type="checkbox" checked={isPaid} onChange={(event) => setIsPaid(event.target.checked)} />
-              Paid class
-            </label>
-            {isPaid ? (
-              <div className="mt-3 space-y-3">
-                <label className="flex items-center gap-2 text-sm font-medium text-[#26323A]">
-                  <input type="checkbox" checked={offersMonthlyPayment} onChange={(event) => setOffersMonthlyPayment(event.target.checked)} />
-                  Offer monthly payments
-                </label>
-                {offersMonthlyPayment ? <EditBox label="Monthly price" value={price} onChange={setPrice} /> : null}
-                <label className="flex items-center gap-2 text-sm font-medium text-[#26323A]">
-                  <input type="checkbox" checked={offersAnnualPayment} onChange={(event) => setOffersAnnualPayment(event.target.checked)} />
-                  Offer one-time annual payment
-                </label>
-                {offersAnnualPayment ? (
-                  <div className="space-y-2">
-                    <EditBox label="One-time annual price" value={annualPrice} onChange={setAnnualPrice} />
-                    <p className="text-xs leading-5 text-[#6B747B]">{annualDealText({ price_monthly_cents: Math.round(Number(price || "0") * 100), price_annual_cents: Math.round(Number(annualPrice || "0") * 100) })}</p>
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-          </DetailSection>
-
-          <DetailSection title="Instructor Display">
-            <div className="space-y-3">
-              <EditBox label="Display name" value={instructorDisplayName} onChange={setInstructorDisplayName} />
-              <EditBox label="Credentials" value={instructorCredentials} onChange={setInstructorCredentials} multiline />
-              <EditBox label="Contact phone" value={instructorContactPhone} onChange={setInstructorContactPhone} />
-            </div>
-          </DetailSection>
-        </div>
-      </div>
 
       <div className="sticky bottom-[92px] z-10 space-y-2 bg-white py-2 md:bottom-4">
         {message ? <p className="text-sm font-medium text-[#52616A]">{message}</p> : null}
-        <div className="grid grid-cols-[0.9fr_1.1fr] gap-2">
-          <button type="button" disabled={busy} onClick={() => setPreviewOpen(true)} className="min-h-11 rounded-[10px] border border-[#B9C3C8] bg-white px-4 text-sm font-semibold text-[#26323A] disabled:opacity-60">
-            Preview page
+        <div className="grid grid-cols-3 gap-2">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              const draftOverride = { publicationStatus: "draft", applicationStatus: "not_accepting", acceptingApplications: false } as const;
+              setBuilderStatus((current) => ({ ...current, ...draftOverride }));
+              void saveProgram(draftOverride);
+            }}
+            className="min-h-11 rounded-[10px] bg-[#2F8FB3] px-4 text-sm font-semibold text-white shadow-[0_8px_18px_rgba(47,143,179,0.20)] disabled:opacity-60"
+          >
+            Save Draft
           </button>
-          <button type="button" disabled={busy || !hasUnsavedChanges} onClick={saveProgram} className="min-h-11 rounded-[10px] bg-[#17624F] px-5 text-sm font-semibold text-white disabled:opacity-45">
-            {busy ? "Saving..." : "Save changes"}
+          <button
+            type="button"
+            disabled={busy || builderStep === "basics"}
+            onClick={() => {
+              const index = programBuilderSteps.findIndex((step) => step.id === builderStep);
+              setBuilderStep(programBuilderSteps[Math.max(0, index - 1)]?.id ?? "basics");
+            }}
+            className="min-h-11 rounded-[10px] border border-[#B9C3C8] bg-white px-4 text-sm font-semibold text-[#26323A] disabled:opacity-40"
+          >
+            Back
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              if (builderStep !== "review") {
+                const index = programBuilderSteps.findIndex((step) => step.id === builderStep);
+                setBuilderStep(programBuilderSteps[Math.min(programBuilderSteps.length - 1, index + 1)]?.id ?? "review");
+                return;
+              }
+              const publishOverride = { publicationStatus: "published" } as const;
+              setBuilderStatus((current) => ({ ...current, ...publishOverride, applicationStatus: current.acceptingApplications ? current.applicationStatus : "not_accepting" }));
+              void saveProgram(publishOverride);
+            }}
+            className="min-h-11 rounded-[10px] bg-[#17624F] px-5 text-sm font-semibold text-white disabled:opacity-60"
+          >
+            {busy ? "Saving..." : builderStep === "review" ? "Publish" : "Continue"}
           </button>
         </div>
       </div>
-
-      <section className="space-y-3 rounded-[22px] border border-[#F0C0BA] bg-[#FFF8F7] p-4">
-        <div>
-          <h2 className="text-base font-semibold text-[#7A271F]">Delete Class</h2>
-          <p className="mt-1 text-sm text-[#8A524B]">This permanently deletes the class and related class records.</p>
-        </div>
-        {!deleteOpen ? (
-          <button type="button" onClick={() => setDeleteOpen(true)} className="min-h-10 rounded-[8px] border border-[#C83F31] bg-white px-4 text-sm font-semibold text-[#C83F31]">
-            Delete class
-          </button>
-        ) : (
-          <div className="space-y-3">
-            <p className="text-sm text-[#7A271F]">
-              Type <span className="font-semibold">{program.title}</span> to confirm.
-            </p>
-            <input value={deleteText} onChange={(event) => setDeleteText(event.target.value)} className="h-11 w-full rounded-[8px] border border-[#D4928A] bg-white px-3 text-sm outline-none focus:border-[#C83F31]" />
-            <div className="flex flex-wrap gap-2">
-              <button type="button" disabled={busy || deleteText !== program.title} onClick={deleteProgram} className="min-h-10 rounded-[8px] bg-[#C83F31] px-4 text-sm font-semibold text-white disabled:opacity-60">
-                Permanently delete
-              </button>
-              <button type="button" disabled={busy} onClick={() => { setDeleteOpen(false); setDeleteText(""); }} className="min-h-10 rounded-[8px] border border-[#D6DCE0] bg-white px-4 text-sm font-semibold text-[#26323A] disabled:opacity-60">
-                Cancel
-              </button>
-            </div>
-          </div>
-        )}
-      </section>
-
     </div>
   );
 }
@@ -5679,6 +7044,16 @@ function buildProgramPreview({
     mosque_id: base?.mosque_id ?? "",
     teacher_profile_id: base?.teacher_profile_id ?? null,
     director_profile_id: base?.director_profile_id ?? null,
+    ...defaultProgramBuilderColumns(),
+    internal_name: base?.internal_name ?? null,
+    summary: base?.summary ?? null,
+    category: base?.category ?? null,
+    program_type: base?.program_type ?? "recurring",
+    publication_status: base?.publication_status ?? "draft",
+    application_status: base?.application_status ?? "not_accepting",
+    lifecycle_status: base?.lifecycle_status ?? "upcoming",
+    application_mode: base?.application_mode ?? "application_required",
+    accepting_applications: base?.accepting_applications ?? false,
     title,
     description: description.trim() || null,
     is_active: true,
@@ -5704,65 +7079,6 @@ function buildProgramPreview({
   };
 }
 
-function serializeProgramEditorState(state: {
-  title: string;
-  description: string;
-  thumbnailUrl: string;
-  allAges: boolean;
-  ageStart: string;
-  ageEnd: string;
-  audienceGender: string;
-  isPaid: boolean;
-  offersMonthlyPayment?: boolean;
-  offersAnnualPayment?: boolean;
-  price: string;
-  annualPrice?: string;
-  learningVisible: boolean;
-  learningTitle: string;
-  learningIntro: string;
-  outcomeRows: Array<{ text: string }>;
-  faqRows: Array<{ question: string; answer: string }>;
-  mediaRows: Array<{ url: string; title: string; mediaType: string }>;
-  trackRows: Array<{ name: string; sessions: ProgramScheduleRow[] }>;
-  trackSelectionMode: TrackSelectionMode;
-  trackSelectionCount: number;
-  selectedDirectorId?: string;
-  instructorDisplayName: string;
-  instructorCredentials: string;
-  instructorContactPhone: string;
-}) {
-  return JSON.stringify({
-    title: state.title.trim(),
-    description: state.description.trim(),
-    thumbnailUrl: state.thumbnailUrl.trim(),
-    allAges: state.allAges,
-    ageStart: state.ageStart.trim(),
-    ageEnd: state.ageEnd.trim(),
-    audienceGender: state.audienceGender,
-    isPaid: state.isPaid,
-    offersMonthlyPayment: Boolean(state.offersMonthlyPayment),
-    offersAnnualPayment: Boolean(state.offersAnnualPayment),
-    price: state.price.trim(),
-    annualPrice: state.annualPrice?.trim() ?? "",
-    learningVisible: state.learningVisible,
-    learningTitle: state.learningTitle.trim(),
-    learningIntro: state.learningIntro.trim(),
-    outcomes: state.outcomeRows.map((row) => row.text.trim()),
-    faqs: state.faqRows.map((row) => ({ question: row.question.trim(), answer: row.answer.trim() })),
-    media: state.mediaRows.map((row) => ({ url: row.url.trim(), title: row.title.trim(), mediaType: row.mediaType })),
-    tracks: state.trackRows.map((track) => ({
-      name: track.name.trim(),
-      sessions: track.sessions.map((session) => ({ day: session.day, start: session.start, end: session.end })),
-    })),
-    trackSelectionMode: state.trackSelectionMode,
-    trackSelectionCount: state.trackSelectionCount,
-    selectedDirectorId: state.selectedDirectorId ?? "",
-    instructorDisplayName: state.instructorDisplayName.trim(),
-    instructorCredentials: state.instructorCredentials.trim(),
-    instructorContactPhone: state.instructorContactPhone.trim(),
-  });
-}
-
 function ProgramEditorPreview({
   program,
   learningTitle,
@@ -5782,7 +7098,7 @@ function ProgramEditorPreview({
   outcomes: string[];
   faqRows: ProgramEditorFaqRow[];
   mediaRows: Array<{ id: string; url: string; title: string; mediaType: string; previewUrl?: string }>;
-  trackRows: Array<{ id: string; name: string; sessions: ProgramScheduleRow[] }>;
+  trackRows: ProgramEditorTrackRow[];
   instructorDisplayName: string;
   instructorCredentials: string;
   instructorContactPhone: string;
@@ -5797,6 +7113,7 @@ function ProgramEditorPreview({
     name: track.name.trim() || `Track ${index + 1}`,
     description: null,
     schedule: track.sessions as unknown as Json,
+    ...defaultProgramTrackBuilderColumns(),
     sort_order: index + 1,
     is_active: true,
     created_at: "",
@@ -5931,8 +7248,7 @@ function EditBox({
   return (
     <label className="block">
       <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">
-        {label}
-        {required ? " *" : ""}
+        {formatRequiredLabel(label, required)}
       </span>
       {multiline ? (
         <textarea
@@ -5951,13 +7267,83 @@ function EditBox({
   );
 }
 
+function ProgramBuilderStepper({
+  activeStep,
+}: {
+  activeStep: ProgramBuilderStep;
+}) {
+  const activeIndex = programBuilderSteps.findIndex((step) => step.id === activeStep);
+  return (
+    <nav className="rounded-[22px] border border-[#DDE7EA] bg-white px-2 py-3 sm:px-4" aria-label="Program builder steps">
+      <ol className="grid grid-cols-5 items-center gap-1 sm:gap-2">
+        {programBuilderSteps.map((step, index) => {
+          const active = step.id === activeStep;
+          const complete = index < activeIndex;
+          return (
+            <li key={step.id} className="relative flex min-w-0 justify-center">
+              {index > 0 ? <span className={cn("absolute right-1/2 top-1/2 hidden h-px w-full -translate-y-1/2 sm:block", complete || active ? "bg-[#17624F]" : "bg-[#DDE7EA]")} aria-hidden /> : null}
+              <div
+                className={cn(
+                  "relative z-10 flex min-w-0 items-center justify-center gap-2 rounded-full bg-white px-1 py-1.5 text-xs font-semibold transition sm:px-2",
+                  active ? "bg-[#E6F3EE] text-[#17624F]" : "text-[#6B747B]",
+                )}
+              >
+                <span className={cn("flex h-7 w-7 items-center justify-center rounded-full border text-xs", active || complete ? "border-[#17624F] bg-[#17624F] text-white" : "border-[#C9D3D8] bg-white text-[#7B858C]")}>
+                  {complete ? "✓" : index + 1}
+                </span>
+                <span className="hidden truncate sm:inline">{step.label}</span>
+              </div>
+            </li>
+          );
+        })}
+      </ol>
+    </nav>
+  );
+}
+
+function ProgramStatusBadge({ status }: { status: ProgramBuilderStatus["publicationStatus"] }) {
+  const label = status.replace(/_/g, " ");
+  return (
+    <span className="rounded-full bg-[#EFF5F2] px-3 py-1 text-xs font-semibold capitalize text-[#17624F]">
+      {label}
+    </span>
+  );
+}
+
+function SummaryLine({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="border-t border-[#E6ECEF] pt-3 first:border-t-0 first:pt-0 md:first:border-t md:first:pt-3">
+      <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#7B858C]">{label}</p>
+      <p className="mt-1 text-sm font-semibold leading-6 text-[#26323A]">{value || "Not set"}</p>
+    </div>
+  );
+}
+
 type ProgramEditorFieldsProps = {
+  activeStep?: ProgramBuilderStep;
+  programType?: ProgramBuilderStatus["programType"];
+  schedulePattern?: ProgramBuilderStatus["schedulePattern"];
+  previewProgram?: Program;
+  eventDate?: string;
+  setEventDate?: (value: string) => void;
+  eventTimeVisible?: boolean;
+  setEventTimeVisible?: (value: boolean) => void;
   learningVisible: boolean;
   setLearningVisible: (value: boolean) => void;
   learningTitle: string;
   setLearningTitle: (value: string) => void;
   learningIntro: string;
   setLearningIntro: (value: string) => void;
+  learningDescriptionVisible?: boolean;
+  setLearningDescriptionVisible?: (value: boolean) => void;
+  topicsIntro?: string;
+  setTopicsIntro?: (value: string) => void;
+  requirementsText?: string;
+  setRequirementsText?: (value: string) => void;
+  whatToBringText?: string;
+  setWhatToBringText?: (value: string) => void;
+  policiesText?: string;
+  setPoliciesText?: (value: string) => void;
   outcomeRows: Array<{ id: string; text: string }>;
   setOutcomeRows: Dispatch<SetStateAction<Array<{ id: string; text: string }>>>;
   faqRows: ProgramEditorFaqRow[];
@@ -5966,8 +7352,8 @@ type ProgramEditorFieldsProps = {
   setMediaRows: Dispatch<SetStateAction<ProgramEditorMediaRow[]>>;
   onMediaFile: (rowId: string, file: File | null) => void;
   addMedia: () => void;
-  trackRows: Array<{ id: string; name: string; sessions: ProgramScheduleRow[] }>;
-  setTrackRows: Dispatch<SetStateAction<Array<{ id: string; name: string; sessions: ProgramScheduleRow[] }>>>;
+  trackRows: ProgramEditorTrackRow[];
+  setTrackRows: Dispatch<SetStateAction<ProgramEditorTrackRow[]>>;
   addTrack: () => void;
   trackSelectionMode: TrackSelectionMode;
   setTrackSelectionMode: (value: TrackSelectionMode) => void;
@@ -5981,6 +7367,8 @@ type ProgramEditorFieldsProps = {
   setAgeEnd: (value: string) => void;
   audienceGender: string;
   setAudienceGender: (value: string) => void;
+  paymentKind?: ProgramBuilderStatus["paymentKind"];
+  durationMonthsForPricing?: string;
   isPaid: boolean;
   setIsPaid: (value: boolean) => void;
   offersMonthlyPayment: boolean;
@@ -5997,6 +7385,8 @@ type ProgramEditorFieldsProps = {
   setInstructorCredentials: (value: string) => void;
   instructorContactPhone: string;
   setInstructorContactPhone: (value: string) => void;
+  contactEmail?: string;
+  setContactEmail?: (value: string) => void;
 };
 
 function ProgramFaqEditor({ faqRows, onChange }: { faqRows: ProgramEditorFaqRow[]; onChange: Dispatch<SetStateAction<ProgramEditorFaqRow[]>> }) {
@@ -6044,12 +7434,30 @@ function ProgramFaqEditor({ faqRows, onChange }: { faqRows: ProgramEditorFaqRow[
 }
 
 function ProgramEditorFields({
+  activeStep,
+  programType = "recurring",
+  schedulePattern = "weekly",
+  previewProgram,
+  eventDate = "",
+  setEventDate,
+  eventTimeVisible = false,
+  setEventTimeVisible,
   learningVisible,
   setLearningVisible,
   learningTitle,
   setLearningTitle,
   learningIntro,
   setLearningIntro,
+  learningDescriptionVisible = true,
+  setLearningDescriptionVisible,
+  topicsIntro = "",
+  setTopicsIntro,
+  requirementsText = "",
+  setRequirementsText,
+  whatToBringText = "",
+  setWhatToBringText,
+  policiesText = "",
+  setPoliciesText,
   outcomeRows,
   setOutcomeRows,
   faqRows,
@@ -6073,8 +7481,10 @@ function ProgramEditorFields({
   setAgeEnd,
   audienceGender,
   setAudienceGender,
+  paymentKind = "free",
+  durationMonthsForPricing = "10",
   isPaid,
-  setIsPaid,
+  setIsPaid: _setIsPaid,
   offersMonthlyPayment,
   setOffersMonthlyPayment,
   offersAnnualPayment,
@@ -6089,30 +7499,166 @@ function ProgramEditorFields({
   setInstructorCredentials,
   instructorContactPhone,
   setInstructorContactPhone,
+  contactEmail = "",
+  setContactEmail,
 }: ProgramEditorFieldsProps) {
+  const showAll = !activeStep;
+  const showBasics = showAll || activeStep === "basics";
+  const showPublic = showAll || activeStep === "public";
+  const showSchedule = showAll || activeStep === "schedule";
+  const showPricing = showAll || activeStep === "pricing";
+  const showReview = activeStep === "review";
+
   function addLearningSection() {
     setLearningVisible(true);
     setLearningTitle("What You Will Learn");
     setLearningIntro("");
-    setOutcomeRows([{ id: crypto.randomUUID(), text: "New checklist point" }]);
+    setLearningDescriptionVisible?.(false);
+    setOutcomeRows([
+      { id: crypto.randomUUID(), text: "Learning outcome #1" },
+      { id: crypto.randomUUID(), text: "Learning outcome #2" },
+      { id: crypto.randomUUID(), text: "Learning outcome #3" },
+    ]);
   }
 
+  if (showReview) {
+    const program = previewProgram;
+    const previewTracks = trackRows.map((track, index): ProgramTrack => ({
+      id: track.id,
+      program_id: program?.id ?? "preview",
+      name: track.name.trim() || `Track ${index + 1}`,
+      description: null,
+      schedule: track.sessions as unknown as Json,
+      ...defaultProgramTrackBuilderColumns(),
+      location: track.location?.trim() || null,
+      room: track.room?.trim() || null,
+      capacity: track.capacity ? Number(track.capacity) : null,
+      pricing_override_enabled: false,
+      price_monthly_cents: null,
+      price_annual_cents: null,
+      sort_order: index + 1,
+      is_active: true,
+      created_at: "",
+      updated_at: "",
+    }));
+    const visibleMediaRows = mediaRows.filter((row) => row.previewUrl || row.url);
+    return (
+      <div className="mx-auto max-w-[520px] space-y-5">
+        {program ? (
+          <section className="overflow-hidden rounded-[28px] bg-white shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
+            <ProgramHero program={program} />
+            <div className="space-y-3 p-4">
+              <div className="flex flex-wrap items-center gap-2 text-xs font-medium text-[#17624F]">
+                <span>{formatAgeRange(program.age_range_text)}</span>
+                <span aria-hidden>•</span>
+                <span>{formatGender(program.audience_gender)}</span>
+              </div>
+              <div>
+                <h1 className="text-2xl font-semibold leading-8 text-[#26323A]">{program.title}</h1>
+                <p className="mt-2 text-sm leading-7 text-[#52616A]">{program.description || mockProgramDescription(program.title)}</p>
+              </div>
+            </div>
+          </section>
+        ) : null}
+
+        <aside className="rounded-2xl border border-[#C8DCE2] bg-white p-4 shadow-[0_14px_34px_rgba(38,50,58,0.10)]">
+          <p className="text-2xl font-semibold text-[#26323A]">{isPaid ? formatPrice(Math.round(Number(price || "0") * 100)) : "Free"}</p>
+          <ProgramScheduleOptionsDisplay tracks={previewTracks} fallbackSchedule={previewTracks[0] ? scheduleSummary(previewTracks[0].schedule, null).full : "Schedule TBA"} />
+          {program ? <ProgramPaymentOptionsDisplay program={program} /> : null}
+          <button type="button" disabled className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#248B72] px-4 text-sm font-semibold text-white opacity-70">
+            Request Enrollment
+          </button>
+        </aside>
+
+        {(learningIntro.trim() || outcomeRows.length) && learningTitle.trim() ? (
+          <DetailSection title={learningTitle.trim()}>
+            {learningIntro.trim() ? <p className="text-sm leading-7 text-[#52616A]">{learningIntro}</p> : null}
+            {outcomeRows.length ? (
+              <div className={cn("grid gap-3 sm:grid-cols-2", learningIntro.trim() ? "mt-5" : "")}>
+                {outcomeRows.map((row) => (
+                  <div key={row.id} className="flex gap-3 text-sm text-[#26323A]">
+                    <span className="mt-1 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#E3F5EE] text-xs font-semibold text-[#228763]">✓</span>
+                    <span>{row.text}</span>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </DetailSection>
+        ) : null}
+
+        {[{ title: "Topics Covered", body: topicsIntro }, { title: "Requirements", body: requirementsText }, { title: "What To Bring", body: whatToBringText }, { title: "Policies", body: policiesText }].some((row) => row.body.trim()) ? (
+          <DetailSection title="Program Details">
+            <div className="divide-y divide-[#E6ECEF]">
+              {[{ title: "Topics Covered", body: topicsIntro }, { title: "Requirements", body: requirementsText }, { title: "What To Bring", body: whatToBringText }, { title: "Policies", body: policiesText }]
+                .filter((row) => row.body.trim())
+                .map((row) => (
+                  <div key={row.title} className="py-3 first:pt-0 last:pb-0">
+                    <h3 className="text-sm font-semibold text-[#26323A]">{row.title}</h3>
+                    <p className="mt-1 whitespace-pre-wrap text-sm leading-7 text-[#52616A]">{row.body}</p>
+                  </div>
+                ))}
+            </div>
+          </DetailSection>
+        ) : null}
+
+        {visibleMediaRows.length ? (
+          <DetailSection title="Program Media">
+            <div className="space-y-3">
+              {visibleMediaRows.map((row) => (
+                <div key={row.id} className="overflow-hidden rounded-[16px] border border-[#E6ECEF]">
+                  <div className="relative h-40 bg-[#E7EEF2]">
+                    <Image src={row.previewUrl || row.url} alt="" fill className="object-cover" sizes="360px" />
+                  </div>
+                  {row.title.trim() ? <p className="p-3 text-sm font-semibold text-[#26323A]">{row.title}</p> : null}
+                </div>
+              ))}
+            </div>
+          </DetailSection>
+        ) : null}
+
+        {faqRows.length ? (
+          <ProgramFaqSection
+            faqs={faqRows.map((row, index) => ({
+              id: row.id || `preview-faq-${index}`,
+              question: row.question.trim() || `Question ${index + 1}`,
+              answer: row.answer.trim() || "Add an answer for this FAQ.",
+            }))}
+          />
+        ) : null}
+      </div>
+    );
+  }
+
+  void _setIsPaid;
+
   return (
-    <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_300px] lg:items-start">
+    <div className="space-y-5">
       <div className="space-y-5">
-        {learningVisible ? (
-          <DetailSection title="Learning Section">
+        {showPublic ? (learningVisible ? (
+          <DetailSection title="Learning Outcomes">
             <div className="space-y-4">
               <EditBox label="Section title" required value={learningTitle} onChange={setLearningTitle} />
-              <EditBox label="Section description" value={learningIntro} onChange={setLearningIntro} multiline />
+              {learningDescriptionVisible || learningIntro.trim() ? (
+                <EditBox label="Section description" value={learningIntro} onChange={setLearningIntro} multiline />
+              ) : (
+                <button type="button" onClick={() => setLearningDescriptionVisible?.(true)} className="justify-self-start text-sm font-semibold text-[#2F8FB3]">
+                  Add section description
+                </button>
+              )}
               <div className="space-y-2">
-                <p className="text-sm font-semibold text-[#26323A]">Checklist</p>
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-sm font-semibold text-[#26323A]">Outcome points</p>
+                  <button type="button" onClick={() => setOutcomeRows((current) => [...current, { id: crypto.randomUUID(), text: `Learning outcome #${current.length + 1}` }])} className="flex h-9 w-9 items-center justify-center rounded-full border border-[#A8D4E2] text-2xl font-light leading-none text-[#2F8FB3] hover:bg-[#E9F4F8]" aria-label="Add outcome point">
+                    +
+                  </button>
+                </div>
                 {outcomeRows.map((row, index) => (
-                  <div key={row.id} className="flex items-start gap-2 border-t border-[#E6ECEF] pt-2 first:border-t-0 first:pt-0">
+                  <div key={row.id} className="grid grid-cols-[34px_minmax(0,1fr)_40px] items-start gap-2 rounded-[14px] border border-[#E1E8EC] bg-[#F8FAFA] p-2">
+                    <span className="mt-1 flex h-8 w-8 items-center justify-center rounded-full bg-[#26323A] text-xs font-semibold text-white">{String(index + 1).padStart(2, "0")}</span>
                     <textarea
                       value={row.text}
                       onChange={(event) => setOutcomeRows((current) => current.map((item) => item.id === row.id ? { ...item, text: event.target.value } : item))}
-                      className="min-h-16 min-w-0 flex-1 resize-y rounded-[8px] border border-[#B9C3C8] px-3 py-2 text-sm leading-6 outline-none focus:border-[#2F8FB3]"
+                      className="min-h-14 min-w-0 resize-y rounded-[10px] border border-[#D6E1E6] bg-white px-3 py-2 text-sm leading-6 outline-none focus:border-[#2F8FB3]"
                       aria-label={`Checklist point ${index + 1}`}
                     />
                     <button
@@ -6125,24 +7671,22 @@ function ProgramEditorFields({
                     </button>
                   </div>
                 ))}
-                <button type="button" onClick={() => setOutcomeRows((current) => [...current, { id: crypto.randomUUID(), text: "New checklist point" }])} className="min-h-10 rounded-[8px] border border-[#D6DCE0] px-4 text-sm font-semibold text-[#26323A]">
-                  Add point
-                </button>
               </div>
-              <button type="button" onClick={() => window.confirm("Delete the learning section?") && setLearningVisible(false)} className="min-h-10 rounded-[8px] border border-[#C83F31] px-4 text-sm font-semibold text-[#C83F31]">
-                Delete learning section
-              </button>
+              {setTopicsIntro ? <EditBox label="Topics covered" value={topicsIntro} onChange={setTopicsIntro} multiline /> : null}
+              {setRequirementsText ? <EditBox label="Requirements / prerequisites" value={requirementsText} onChange={setRequirementsText} multiline /> : null}
+              {setWhatToBringText ? <EditBox label="What to bring" value={whatToBringText} onChange={setWhatToBringText} multiline /> : null}
+              {setPoliciesText ? <EditBox label="Policies" value={policiesText} onChange={setPoliciesText} multiline /> : null}
             </div>
           </DetailSection>
         ) : (
           <button type="button" onClick={addLearningSection} className="min-h-28 w-full rounded-[22px] border border-dashed border-[#9EB4BD] bg-white text-sm font-semibold text-[#2F6077]">
             Add checklist section
           </button>
-        )}
+        )) : null}
 
-        <ProgramFaqEditor faqRows={faqRows} onChange={setFaqRows} />
+        {showPublic ? <ProgramFaqEditor faqRows={faqRows} onChange={setFaqRows} /> : null}
 
-        <DetailSection title="Program Media">
+        {showPublic ? <DetailSection title="Program Media">
           <div className="divide-y divide-[#E6ECEF]">
             {mediaRows.map((row) => {
               const previewUrl = row.previewUrl || row.url;
@@ -6166,9 +7710,70 @@ function ProgramEditorFields({
               Add media
             </button>
           </div>
-        </DetailSection>
+        </DetailSection> : null}
 
-        <DetailSection title="Schedule Tracks">
+        {showSchedule && programType === "event" && eventTimeVisible ? (
+          <DetailSection title="Event Time">
+            <div className="grid grid-cols-[minmax(0,1fr)_96px_96px] items-end gap-2">
+              <span className="text-sm font-semibold text-[#52616A]">One-time event</span>
+              <select
+                value={trackRows[0]?.sessions[0]?.start ?? "18:00"}
+                onChange={(event) => setTrackRows((current) => current.map((track, trackIndex) => trackIndex === 0 ? { ...track, sessions: [{ ...(track.sessions[0] ?? { day: "Monday", end: "20:00" }), start: event.target.value }] } : track))}
+                className="h-10 min-w-0 rounded-[8px] border border-[#B9C3C8] px-2 text-xs"
+              >
+                {scheduleTimeOptions.map((time) => <option key={time} value={time}>{formatClockLabel(time)}</option>)}
+              </select>
+              <select
+                value={trackRows[0]?.sessions[0]?.end ?? "20:00"}
+                onChange={(event) => setTrackRows((current) => current.map((track, trackIndex) => trackIndex === 0 ? { ...track, sessions: [{ ...(track.sessions[0] ?? { day: "Monday", start: "18:00" }), end: event.target.value }] } : track))}
+                className="h-10 min-w-0 rounded-[8px] border border-[#B9C3C8] px-2 text-xs"
+              >
+                {scheduleTimeOptions.map((time) => <option key={time} value={time}>{formatClockLabel(time)}</option>)}
+              </select>
+            </div>
+          </DetailSection>
+        ) : null}
+
+        {showSchedule && programType === "recurring" && schedulePattern === "custom_dates" ? (
+          <DetailSection title="Sessions">
+            <div className="space-y-3">
+              {(trackRows[0]?.sessions ?? []).map((session, sessionIndex) => (
+                <div key={`session-${sessionIndex}`} className="grid grid-cols-[minmax(0,1fr)_88px_88px_32px] items-center gap-2">
+                  <input
+                    type="date"
+                    value={session.date ?? ""}
+                    onChange={(event) => setTrackRows((current) => current.map((track, trackIndex) => trackIndex === 0 ? { ...track, sessions: track.sessions.map((row, index) => index === sessionIndex ? { ...row, date: event.target.value } : row) } : track))}
+                    className="h-10 rounded-[8px] border border-[#B9C3C8] px-2 text-xs"
+                  />
+                  <select
+                    value={session.start}
+                    onChange={(event) => setTrackRows((current) => current.map((track, trackIndex) => trackIndex === 0 ? { ...track, sessions: track.sessions.map((row, index) => index === sessionIndex ? { ...row, start: event.target.value } : row) } : track))}
+                    className="h-10 min-w-0 rounded-[8px] border border-[#B9C3C8] px-2 text-xs"
+                  >
+                    {scheduleTimeOptions.map((time) => <option key={time} value={time}>{formatClockLabel(time)}</option>)}
+                  </select>
+                  <select
+                    value={session.end}
+                    onChange={(event) => setTrackRows((current) => current.map((track, trackIndex) => trackIndex === 0 ? { ...track, sessions: track.sessions.map((row, index) => index === sessionIndex ? { ...row, end: event.target.value } : row) } : track))}
+                    className="h-10 min-w-0 rounded-[8px] border border-[#B9C3C8] px-2 text-xs"
+                  >
+                    {scheduleTimeOptions.map((time) => <option key={time} value={time}>{formatClockLabel(time)}</option>)}
+                  </select>
+                  {trackRows[0]?.sessions.length > 1 ? (
+                    <button type="button" onClick={() => setTrackRows((current) => current.map((track, trackIndex) => trackIndex === 0 ? { ...track, sessions: track.sessions.filter((_row, index) => index !== sessionIndex) } : track))} className="flex h-8 w-8 items-center justify-center rounded-[7px] text-[#C83F31] hover:bg-[#FDEDEA]" aria-label="Remove session">
+                      <TrashIcon />
+                    </button>
+                  ) : <span aria-hidden />}
+                </div>
+              ))}
+              <button type="button" onClick={() => setTrackRows((current) => current.map((track, trackIndex) => trackIndex === 0 ? { ...track, sessions: [...track.sessions, { day: "Monday", date: "", start: "18:00", end: "20:00" }] } : track))} className="min-h-9 rounded-[8px] border border-[#D6DCE0] px-3 text-sm font-semibold text-[#26323A]">
+                Add session
+              </button>
+            </div>
+          </DetailSection>
+        ) : null}
+
+        {showSchedule && programType === "recurring" && schedulePattern === "weekly" ? <DetailSection title="Schedule Tracks">
           <div className="divide-y divide-[#E6ECEF]">
             <TrackSelectionRuleFields
               trackCount={trackRows.length}
@@ -6177,20 +7782,38 @@ function ProgramEditorFields({
               onModeChange={setTrackSelectionMode}
               onCountChange={setTrackSelectionCount}
             />
-            {trackRows.map((track) => (
-              <div key={track.id} className="space-y-3 py-4 first:pt-0">
-                <div className="grid grid-cols-[minmax(0,1fr)_36px] items-end gap-2">
-                  <EditBox label="Track name" required value={track.name} onChange={(value) => setTrackRows((current) => current.map((item) => item.id === track.id ? { ...item, name: value } : item))} />
+            {trackRows.map((track, trackIndex) => (
+              <div key={track.id} className="my-4 space-y-4 rounded-[18px] border border-[#DCE7EB] bg-[#FAFCFC] p-4 first:mt-0">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#6B747B]">Track {String(trackIndex + 1).padStart(2, "0")}</p>
+                    <p className="text-sm font-semibold text-[#26323A]">{track.name || "Untitled track"}</p>
+                  </div>
                   {trackRows.length > 1 ? (
-                    <button type="button" onClick={() => setTrackRows((current) => current.filter((item) => item.id !== track.id))} className="flex h-9 w-9 items-center justify-center rounded-[8px] text-[#C83F31] hover:bg-[#FDEDEA]" aria-label="Remove track">
+                    <button type="button" onClick={() => setTrackRows((current) => current.filter((item) => item.id !== track.id))} className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-[#C83F31] shadow-sm" aria-label="Remove track">
                       <TrashIcon />
                     </button>
                   ) : null}
                 </div>
+                <div className="grid grid-cols-[minmax(0,1fr)_36px] items-end gap-2">
+                  <EditBox label="Track name" required value={track.name} onChange={(value) => setTrackRows((current) => current.map((item) => item.id === track.id ? { ...item, name: value } : item))} />
+                  <span aria-hidden />
+                </div>
+                <label className="block">
+                  <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Capacity</span>
+                  <span className="flex items-center gap-2">
+                    <input
+                      value={track.capacity ?? ""}
+                      onChange={(event) => setTrackRows((current) => current.map((item) => item.id === track.id ? { ...item, capacity: event.target.value.replace(/\D/g, "") } : item))}
+                      className="h-10 w-24 rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]"
+                    />
+                    <span className="text-sm font-semibold text-[#52616A]">students</span>
+                  </span>
+                </label>
                 <div className="space-y-2">
                   <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">Times</p>
                   {track.sessions.map((session, sessionIndex) => (
-                    <div key={`${track.id}-${sessionIndex}`} className="grid grid-cols-[90px_8px_84px_16px_84px_28px] items-center gap-1">
+                    <div key={`${track.id}-${sessionIndex}`} className="grid grid-cols-[minmax(0,1fr)_82px_82px_28px] items-center gap-1">
                       <select
                         value={session.day}
                         onChange={(event) =>
@@ -6202,11 +7825,10 @@ function ProgramEditorFields({
                             ),
                           )
                         }
-                        className="h-9 rounded-[7px] border border-[#B9C3C8] px-1 text-xs"
+                        className="h-9 rounded-[7px] border border-[#B9C3C8] px-2 text-xs"
                       >
-                        {scheduleDayOptions.map((day) => <option key={day} value={day}>{day}</option>)}
+                        {scheduleDayOptions.map((day) => <option key={day} value={day}>{formatDayAbbreviation(day)}</option>)}
                       </select>
-                      <span className="text-sm font-semibold text-[#6B747B]">-</span>
                       <select
                         value={session.start}
                         onChange={(event) =>
@@ -6218,11 +7840,10 @@ function ProgramEditorFields({
                             ),
                           )
                         }
-                        className="h-9 rounded-[7px] border border-[#B9C3C8] px-1 text-xs"
+                        className="h-9 min-w-0 rounded-[7px] border border-[#B9C3C8] px-1 text-xs"
                       >
                         {scheduleTimeOptions.map((time) => <option key={time} value={time}>{formatClockLabel(time)}</option>)}
                       </select>
-                      <span className="text-xs font-semibold text-[#6B747B]">to</span>
                       <select
                         value={session.end}
                         onChange={(event) =>
@@ -6234,7 +7855,7 @@ function ProgramEditorFields({
                             ),
                           )
                         }
-                        className="h-9 rounded-[7px] border border-[#B9C3C8] px-1 text-xs"
+                        className="h-9 min-w-0 rounded-[7px] border border-[#B9C3C8] px-1 text-xs"
                       >
                         {scheduleTimeOptions.map((time) => <option key={time} value={time}>{formatClockLabel(time)}</option>)}
                       </select>
@@ -6264,11 +7885,11 @@ function ProgramEditorFields({
               Add track
             </button>
           </div>
-        </DetailSection>
+        </DetailSection> : null}
       </div>
 
-      <div className="space-y-4">
-        <DetailSection title="Target Audience">
+      <div className="space-y-5">
+        {showBasics ? <DetailSection title="Target Audience">
           <label className="flex items-center gap-2 text-sm font-medium text-[#26323A]">
             <input type="checkbox" checked={allAges} onChange={(event) => setAllAges(event.target.checked)} />
             All ages
@@ -6287,41 +7908,47 @@ function ProgramEditorFields({
               <option value="sisters">Sisters only</option>
             </select>
           </label>
-        </DetailSection>
+        </DetailSection> : null}
 
-        <DetailSection title="Price">
-          <label className="flex items-center gap-2 text-sm font-medium text-[#26323A]">
-            <input type="checkbox" checked={isPaid} onChange={(event) => setIsPaid(event.target.checked)} />
-            Paid class
-          </label>
-          {isPaid ? (
+        {showPricing && paymentKind === "tareeqah" ? <DetailSection title="Price">
+            {programType === "event" ? (
+              <div>
+                <EditBox label="One-time price amount" required value={annualPrice} onChange={setAnnualPrice} />
+              </div>
+            ) : (
             <div className="mt-3 space-y-3">
               <label className="flex items-center gap-2 text-sm font-medium text-[#26323A]">
                 <input type="checkbox" checked={offersMonthlyPayment} onChange={(event) => setOffersMonthlyPayment(event.target.checked)} />
                 Offer monthly payments
               </label>
-              {offersMonthlyPayment ? <EditBox label="Monthly price" value={price} onChange={setPrice} /> : null}
+              {offersMonthlyPayment ? (
+                <div>
+                  <EditBox label="Monthly price" required value={price} onChange={setPrice} />
+                  {formatMonthlyCycle(price, durationMonthsForPricing) ? <p className="mt-1 text-xs leading-5 text-[#6B747B]">{formatMonthlyCycle(price, durationMonthsForPricing)}</p> : null}
+                </div>
+              ) : null}
               <label className="flex items-center gap-2 text-sm font-medium text-[#26323A]">
                 <input type="checkbox" checked={offersAnnualPayment} onChange={(event) => setOffersAnnualPayment(event.target.checked)} />
-                Offer one-time annual payment
+                Offer one-time payment
               </label>
               {offersAnnualPayment ? (
                 <div className="space-y-2">
-                  <EditBox label="One-time annual price" value={annualPrice} onChange={setAnnualPrice} />
-                  <p className="text-xs leading-5 text-[#6B747B]">{annualDealText({ price_monthly_cents: Math.round(Number(price || "0") * 100), price_annual_cents: Math.round(Number(annualPrice || "0") * 100) })}</p>
+                  <EditBox label="One-time annual price" required value={annualPrice} onChange={setAnnualPrice} />
+                  {formatAnnualSavings(price, annualPrice, durationMonthsForPricing) ? <p className="inline-flex rounded-full bg-[#E9F4F8] px-3 py-1 text-xs font-semibold text-[#2F6077]">{formatAnnualSavings(price, annualPrice, durationMonthsForPricing)}</p> : null}
                 </div>
               ) : null}
             </div>
-          ) : null}
-        </DetailSection>
+            )}
+        </DetailSection> : null}
 
-        <DetailSection title="Instructor Display">
+        {showPublic ? <DetailSection title="Instructor Display">
           <div className="space-y-3">
             <EditBox label="Display name" value={instructorDisplayName} onChange={setInstructorDisplayName} />
-            <EditBox label="Credentials" value={instructorCredentials} onChange={setInstructorCredentials} multiline />
+            <EditBox label="Credentials" value={instructorCredentials} onChange={setInstructorCredentials} />
             <EditBox label="Contact phone" value={instructorContactPhone} onChange={setInstructorContactPhone} />
+            {setContactEmail ? <EditBox label="Contact email" value={contactEmail} onChange={setContactEmail} /> : null}
           </div>
-        </DetailSection>
+        </DetailSection> : null}
       </div>
     </div>
   );
@@ -8359,7 +9986,13 @@ async function fetchMosqueProgramsSnapshot(slug: string): Promise<MosquePrograms
     throw new Error(programError.message);
   }
 
-  const teacherIds = Array.from(new Set((programData ?? []).map((program) => program.director_profile_id ?? program.teacher_profile_id).filter(Boolean))) as string[];
+  const visiblePrograms = (programData ?? []).filter((program) => {
+    const publicationStatus = program.publication_status ?? "published";
+    const lifecycleStatus = program.lifecycle_status ?? "upcoming";
+    return publicationStatus === "published" && lifecycleStatus !== "cancelled" && lifecycleStatus !== "archived";
+  });
+
+  const teacherIds = Array.from(new Set(visiblePrograms.map((program) => program.director_profile_id ?? program.teacher_profile_id).filter(Boolean))) as string[];
   let teachers: TeacherDisplay[] = [];
 
   if (teacherIds.length > 0) {
@@ -8372,7 +10005,7 @@ async function fetchMosqueProgramsSnapshot(slug: string): Promise<MosquePrograms
 
   const snapshot = {
     mosque: mosqueData,
-    programs: (programData ?? []).map((program) => ({
+    programs: visiblePrograms.map((program) => ({
       ...program,
       teacher: teachers.find((teacher) => teacher.id === (program.director_profile_id ?? program.teacher_profile_id)) ?? null,
     })),
@@ -13672,11 +15305,13 @@ function programPaymentOptions(program: Pick<Program, "is_paid" | "offers_monthl
   const annualEnabled = Boolean(program.offers_annual_payment && program.price_annual_cents);
   const options: Array<{ type: PaymentType; title: string; price: string; subtitle: string; badge?: string }> = [];
   if (monthlyEnabled) {
+    const monthlyBadge = monthlyDealText(program);
     options.push({
       type: "monthly",
       title: "Monthly plan",
       price: `${formatPrice(program.price_monthly_cents)}/month`,
       subtitle: "10 monthly payments during the active school year.",
+      badge: monthlyBadge || undefined,
     });
   }
   if (annualEnabled) {
@@ -13696,11 +15331,20 @@ function annualDealText(program: Pick<Program, "price_monthly_cents" | "price_an
   const monthlyTotal = (program.price_monthly_cents ?? 0) * 10;
   const annual = program.price_annual_cents ?? 0;
   if (!monthlyTotal || !annual || annual >= monthlyTotal) {
-    return "One-time deal";
+    return "";
   }
   const savings = monthlyTotal - annual;
   const percent = Math.round((savings / monthlyTotal) * 100);
   return `Save ${formatPrice(savings)}${percent > 0 ? ` ` : ""}`;
+}
+
+function monthlyDealText(program: Pick<Program, "price_monthly_cents" | "price_annual_cents">) {
+  const monthlyTotal = (program.price_monthly_cents ?? 0) * 10;
+  const annual = program.price_annual_cents ?? 0;
+  if (!monthlyTotal || !annual || monthlyTotal >= annual) {
+    return "";
+  }
+  return `Save ${formatPrice(annual - monthlyTotal)}`;
 }
 
 function defaultPaymentType(program: Pick<Program, "is_paid" | "offers_monthly_payment" | "offers_annual_payment" | "price_monthly_cents" | "price_annual_cents">): PaymentType {
