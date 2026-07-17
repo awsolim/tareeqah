@@ -1,6 +1,6 @@
 import { getStripe } from "@/lib/stripe/server";
 import { createSupabaseServiceClient } from "@/lib/supabase/service";
-import type { Json } from "@/lib/supabase/types";
+import type { Database, Json } from "@/lib/supabase/types";
 
 export const runtime = "nodejs";
 
@@ -42,6 +42,8 @@ type UpdateProgramBody = {
   contactName?: string | null;
   contactEmail?: string | null;
   contactPhone?: string | null;
+  coverPriceLabelEnabled?: boolean;
+  coverPriceLabel?: string | null;
   isPaid?: boolean;
   offersMonthlyPayment?: boolean;
   offersAnnualPayment?: boolean;
@@ -126,6 +128,9 @@ const optionalProgramBuilderColumns = new Set([
   "location",
   "room",
   "payment_kind",
+  "billing_start_behavior",
+  "billing_end_behavior",
+  "billing_duration_months",
   "offers_monthly_payment",
   "offers_annual_payment",
   "allow_custom_prices",
@@ -136,11 +141,15 @@ const optionalProgramBuilderColumns = new Set([
   "contact_name",
   "contact_email",
   "contact_phone",
+  "cover_price_label_enabled",
+  "cover_price_label",
   "price_annual_cents",
   "stripe_annual_price_id",
   "track_selection_mode",
   "track_selection_count",
 ]);
+
+type ProgramUpdate = Database["public"]["Tables"]["programs"]["Update"];
 
 function schemaCacheMissingColumn(error: { message?: string } | null | undefined) {
   const message = error?.message ?? "";
@@ -156,7 +165,7 @@ async function updateProgramWithSchemaFallback(
   let lastError: { message?: string } | null = null;
 
   for (let attempt = 0; attempt < optionalProgramBuilderColumns.size + 1; attempt += 1) {
-    const { data, error } = await supabase.from("programs").update(nextPayload).eq("id", programId).select("*").single();
+    const { data, error } = await supabase.from("programs").update(nextPayload as ProgramUpdate).eq("id", programId).select("*").single();
     if (!error) {
       return { data, error: null };
     }
@@ -397,6 +406,9 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
       is_active: publicationStatus !== "draft" && lifecycleStatus !== "cancelled" && lifecycleStatus !== "archived",
       is_paid: isPaid,
       payment_kind: paymentKind,
+      billing_start_behavior: pickAllowed(body.billingStartBehavior, ["on_payment", "program_start"], "on_payment"),
+      billing_end_behavior: pickAllowed(body.billingEndBehavior, ["manual_cancel", "program_end", "fixed_months"], "fixed_months"),
+      billing_duration_months: Number.isFinite(body.billingDurationMonths) ? Math.max(1, Math.round(Number(body.billingDurationMonths))) : 10,
       offers_monthly_payment: isPaid ? offersMonthlyPayment : false,
       offers_annual_payment: isPaid ? offersAnnualPayment : false,
       allow_custom_prices: body.allowCustomPrices !== false,
@@ -407,6 +419,8 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
       contact_name: cleanText(body.contactName, 120),
       contact_email: cleanText(body.contactEmail, 180),
       contact_phone: cleanText(body.contactPhone, 60),
+      cover_price_label_enabled: body.coverPriceLabelEnabled !== false,
+      cover_price_label: cleanText(body.coverPriceLabel, 80),
       thumbnail_url: typeof body.thumbnailUrl === "string" && body.thumbnailUrl.trim() ? body.thumbnailUrl.trim() : null,
       audience_gender: typeof body.audienceGender === "string" && body.audienceGender.trim() ? body.audienceGender.trim() : null,
       age_range_text: typeof body.ageRangeText === "string" && body.ageRangeText.trim() ? body.ageRangeText.trim() : null,

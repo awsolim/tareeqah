@@ -72,6 +72,8 @@ export type Database = {
           contact_name: string | null;
           contact_email: string | null;
           contact_phone: string | null;
+          cover_price_label_enabled: boolean;
+          cover_price_label: string | null;
           thumbnail_url: string | null;
           price_monthly_cents: number | null;
           price_annual_cents: number | null;
@@ -472,7 +474,8 @@ export type Database = {
           id: string;
           program_id: string;
           program_track_id: string | null;
-          session_date: string;
+          session_date: string | null;
+          day_of_week: string | null;
           start_time: string;
           end_time: string | null;
           title: string | null;
@@ -485,6 +488,16 @@ export type Database = {
         };
         Insert: Partial<Database["public"]["Tables"]["program_sessions"]["Row"]>;
         Update: Partial<Database["public"]["Tables"]["program_sessions"]["Row"]>;
+        Relationships: [];
+      };
+      program_track_sessions: {
+        Row: {
+          program_track_id: string;
+          program_session_id: string;
+          created_at: string;
+        };
+        Insert: Partial<Database["public"]["Tables"]["program_track_sessions"]["Row"]>;
+        Update: Partial<Database["public"]["Tables"]["program_track_sessions"]["Row"]>;
         Relationships: [];
       };
       enrollment_tracks: {

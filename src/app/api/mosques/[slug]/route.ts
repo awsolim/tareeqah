@@ -4,6 +4,7 @@ export const runtime = "nodejs";
 
 type UpdateMosqueBody = {
   name?: string | null;
+  slug?: string | null;
   address?: string | null;
   logoUrl?: string | null;
   pictureUrl?: string | null;
@@ -11,6 +12,19 @@ type UpdateMosqueBody = {
 
 function cleanText(value: unknown, max = 240) {
   return typeof value === "string" && value.trim() ? value.trim().slice(0, max) : null;
+}
+
+function cleanSlug(value: unknown) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+  return normalized || null;
 }
 
 async function getAuthenticatedUserId(request: Request) {
@@ -46,6 +60,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ sl
     if (!name) {
       return Response.json({ error: "Masjid name is required." }, { status: 400 });
     }
+    const nextSlug = cleanSlug(body.slug) ?? slug;
 
     const supabase = createSupabaseServiceClient();
     const { data: mosque, error: mosqueError } = await supabase.from("mosques").select("id").eq("slug", slug).maybeSingle();
@@ -66,10 +81,18 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ sl
       return Response.json({ error: "Admin access required." }, { status: 403 });
     }
 
+    if (nextSlug !== slug) {
+      const { data: existingSlug } = await supabase.from("mosques").select("id").eq("slug", nextSlug).neq("id", mosque.id).maybeSingle();
+      if (existingSlug) {
+        return Response.json({ error: "That masjid URL is already in use." }, { status: 409 });
+      }
+    }
+
     const { data: updatedMosque, error: updateError } = await supabase
       .from("mosques")
       .update({
         name,
+        slug: nextSlug,
         address: cleanText(body.address, 240),
         logo_url: cleanText(body.logoUrl, 1000),
         picture_url: cleanText(body.pictureUrl, 1000),

@@ -26,6 +26,7 @@ type ProgramContentSection = Database["public"]["Tables"]["program_content_secti
 type ProgramMedia = Database["public"]["Tables"]["program_media"]["Row"];
 type ProgramTrack = Database["public"]["Tables"]["program_tracks"]["Row"];
 type ProgramSession = Database["public"]["Tables"]["program_sessions"]["Row"];
+type ProgramTrackSession = Database["public"]["Tables"]["program_track_sessions"]["Row"];
 type ProgramStudentNote = Database["public"]["Tables"]["program_student_notes"]["Row"];
 type Enrollment = Database["public"]["Tables"]["enrollments"]["Row"];
 type EnrollmentRequest = Database["public"]["Tables"]["enrollment_requests"]["Row"];
@@ -96,6 +97,8 @@ type ProgramBuilderStatus = {
   contactName: string;
   contactEmail: string;
   contactPhone: string;
+  coverPriceLabelEnabled: boolean;
+  coverPriceLabel: string;
 };
 
 type AnnouncementWithContext = Database["public"]["Tables"]["program_announcements"]["Row"] & {
@@ -174,6 +177,8 @@ function defaultBuilderStatus(): ProgramBuilderStatus {
     contactName: "",
     contactEmail: "",
     contactPhone: "",
+    coverPriceLabelEnabled: true,
+    coverPriceLabel: "",
   };
 }
 
@@ -214,6 +219,8 @@ function defaultProgramBuilderColumns(): Pick<Program,
   | "contact_name"
   | "contact_email"
   | "contact_phone"
+  | "cover_price_label_enabled"
+  | "cover_price_label"
 > {
   const defaults = defaultBuilderStatus();
   return {
@@ -253,7 +260,22 @@ function defaultProgramBuilderColumns(): Pick<Program,
     contact_name: null,
     contact_email: null,
     contact_phone: null,
+    cover_price_label_enabled: defaults.coverPriceLabelEnabled,
+    cover_price_label: null,
   };
+}
+
+function programAlreadyStarted(program: Program | null) {
+  if (!program) {
+    return false;
+  }
+  if (program.lifecycle_status === "active" || program.lifecycle_status === "completed") {
+    return true;
+  }
+  if (!program.start_date) {
+    return false;
+  }
+  return new Date(`${program.start_date}T00:00:00`).getTime() < startOfToday().getTime();
 }
 
 function defaultProgramTrackBuilderColumns(): Pick<ProgramTrack, "gender_override" | "age_min" | "age_max" | "location" | "room" | "capacity" | "pricing_override_enabled" | "price_monthly_cents" | "price_annual_cents"> {
@@ -342,6 +364,7 @@ type InstructorLifecycleNotification = {
 };
 
 type ProgramScheduleRow = {
+  id?: string;
   date?: string;
   day: (typeof scheduleDayOptions)[number];
   start: string;
@@ -750,7 +773,7 @@ export function MosqueDirectoryRows() {
         <div key={mosque.id} className="flex min-h-20 items-center gap-3 border-b border-[#D6DCE0] px-4 py-3 last:border-b-0">
           <Logo src={mosque.logo_url} name={mosque.name} />
           <div className="min-w-0 flex-1">
-            <h2 className="truncate text-base font-medium text-[#26323A]">{mosque.name}</h2>
+            <h2 className="truncate text-base font-medium text-[#26323A]">{mosqueSlugLabel(mosque)}</h2>
           </div>
           <FlatLink href={`/m/${mosque.slug}`} variant="primary" className="shrink-0">
             Open
@@ -766,7 +789,7 @@ export function PublicMasjidData({ slug }: { slug: string }) {
 }
 
 export function StudentHomeData({ slug }: { slug: string }) {
-  const { programs, enrolledProgramIds, programOwnerLabels, programTracksByProgramId, loading, enrollmentLoading, error } = useStudentPrograms(slug);
+  const { programs, enrolledProgramIds, programOwnerLabels, programTracksByProgramId, accountType, viewerProfiles, loading, enrollmentLoading, error } = useStudentPrograms(slug);
   const { unreadCount } = useStudentUnreadAnnouncements(slug);
 
   if (loading || enrollmentLoading) {
@@ -1257,7 +1280,7 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
           <ProgramHero program={program} />
           <div className="space-y-3 p-4">
             <div className="flex flex-wrap items-center gap-2 text-xs font-medium text-[#17624F]">
-              <span>{mosque.name}</span>
+              <span>{mosqueSlugLabel(mosque)}</span>
               <span aria-hidden>•</span>
               <span>{age}</span>
               <span aria-hidden>•</span>
@@ -1508,7 +1531,7 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
 }
 
 export function StudentClassesData({ slug }: { slug: string }) {
-  const { mosque, programs, enrolledProgramIds, loading, enrollmentLoading, error } = useStudentPrograms(slug);
+  const { mosque, programs, enrolledProgramIds, accountType, viewerProfiles, loading, enrollmentLoading, error } = useStudentPrograms(slug);
   const router = useRouter();
   const searchParams = useSearchParams();
   const initialStudentClassesTab = searchParams.get("tab");
@@ -1544,7 +1567,7 @@ export function StudentClassesData({ slug }: { slug: string }) {
         <EnrolledClassList programs={enrolledPrograms} mosqueSlug={mosque.slug} />
       );
   } else {
-    content = <ProgramCardGrid programs={browsePrograms} mosqueSlug={mosque.slug} emptyText="No available classes to browse right now." enrolledProgramIds={enrolledProgramIds} detailBaseHref={`/m/${mosque.slug}/portal/classes`} />;
+    content = <ProgramCardGrid programs={browsePrograms} mosqueSlug={mosque.slug} emptyText="No available classes to browse right now." enrolledProgramIds={enrolledProgramIds} detailBaseHref={`/m/${mosque.slug}/portal/classes`} accountType={accountType} viewerProfiles={viewerProfiles} />;
   }
 
   return (
@@ -4531,7 +4554,7 @@ export function AdminMasjidData({ slug }: { slug: string }) {
         <div className="space-y-4 p-4">
           <div>
             <span className="inline-flex min-h-7 items-center rounded-full bg-[#E7F3F8] px-3 text-xs font-bold uppercase tracking-wide text-[#2F6077]">Masjid Control</span>
-            <h2 className="mt-3 text-2xl font-semibold leading-7 text-[#26323A]">{mosque.name}</h2>
+            <h2 className="mt-3 text-2xl font-semibold leading-7 text-[#26323A]">{mosqueSlugLabel(mosque)}</h2>
           </div>
           <div className="divide-y divide-[#E3E8EC] border-t border-[#E3E8EC]">
             <TeacherActionLink href={`/m/${slug}/admin/masjid/information`} icon={<EditClassIcon />} label="Masjid Information" />
@@ -4549,6 +4572,7 @@ export function AdminMasjidInformationData({ slug }: { slug: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [name, setName] = useState("");
+  const [editableSlug, setEditableSlug] = useState("");
   const [address, setAddress] = useState("");
   const [logoUrl, setLogoUrl] = useState("");
   const [pictureUrl, setPictureUrl] = useState("");
@@ -4572,6 +4596,7 @@ export function AdminMasjidInformationData({ slug }: { slug: string }) {
         }
         setMosque(data ?? null);
         setName(data?.name ?? "");
+        setEditableSlug(data?.slug ?? slug);
         setAddress(data?.address ?? "");
         setLogoUrl(data?.logo_url ?? "");
         setPictureUrl(data?.picture_url ?? "");
@@ -4644,6 +4669,7 @@ export function AdminMasjidInformationData({ slug }: { slug: string }) {
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
         body: JSON.stringify({
           name: name.trim(),
+          slug: editableSlug.trim(),
           address: address.trim() || null,
           logoUrl: nextLogoUrl || null,
           pictureUrl: nextPictureUrl || null,
@@ -4656,12 +4682,17 @@ export function AdminMasjidInformationData({ slug }: { slug: string }) {
 
       setMosque(result.mosque);
       setName(result.mosque.name);
+      setEditableSlug(result.mosque.slug);
       setAddress(result.mosque.address ?? "");
       setLogoUrl(result.mosque.logo_url ?? "");
       setPictureUrl(result.mosque.picture_url ?? "");
       setLogoFile(null);
       setPictureFile(null);
       setToast({ tone: "success", message: "Masjid information updated." });
+      if (result.mosque.slug !== slug) {
+        window.location.href = `/m/${result.mosque.slug}/admin/masjid/information`;
+        return;
+      }
     } catch (saveError) {
       setToast({ tone: "error", message: saveError instanceof Error ? saveError.message : "Could not update masjid." });
     } finally {
@@ -4708,12 +4739,16 @@ export function AdminMasjidInformationData({ slug }: { slug: string }) {
         <div className="space-y-5 p-3 sm:p-4">
           <div>
             <span className="inline-flex min-h-7 items-center rounded-full bg-[#E7F3F8] px-3 text-xs font-bold uppercase tracking-wide text-[#2F6077]">Masjid Information</span>
-            <h2 className="mt-3 text-2xl font-semibold leading-7 text-[#26323A]">{name || mosque.name}</h2>
+            <h2 className="mt-3 text-2xl font-semibold leading-7 text-[#26323A]">{titleCase(editableSlug || mosque.slug)}</h2>
           </div>
           <div className="grid gap-4">
             <label className="grid gap-1">
               <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#7B858C]">Name</span>
               <input value={name} onChange={(event) => setName(event.target.value)} className="h-12 min-w-0 rounded-[10px] border border-[#B9C3C8] bg-white px-3 text-sm font-semibold text-[#26323A] outline-none focus:border-[#2F8FB3]" />
+            </label>
+            <label className="grid gap-1">
+              <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#7B858C]">Slug</span>
+              <input value={editableSlug} onChange={(event) => setEditableSlug(event.target.value)} className="h-12 min-w-0 rounded-[10px] border border-[#B9C3C8] bg-white px-3 text-sm font-semibold text-[#26323A] outline-none focus:border-[#2F8FB3]" placeholder="assiddiq" />
             </label>
             <label className="grid gap-1">
               <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#7B858C]">Address</span>
@@ -4948,8 +4983,8 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
       const { data: mosque } = await supabase.from("mosques").select("*").eq("slug", slug).maybeSingle();
       if (mosque) {
         const mosqueAddress = typeof mosque.address === "string" && mosque.address.trim() ? mosque.address.trim() : "";
-        const defaultLocation = mosqueAddress ? `${mosque.name} - ${mosqueAddress}` : mosque.name;
-        setBuilderStatus((current) => current.location ? current : { ...current, location: defaultLocation });
+        setBuilderStatus((current) => current.location ? current : { ...current, location: mosque.name ?? titleCase(slug), room: mosqueAddress });
+        setRoomVisible(Boolean(mosqueAddress));
       }
       if (data?.account_type === "admin") {
         if (!mosque) {
@@ -5179,6 +5214,8 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
           contactName: effectiveBuilderStatus.contactName.trim() || null,
           contactEmail: effectiveBuilderStatus.contactEmail.trim() || null,
           contactPhone: effectiveBuilderStatus.contactPhone.trim() || null,
+          coverPriceLabelEnabled: effectiveBuilderStatus.coverPriceLabelEnabled,
+          coverPriceLabel: effectiveBuilderStatus.coverPriceLabel.trim() || null,
           thumbnailUrl: thumbnailFile ? null : thumbnailUrl.trim() || null,
           audienceGender,
           ageRangeText: allAges ? null : formatAgeRangeForSave(ageStart, ageEnd),
@@ -5244,6 +5281,8 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
             contactName: effectiveBuilderStatus.contactName.trim() || null,
             contactEmail: effectiveBuilderStatus.contactEmail.trim() || null,
             contactPhone: effectiveBuilderStatus.contactPhone.trim() || null,
+            coverPriceLabelEnabled: effectiveBuilderStatus.coverPriceLabelEnabled,
+            coverPriceLabel: effectiveBuilderStatus.coverPriceLabel.trim() || null,
             thumbnailUrl: nextThumbnailUrl,
             audienceGender: program.audience_gender,
             ageRangeText: program.age_range_text,
@@ -5322,35 +5361,14 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
       if (tracksError) {
         throw new Error(tracksError.message);
       }
-      if ((effectiveBuilderStatus.programType === "event" && eventDate) || effectiveBuilderStatus.schedulePattern === "custom_dates") {
-        const sessionRows = trackRows.flatMap((track, trackIndex) => {
-          const insertedTrack = (insertedTracks ?? []).find((row) => row.sort_order === trackIndex + 1);
-          const sessions = effectiveBuilderStatus.programType === "event" ? track.sessions.slice(0, 1) : track.sessions;
-          return sessions.flatMap((session) => {
-            const sessionDate = effectiveBuilderStatus.programType === "event" ? eventDate : session.date;
-            if (!sessionDate) {
-              return [];
-            }
-            return [{
-            program_id: program.id,
-            program_track_id: insertedTrack?.id ?? null,
-            session_date: sessionDate,
-            start_time: session.start,
-            end_time: session.end,
-            title: track.name.trim() || program.title,
-            location: track.location?.trim() || effectiveBuilderStatus.location.trim() || null,
-            room: track.room?.trim() || effectiveBuilderStatus.room.trim() || null,
-            capacity: track.capacity ? Number(track.capacity) : null,
-          }];
-          });
-        });
-        if (sessionRows.length) {
-          const { error: sessionsError } = await supabase.from("program_sessions").insert(sessionRows);
-          if (sessionsError) {
-            throw new Error(sessionsError.message);
-          }
-        }
-      }
+      await saveCanonicalProgramSessions(supabase, program.id, insertedTracks ?? [], trackRows, {
+        programType: effectiveBuilderStatus.programType,
+        schedulePattern: effectiveBuilderStatus.schedulePattern,
+        eventDate,
+        title: program.title,
+        location: effectiveBuilderStatus.location.trim() || null,
+        room: effectiveBuilderStatus.room.trim() || null,
+      });
 
       const uploadedMedia = [];
       for (const [index, row] of mediaRows.entries()) {
@@ -5488,11 +5506,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
                 No registration deadline
               </label>
             </label>
-            <EditBox label="Location" value={builderStatus.location} onChange={(value) => setBuilderStatus((current) => ({ ...current, location: value }))} />
-            <div className="space-y-2">
-              {roomVisible ? <EditBox label="Room" value={builderStatus.room} onChange={(value) => setBuilderStatus((current) => ({ ...current, room: value }))} /> : <button type="button" onClick={() => setRoomVisible(true)} className="mt-6 text-sm font-semibold text-[#2F8FB3]">Add room</button>}
-              {builderStatus.programType === "event" && !eventTimeVisible ? <button type="button" onClick={() => setEventTimeVisible(true)} className="block text-sm font-semibold text-[#2F8FB3]">Add start and end time</button> : null}
-            </div>
+            {builderStatus.programType === "event" && !eventTimeVisible ? <button type="button" onClick={() => setEventTimeVisible(true)} className="block text-sm font-semibold text-[#2F8FB3]">Add start and end time</button> : null}
           </div>
         ) : null}
 
@@ -5516,7 +5530,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
               </select>
             </label>
             {builderStatus.applicationMode === "application_required" ? (
-              <label className="flex items-center gap-2 text-sm font-semibold text-[#26323A]">
+              <label className="flex min-h-12 items-center gap-3 rounded-[14px] border border-[#DCE7EB] bg-[#F7FBFC] px-3 text-sm font-semibold text-[#26323A] md:col-span-2">
                 <input type="checkbox" checked={builderStatus.acceptingApplications} onChange={(event) => setBuilderStatus((current) => ({ ...current, acceptingApplications: event.target.checked }))} />
                 Accepting applications now
               </label>
@@ -5542,6 +5556,10 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
           </div>
           <div className="space-y-3 p-4">
             <EditBox label="Description" value={description} onChange={setDescription} multiline />
+            <div className="grid gap-3">
+              <EditBox label="Location name" value={builderStatus.location} onChange={(value) => setBuilderStatus((current) => ({ ...current, location: value }))} />
+              <EditBox label="Location address" value={builderStatus.room} onChange={(value) => setBuilderStatus((current) => ({ ...current, room: value }))} />
+            </div>
           </div>
         </section>
       ) : null}
@@ -5639,6 +5657,10 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
         setInstructorContactPhone={setInstructorContactPhone}
         contactEmail={builderStatus.contactEmail}
         setContactEmail={(value) => setBuilderStatus((current) => ({ ...current, contactEmail: value }))}
+        coverPriceLabelEnabled={builderStatus.coverPriceLabelEnabled}
+        setCoverPriceLabelEnabled={(value) => setBuilderStatus((current) => ({ ...current, coverPriceLabelEnabled: value }))}
+        coverPriceLabel={builderStatus.coverPriceLabel}
+        setCoverPriceLabel={(value) => setBuilderStatus((current) => ({ ...current, coverPriceLabel: value }))}
       />
 
       <div className="sticky bottom-[92px] z-10 space-y-2 bg-white py-2 md:bottom-4">
@@ -5707,11 +5729,13 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
               </select>
             </label>
             {builderStatus.applicationMode === "application_required" ? (
-              <label className="flex items-center gap-2 text-sm font-semibold text-[#26323A]">
+              <label className="flex min-h-12 items-center gap-3 rounded-[14px] border border-[#DCE7EB] bg-[#F7FBFC] px-3 text-sm font-semibold text-[#26323A] md:col-span-2">
                 <input type="checkbox" checked={builderStatus.acceptingApplications} onChange={(event) => setBuilderStatus((current) => ({ ...current, acceptingApplications: event.target.checked }))} />
                 Accepting applications now
               </label>
-            ) : null}
+            ) : (
+              <p className="rounded-[14px] border border-[#DCE7EB] bg-[#F7FBFC] px-3 py-3 text-sm font-semibold text-[#52616A] md:col-span-2">This join mode does not use public applications.</p>
+            )}
             <label className="flex items-center gap-2 text-sm font-semibold text-[#26323A]">
               <input type="checkbox" checked={builderStatus.waitlistEnabled} onChange={(event) => setBuilderStatus((current) => ({ ...current, waitlistEnabled: event.target.checked }))} />
               Waitlist enabled
@@ -5799,15 +5823,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
                 No registration deadline
               </label>
             </label>
-            <EditBox label="Location" value={builderStatus.location} onChange={(value) => setBuilderStatus((current) => ({ ...current, location: value }))} />
-            <div className="space-y-2">
-              {roomVisible ? (
-                <EditBox label="Room" value={builderStatus.room} onChange={(value) => setBuilderStatus((current) => ({ ...current, room: value }))} />
-              ) : (
-                <button type="button" onClick={() => setRoomVisible(true)} className="mt-6 text-sm font-semibold text-[#2F8FB3]">Add room</button>
-              )}
-              {builderStatus.programType === "event" && !eventTimeVisible ? <button type="button" onClick={() => setEventTimeVisible(true)} className="block text-sm font-semibold text-[#2F8FB3]">Add start and end time</button> : null}
-            </div>
+            {builderStatus.programType === "event" && !eventTimeVisible ? <button type="button" onClick={() => setEventTimeVisible(true)} className="block text-sm font-semibold text-[#2F8FB3]">Add start and end time</button> : null}
           </div>
         ) : null}
       </section>
@@ -5828,6 +5844,10 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
           </div>
           <div className="space-y-3 p-4">
             <EditBox label="Description" value={description} onChange={setDescription} multiline />
+            <div className="grid gap-3">
+              <EditBox label="Location name" value={builderStatus.location} onChange={(value) => setBuilderStatus((current) => ({ ...current, location: value }))} />
+              <EditBox label="Location address" value={builderStatus.room} onChange={(value) => setBuilderStatus((current) => ({ ...current, room: value }))} />
+            </div>
           </div>
         </section>
       ) : null}
@@ -5931,6 +5951,10 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
         setInstructorContactPhone={setInstructorContactPhone}
         contactEmail={builderStatus.contactEmail}
         setContactEmail={(value) => setBuilderStatus((current) => ({ ...current, contactEmail: value }))}
+        coverPriceLabelEnabled={builderStatus.coverPriceLabelEnabled}
+        setCoverPriceLabelEnabled={(value) => setBuilderStatus((current) => ({ ...current, coverPriceLabelEnabled: value }))}
+        coverPriceLabel={builderStatus.coverPriceLabel}
+        setCoverPriceLabel={(value) => setBuilderStatus((current) => ({ ...current, coverPriceLabel: value }))}
       />
 
       <div className="sticky bottom-[92px] z-10 space-y-2 bg-white py-2 md:bottom-4">
@@ -6057,10 +6081,12 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
                 <option value="hidden_private">Hidden/private</option>
               </select>
             </label>
-            {builderStatus.applicationMode === "application_required" ? <label className="flex items-center gap-2 text-sm font-semibold text-[#26323A]">
+            {builderStatus.applicationMode === "application_required" ? <label className="flex min-h-12 items-center gap-3 rounded-[14px] border border-[#DCE7EB] bg-[#F7FBFC] px-3 text-sm font-semibold text-[#26323A] md:col-span-2">
               <input type="checkbox" checked={builderStatus.acceptingApplications} onChange={(event) => setBuilderStatus((current) => ({ ...current, acceptingApplications: event.target.checked }))} />
               Accepting applications now
-            </label> : null}
+            </label> : (
+              <p className="rounded-[14px] border border-[#DCE7EB] bg-[#F7FBFC] px-3 py-3 text-sm font-semibold text-[#52616A] md:col-span-2">This join mode does not use public applications.</p>
+            )}
             {builderStatus.applicationMode === "invite_only" ? (
               <p className="rounded-[12px] bg-[#F2F7F8] px-3 py-2 text-xs font-semibold leading-5 text-[#52616A]">
                 Invite-only classes will use a class invite code after creation.
@@ -6162,21 +6188,11 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
                 No registration deadline
               </label>
             </label>
-            <EditBox label="Location" value={builderStatus.location} onChange={(value) => setBuilderStatus((current) => ({ ...current, location: value }))} />
-            <div className="space-y-2">
-              {roomVisible ? (
-                <EditBox label="Room" value={builderStatus.room} onChange={(value) => setBuilderStatus((current) => ({ ...current, room: value }))} />
-              ) : (
-                <button type="button" onClick={() => setRoomVisible(true)} className="mt-6 text-sm font-semibold text-[#2F8FB3]">
-                  Add room
-                </button>
-              )}
-              {builderStatus.programType === "event" && !eventTimeVisible ? (
-                <button type="button" onClick={() => setEventTimeVisible(true)} className="block text-sm font-semibold text-[#2F8FB3]">
-                  Add start and end time
-                </button>
-              ) : null}
-            </div>
+            {builderStatus.programType === "event" && !eventTimeVisible ? (
+              <button type="button" onClick={() => setEventTimeVisible(true)} className="block text-sm font-semibold text-[#2F8FB3]">
+                Add start and end time
+              </button>
+            ) : null}
           </div>
         ) : null}
       </section>
@@ -6191,6 +6207,10 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
         </div>
         <div className="space-y-3 p-4">
           <EditBox label="Description" value={description} onChange={setDescription} multiline />
+          <div className="grid gap-3">
+            <EditBox label="Location name" value={builderStatus.location} onChange={(value) => setBuilderStatus((current) => ({ ...current, location: value }))} />
+            <EditBox label="Location address" value={builderStatus.room} onChange={(value) => setBuilderStatus((current) => ({ ...current, room: value }))} />
+          </div>
         </div>
       </section>
       ) : null}
@@ -6302,6 +6322,10 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
         setInstructorContactPhone={setInstructorContactPhone}
         contactEmail={builderStatus.contactEmail}
         setContactEmail={(value) => setBuilderStatus((current) => ({ ...current, contactEmail: value }))}
+        coverPriceLabelEnabled={builderStatus.coverPriceLabelEnabled}
+        setCoverPriceLabelEnabled={(value) => setBuilderStatus((current) => ({ ...current, coverPriceLabelEnabled: value }))}
+        coverPriceLabel={builderStatus.coverPriceLabel}
+        setCoverPriceLabel={(value) => setBuilderStatus((current) => ({ ...current, coverPriceLabel: value }))}
       />
 
       <div className="sticky bottom-[92px] z-10 space-y-2 bg-white py-2 md:bottom-4">
@@ -6430,6 +6454,10 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         supabase.from("program_tracks").select("*").eq("program_id", programId).order("sort_order", { ascending: true }),
         supabase.from("program_sessions").select("*").eq("program_id", programId).order("session_date", { ascending: true }).order("start_time", { ascending: true }),
       ]);
+      const trackIds = (trackResult.data ?? []).map((track) => track.id);
+      const { data: trackSessionLinks } = trackIds.length
+        ? await supabase.from("program_track_sessions").select("*").in("program_track_id", trackIds)
+        : { data: [] as ProgramTrackSession[] };
 
       if (programError) {
         setError(programError.message);
@@ -6536,18 +6564,15 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
           contactName: programRow.contact_name ?? "",
           contactEmail: programRow.contact_email ?? directorProfile?.email ?? "",
           contactPhone: programRow.contact_phone ?? "",
+          coverPriceLabelEnabled: programRow.cover_price_label_enabled !== false,
+          coverPriceLabel: programRow.cover_price_label ?? "",
         });
         const nextOutcomeRows = (outcomeResult.data ?? []).map((row) => ({ id: row.id, text: row.text }));
         const nextFaqRows = (faqResult.data ?? []).length
           ? (faqResult.data ?? []).map((row) => ({ id: row.id, question: row.question, answer: row.answer }))
           : defaultProgramFaqRows;
         const nextMediaRows = (mediaResult.data ?? []).map((row) => ({ id: row.id, url: row.url, title: row.title ?? "", mediaType: row.media_type }));
-        const storedSessions: ProgramScheduleRow[] = (sessionResult.data ?? []).map((session) => ({
-          day: "Monday" as const,
-          date: session.session_date,
-          start: String(session.start_time).slice(0, 5),
-          end: String(session.end_time ?? session.start_time).slice(0, 5),
-        }));
+        const storedSessions: ProgramScheduleRow[] = (sessionResult.data ?? []).map(scheduleRowFromProgramSession);
         const defaultSession: ProgramScheduleRow = firstRow ?? { day: "Monday", start: "18:00", end: "20:00" };
         const nextTrackRows: ProgramEditorTrackRow[] =
           programRow.program_type === "event"
@@ -6555,20 +6580,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
             : programRow.schedule_pattern === "custom_dates"
               ? [{ id: "sessions", name: "Sessions", sessions: storedSessions.length ? storedSessions : [{ ...defaultSession, date: "" }] }]
               : (trackResult.data ?? []).length
-            ? (trackResult.data ?? []).map((track) => {
-                const trackSchedule = parseProgramSchedule(track.schedule);
-                return {
-                  id: track.id,
-                  name: track.name,
-                  sessions: trackSchedule.length ? trackSchedule : [defaultSession],
-                  location: track.location ?? "",
-                  room: track.room ?? "",
-                  capacity: track.capacity ? String(track.capacity) : "",
-                  pricingOverrideEnabled: track.pricing_override_enabled,
-                  priceMonthly: track.price_monthly_cents ? String(track.price_monthly_cents / 100) : "",
-                  priceAnnual: track.price_annual_cents ? String(track.price_annual_cents / 100) : "",
-                };
-              })
+            ? linkedEditorTrackRows(trackResult.data ?? [], sessionResult.data ?? [], trackSessionLinks ?? [], defaultSession)
             : [
                 {
                   id: "default",
@@ -6828,6 +6840,8 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         contactName: effectiveBuilderStatus.contactName.trim() || null,
         contactEmail: effectiveBuilderStatus.contactEmail.trim() || null,
         contactPhone: effectiveBuilderStatus.contactPhone.trim() || null,
+        coverPriceLabelEnabled: effectiveBuilderStatus.coverPriceLabelEnabled,
+        coverPriceLabel: effectiveBuilderStatus.coverPriceLabel.trim() || null,
         thumbnailUrl: thumbnailUrl.trim() || null,
         audienceGender: audienceGender || null,
         ageRangeText: nextAgeRangeText,
@@ -6952,36 +6966,19 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         setBusy(false);
         return;
       }
-      if ((effectiveBuilderStatus.programType === "event" && eventDate) || effectiveBuilderStatus.schedulePattern === "custom_dates") {
-        const sessionRows = trackRows.flatMap((track, trackIndex) => {
-          const insertedTrack = (insertedTracks ?? []).find((row) => row.sort_order === trackIndex + 1);
-          const sessions = effectiveBuilderStatus.programType === "event" ? track.sessions.slice(0, 1) : track.sessions;
-          return sessions.flatMap((session) => {
-            const sessionDate = effectiveBuilderStatus.programType === "event" ? eventDate : session.date;
-            if (!sessionDate) {
-              return [];
-            }
-            return [{
-              program_id: program.id,
-              program_track_id: insertedTrack?.id ?? null,
-              session_date: sessionDate,
-              start_time: session.start,
-              end_time: session.end,
-              title: track.name.trim() || title.trim(),
-              location: track.location?.trim() || effectiveBuilderStatus.location.trim() || null,
-              room: track.room?.trim() || effectiveBuilderStatus.room.trim() || null,
-              capacity: track.capacity ? Number(track.capacity) : null,
-            }];
-          });
+      try {
+        await saveCanonicalProgramSessions(supabase, program.id, insertedTracks ?? [], trackRows, {
+          programType: effectiveBuilderStatus.programType,
+          schedulePattern: effectiveBuilderStatus.schedulePattern,
+          eventDate,
+          title: title.trim(),
+          location: effectiveBuilderStatus.location.trim() || null,
+          room: effectiveBuilderStatus.room.trim() || null,
         });
-        if (sessionRows.length) {
-          const { error: sessionsError } = await supabase.from("program_sessions").insert(sessionRows);
-          if (sessionsError) {
-            setToast({ tone: "error", message: sessionsError.message });
-            setBusy(false);
-            return;
-          }
-        }
+      } catch (sessionError) {
+        setToast({ tone: "error", message: sessionError instanceof Error ? sessionError.message : "Could not save sessions." });
+        setBusy(false);
+        return;
       }
     }
 
@@ -7008,6 +7005,8 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
   if (!isDirector) {
     return <EmptyState title="Director access required" text="Only the program director can edit this class." />;
   }
+
+  const startDateLocked = programAlreadyStarted(program);
 
   const editWizardContent = (
     <>
@@ -7051,10 +7050,9 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
               {builderStatus.programType === "event" ? (
                 <input type="date" value={eventDate} onChange={(event) => setEventDate(event.target.value)} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]" />
               ) : (
-                <input type={builderStatus.startNow ? "text" : "date"} disabled={builderStatus.startNow} value={builderStatus.startNow ? "Start Immediately" : builderStatus.startDate} onChange={(event) => setBuilderStatus((current) => ({ ...current, startDate: event.target.value }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3] disabled:bg-[#F2F6F7]" />
+                <input type={startDateLocked || builderStatus.startNow ? "text" : "date"} disabled={startDateLocked || builderStatus.startNow} value={startDateLocked ? "Already Started" : builderStatus.startNow ? "Start Immediately" : builderStatus.startDate} onChange={(event) => setBuilderStatus((current) => ({ ...current, startDate: event.target.value }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3] disabled:bg-[#F2F6F7]" />
               )}
             </label>
-            <EditBox label="Location" value={builderStatus.location} onChange={(value) => setBuilderStatus((current) => ({ ...current, location: value }))} />
           </div>
         ) : null}
 
@@ -7070,13 +7068,21 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
             </label>
             <label className="block">
               <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Application mode</span>
-              <select value={builderStatus.applicationMode} onChange={(event) => setBuilderStatus((current) => ({ ...current, applicationMode: event.target.value as ProgramBuilderStatus["applicationMode"] }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
+              <select value={builderStatus.applicationMode} onChange={(event) => setBuilderStatus((current) => ({ ...current, applicationMode: event.target.value as ProgramBuilderStatus["applicationMode"], acceptingApplications: event.target.value === "application_required" ? current.acceptingApplications : false }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
                 <option value="application_required">Application required</option>
                 <option value="open_enrollment">Open enrollment</option>
                 <option value="invite_only">Invite only</option>
                 <option value="hidden_private">Hidden/private</option>
               </select>
             </label>
+            {builderStatus.applicationMode === "application_required" ? (
+              <label className="flex min-h-12 items-center gap-3 rounded-[14px] border border-[#DCE7EB] bg-[#F7FBFC] px-3 text-sm font-semibold text-[#26323A] md:col-span-2">
+                <input type="checkbox" checked={builderStatus.acceptingApplications} onChange={(event) => setBuilderStatus((current) => ({ ...current, acceptingApplications: event.target.checked }))} />
+                Accepting applications now
+              </label>
+            ) : (
+              <p className="rounded-[14px] border border-[#DCE7EB] bg-[#F7FBFC] px-3 py-3 text-sm font-semibold text-[#52616A] md:col-span-2">This join mode does not use public applications.</p>
+            )}
           </div>
         ) : null}
       </section>
@@ -7099,6 +7105,10 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
           </div>
           <div className="space-y-3 p-4">
             <EditBox label="Description" value={description} onChange={setDescription} multiline />
+            <div className="grid gap-3">
+              <EditBox label="Location name" value={builderStatus.location} onChange={(value) => setBuilderStatus((current) => ({ ...current, location: value }))} />
+              <EditBox label="Location address" value={builderStatus.room} onChange={(value) => setBuilderStatus((current) => ({ ...current, room: value }))} />
+            </div>
           </div>
         </section>
       ) : null}
@@ -7203,6 +7213,10 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         setInstructorContactPhone={setInstructorContactPhone}
         contactEmail={builderStatus.contactEmail}
         setContactEmail={(value) => setBuilderStatus((current) => ({ ...current, contactEmail: value }))}
+        coverPriceLabelEnabled={builderStatus.coverPriceLabelEnabled}
+        setCoverPriceLabelEnabled={(value) => setBuilderStatus((current) => ({ ...current, coverPriceLabelEnabled: value }))}
+        coverPriceLabel={builderStatus.coverPriceLabel}
+        setCoverPriceLabel={(value) => setBuilderStatus((current) => ({ ...current, coverPriceLabel: value }))}
       />
 
       <div className="sticky bottom-[92px] z-10 space-y-2 bg-white py-2 md:bottom-4">
@@ -7640,6 +7654,10 @@ type ProgramEditorFieldsProps = {
   setInstructorContactPhone: (value: string) => void;
   contactEmail?: string;
   setContactEmail?: (value: string) => void;
+  coverPriceLabelEnabled?: boolean;
+  setCoverPriceLabelEnabled?: (value: boolean) => void;
+  coverPriceLabel?: string;
+  setCoverPriceLabel?: (value: string) => void;
 };
 
 function ProgramFaqEditor({ faqRows, onChange }: { faqRows: ProgramEditorFaqRow[]; onChange: Dispatch<SetStateAction<ProgramEditorFaqRow[]>> }) {
@@ -7754,6 +7772,10 @@ function ProgramEditorFields({
   setInstructorContactPhone,
   contactEmail = "",
   setContactEmail,
+  coverPriceLabelEnabled = true,
+  setCoverPriceLabelEnabled,
+  coverPriceLabel = "",
+  setCoverPriceLabel,
 }: ProgramEditorFieldsProps) {
   const showAll = !activeStep;
   const showBasics = showAll || activeStep === "basics";
@@ -7763,6 +7785,7 @@ function ProgramEditorFields({
   const showReview = activeStep === "review";
   const canUsePerTrackPricing = paymentKind === "tareeqah" && programType === "recurring" && schedulePattern === "weekly" && trackRows.length > 0;
   const perTrackPricingEnabled = canUsePerTrackPricing && trackRows.some((track) => track.pricingOverrideEnabled);
+  const weeklySessionLibrary = useMemo(() => uniqueScheduleRows(trackRows.flatMap((track) => track.sessions)), [trackRows]);
 
   function setPerTrackPricingEnabled(enabled: boolean) {
     setTrackRows((current) =>
@@ -7770,6 +7793,50 @@ function ProgramEditorFields({
         ...track,
         pricingOverrideEnabled: enabled,
       })),
+    );
+  }
+
+  function addSharedWeeklySession() {
+    const nextSession: ProgramScheduleRow = { day: "Monday", start: "18:00", end: "20:00" };
+    setTrackRows((current) => current.map((track) => ({ ...track, sessions: uniqueScheduleRows([...track.sessions, nextSession]) })));
+  }
+
+  function updateSharedWeeklySession(previous: ProgramScheduleRow, next: ProgramScheduleRow) {
+    const previousKey = scheduleRowKey(previous);
+    setTrackRows((current) =>
+      current.map((track) => ({
+        ...track,
+        sessions: uniqueScheduleRows(track.sessions.map((session) => scheduleRowKey(session) === previousKey ? next : session)),
+      })),
+    );
+  }
+
+  function removeSharedWeeklySession(session: ProgramScheduleRow) {
+    const key = scheduleRowKey(session);
+    setTrackRows((current) =>
+      current.map((track) => {
+        const remaining = track.sessions.filter((row) => scheduleRowKey(row) !== key);
+        return { ...track, sessions: remaining.length ? remaining : track.sessions };
+      }),
+    );
+  }
+
+  function toggleTrackWeeklySession(trackId: string, session: ProgramScheduleRow, selected: boolean) {
+    const key = scheduleRowKey(session);
+    setTrackRows((current) =>
+      current.map((track) => {
+        if (track.id !== trackId) {
+          return track;
+        }
+        const hasSession = track.sessions.some((row) => scheduleRowKey(row) === key);
+        if (selected && !hasSession) {
+          return { ...track, sessions: uniqueScheduleRows([...track.sessions, session]) };
+        }
+        if (!selected && hasSession && track.sessions.length > 1) {
+          return { ...track, sessions: track.sessions.filter((row) => scheduleRowKey(row) !== key) };
+        }
+        return track;
+      }),
     );
   }
 
@@ -7784,6 +7851,15 @@ function ProgramEditorFields({
       { id: crypto.randomUUID(), text: "Learning outcome #3" },
     ]);
   }
+
+  const [topicsVisible, setTopicsVisible] = useState(false);
+  const [requirementsVisible, setRequirementsVisible] = useState(false);
+  const [whatToBringVisible, setWhatToBringVisible] = useState(false);
+  const [policiesVisible, setPoliciesVisible] = useState(false);
+  const showTopicsField = topicsVisible || Boolean(topicsIntro.trim());
+  const showRequirementsField = requirementsVisible || Boolean(requirementsText.trim());
+  const showWhatToBringField = whatToBringVisible || Boolean(whatToBringText.trim());
+  const showPoliciesField = policiesVisible || Boolean(policiesText.trim());
 
   if (showReview) {
     const program = previewProgram;
@@ -7936,10 +8012,12 @@ function ProgramEditorFields({
                   </div>
                 ))}
               </div>
-              {setTopicsIntro ? <EditBox label="Topics covered" value={topicsIntro} onChange={setTopicsIntro} multiline /> : null}
-              {setRequirementsText ? <EditBox label="Requirements / prerequisites" value={requirementsText} onChange={setRequirementsText} multiline /> : null}
-              {setWhatToBringText ? <EditBox label="What to bring" value={whatToBringText} onChange={setWhatToBringText} multiline /> : null}
-              {setPoliciesText ? <EditBox label="Policies" value={policiesText} onChange={setPoliciesText} multiline /> : null}
+              <div className="grid gap-3">
+                {setTopicsIntro ? (showTopicsField ? <EditBox label="Topics covered" value={topicsIntro} onChange={setTopicsIntro} multiline /> : <button type="button" onClick={() => setTopicsVisible(true)} className="w-fit text-left text-sm font-semibold text-[#2F8FB3]">Add Topics Covered</button>) : null}
+                {setRequirementsText ? (showRequirementsField ? <EditBox label="Prerequisites" value={requirementsText} onChange={setRequirementsText} multiline /> : <button type="button" onClick={() => setRequirementsVisible(true)} className="w-fit text-left text-sm font-semibold text-[#2F8FB3]">Add Prerequisites</button>) : null}
+                {setWhatToBringText ? (showWhatToBringField ? <EditBox label="What to bring" value={whatToBringText} onChange={setWhatToBringText} multiline /> : <button type="button" onClick={() => setWhatToBringVisible(true)} className="w-fit text-left text-sm font-semibold text-[#2F8FB3]">Add What To Bring</button>) : null}
+                {setPoliciesText ? (showPoliciesField ? <EditBox label="Policies" value={policiesText} onChange={setPoliciesText} multiline /> : <button type="button" onClick={() => setPoliciesVisible(true)} className="w-fit text-left text-sm font-semibold text-[#2F8FB3]">Add Policies</button>) : null}
+              </div>
             </div>
           </DetailSection>
         ) : (
@@ -8039,6 +8117,54 @@ function ProgramEditorFields({
 
         {showSchedule && programType === "recurring" && schedulePattern === "weekly" ? <DetailSection title="Schedule Tracks">
           <div className="divide-y divide-[#E6ECEF]">
+            <div className="space-y-3 pb-4">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">Sessions</p>
+                  <p className="text-sm text-[#52616A]">Create each real class meeting once, then choose which tracks include it.</p>
+                </div>
+                <button type="button" onClick={addSharedWeeklySession} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[#A8D4E2] text-xl font-light leading-none text-[#2F8FB3] hover:bg-[#E9F4F8]" aria-label="Add weekly session">
+                  +
+                </button>
+              </div>
+              <div className="space-y-2">
+                {weeklySessionLibrary.map((session) => (
+                  <div key={scheduleRowKey(session)} className="rounded-[14px] border border-[#E0E8EC] bg-[#F8FAFA] p-3">
+                    <div className="grid grid-cols-[minmax(0,1fr)_32px] items-center gap-2">
+                      <select
+                        value={session.day}
+                        onChange={(event) => updateSharedWeeklySession(session, { ...session, day: event.target.value as (typeof scheduleDayOptions)[number] })}
+                        className="h-10 min-w-0 rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-semibold"
+                      >
+                        {scheduleDayOptions.map((day) => <option key={day} value={day}>{day}</option>)}
+                      </select>
+                      {weeklySessionLibrary.length > 1 ? (
+                        <button type="button" onClick={() => removeSharedWeeklySession(session)} className="flex h-8 w-8 items-center justify-center rounded-[7px] text-[#C83F31] hover:bg-[#FDEDEA]" aria-label="Remove weekly session">
+                          <TrashIcon />
+                        </button>
+                      ) : <span aria-hidden />}
+                    </div>
+                    <div className="mt-2 grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2">
+                      <select
+                        value={session.start}
+                        onChange={(event) => updateSharedWeeklySession(session, { ...session, start: event.target.value })}
+                        className="h-10 min-w-0 rounded-[8px] border border-[#B9C3C8] bg-white px-2 text-xs font-semibold"
+                      >
+                        {scheduleTimeOptions.map((time) => <option key={time} value={time}>{formatClockLabel(time)}</option>)}
+                      </select>
+                      <span className="text-xs font-semibold text-[#6B747B]">to</span>
+                      <select
+                        value={session.end}
+                        onChange={(event) => updateSharedWeeklySession(session, { ...session, end: event.target.value })}
+                        className="h-10 min-w-0 rounded-[8px] border border-[#B9C3C8] bg-white px-2 text-xs font-semibold"
+                      >
+                        {scheduleTimeOptions.map((time) => <option key={time} value={time}>{formatClockLabel(time)}</option>)}
+                      </select>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
             {trackRows.map((track, trackIndex) => (
               <div key={track.id} className="my-4 space-y-4 rounded-[18px] border border-[#DCE7EB] bg-[#FAFCFC] p-4 first:mt-0">
                 <div className="flex items-center justify-between gap-3">
@@ -8068,73 +8194,23 @@ function ProgramEditorFields({
                   </span>
                 </label>
                 <div className="space-y-2">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">Times</p>
-                  {track.sessions.map((session, sessionIndex) => (
-                    <div key={`${track.id}-${sessionIndex}`} className="grid grid-cols-[minmax(0,1fr)_82px_82px_28px] items-center gap-1">
-                      <select
-                        value={session.day}
-                        onChange={(event) =>
-                          setTrackRows((current) =>
-                            current.map((item) =>
-                              item.id === track.id
-                                ? { ...item, sessions: item.sessions.map((row, index) => index === sessionIndex ? { ...row, day: event.target.value as (typeof scheduleDayOptions)[number] } : row) }
-                                : item,
-                            ),
-                          )
-                        }
-                        className="h-9 rounded-[7px] border border-[#B9C3C8] px-2 text-xs"
-                      >
-                        {scheduleDayOptions.map((day) => <option key={day} value={day}>{formatDayAbbreviation(day)}</option>)}
-                      </select>
-                      <select
-                        value={session.start}
-                        onChange={(event) =>
-                          setTrackRows((current) =>
-                            current.map((item) =>
-                              item.id === track.id
-                                ? { ...item, sessions: item.sessions.map((row, index) => index === sessionIndex ? { ...row, start: event.target.value } : row) }
-                                : item,
-                            ),
-                          )
-                        }
-                        className="h-9 min-w-0 rounded-[7px] border border-[#B9C3C8] px-1 text-xs"
-                      >
-                        {scheduleTimeOptions.map((time) => <option key={time} value={time}>{formatClockLabel(time)}</option>)}
-                      </select>
-                      <select
-                        value={session.end}
-                        onChange={(event) =>
-                          setTrackRows((current) =>
-                            current.map((item) =>
-                              item.id === track.id
-                                ? { ...item, sessions: item.sessions.map((row, index) => index === sessionIndex ? { ...row, end: event.target.value } : row) }
-                                : item,
-                            ),
-                          )
-                        }
-                        className="h-9 min-w-0 rounded-[7px] border border-[#B9C3C8] px-1 text-xs"
-                      >
-                        {scheduleTimeOptions.map((time) => <option key={time} value={time}>{formatClockLabel(time)}</option>)}
-                      </select>
-                      {track.sessions.length > 1 ? (
-                        <button
-                          type="button"
-                          onClick={() => setTrackRows((current) => current.map((item) => item.id === track.id ? { ...item, sessions: item.sessions.filter((_row, index) => index !== sessionIndex) } : item))}
-                          className="flex h-8 w-8 items-center justify-center rounded-[7px] text-[#C83F31] hover:bg-[#FDEDEA]"
-                          aria-label="Remove time"
-                        >
-                          <TrashIcon />
-                        </button>
-                      ) : <span aria-hidden />}
-                    </div>
-                  ))}
-                  <button
-                    type="button"
-                    onClick={() => setTrackRows((current) => current.map((item) => item.id === track.id ? { ...item, sessions: [...item.sessions, { day: "Monday", start: "18:00", end: "20:00" }] } : item))}
-                    className="min-h-9 rounded-[8px] border border-[#D6DCE0] px-3 text-sm font-semibold text-[#26323A]"
-                  >
-                    Add time
-                  </button>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">Included Sessions</p>
+                  <div className="grid gap-2">
+                    {weeklySessionLibrary.map((session) => {
+                      const checked = track.sessions.some((row) => scheduleRowKey(row) === scheduleRowKey(session));
+                      return (
+                        <label key={`${track.id}-${scheduleRowKey(session)}`} className="flex min-h-11 items-center justify-between gap-3 rounded-[12px] border border-[#E2EAEE] bg-white px-3 text-sm font-semibold text-[#26323A]">
+                          <span>{formatDayAbbreviation(session.day)} • {formatScheduleRange(session.start, session.end)}</span>
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(event) => toggleTrackWeeklySession(track.id, session, event.target.checked)}
+                            className="h-5 w-5"
+                          />
+                        </label>
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
             ))}
@@ -8253,6 +8329,26 @@ function ProgramEditorFields({
               ) : null}
             </div>
             )}
+        </DetailSection> : null}
+
+        {showPricing ? <DetailSection title="Cover Price Tag">
+          <div className="space-y-3">
+            <label className="flex items-start gap-3 rounded-[14px] border border-[#E1E8EC] bg-[#FAFCFC] p-3 text-sm font-semibold text-[#26323A]">
+              <input
+                type="checkbox"
+                checked={coverPriceLabelEnabled}
+                onChange={(event) => setCoverPriceLabelEnabled?.(event.target.checked)}
+                className="mt-1"
+              />
+              <span>
+                Show a price tag on the class cover
+                <span className="mt-1 block text-xs font-medium leading-5 text-[#6B747B]">Leave the label blank to use the automatic public price summary.</span>
+              </span>
+            </label>
+            {coverPriceLabelEnabled ? (
+              <EditBox label="Price tag label" value={coverPriceLabel} onChange={(value) => setCoverPriceLabel?.(value)} />
+            ) : null}
+          </div>
         </DetailSection> : null}
 
         {showPublic ? <DetailSection title="Instructor Display">
@@ -10313,6 +10409,122 @@ async function fetchMosqueProgramsSnapshot(slug: string): Promise<MosquePrograms
   return snapshot;
 }
 
+async function hydrateTracksWithLinkedSessions(
+  supabase: ReturnType<typeof createSupabaseBrowserClient>,
+  programIds: string[],
+  tracks: ProgramTrack[],
+) {
+  if (!programIds.length || !tracks.length) {
+    return tracks;
+  }
+
+  const trackIds = tracks.map((track) => track.id);
+  const [{ data: sessions }, { data: links }] = await Promise.all([
+    supabase.from("program_sessions").select("*").in("program_id", programIds),
+    supabase.from("program_track_sessions").select("*").in("program_track_id", trackIds),
+  ]);
+
+  return applyLinkedSessionsToTracks(tracks, sessions ?? [], links ?? []);
+}
+
+async function saveCanonicalProgramSessions(
+  supabase: ReturnType<typeof createSupabaseBrowserClient>,
+  programId: string,
+  insertedTracks: Array<{ id: string; sort_order: number | null }>,
+  trackRows: ProgramEditorTrackRow[],
+  options: {
+    programType: ProgramBuilderStatus["programType"];
+    schedulePattern: ProgramBuilderStatus["schedulePattern"];
+    eventDate?: string;
+    title: string;
+    location?: string | null;
+    room?: string | null;
+  },
+) {
+  const insertedTrackBySortOrder = new Map(insertedTracks.map((track) => [track.sort_order ?? 0, track.id]));
+  const sessionPayloadByKey = new Map<string, Database["public"]["Tables"]["program_sessions"]["Insert"]>();
+  const linkKeysByTrackId = new Map<string, Set<string>>();
+
+  for (const [trackIndex, track] of trackRows.entries()) {
+    const insertedTrackId = insertedTrackBySortOrder.get(trackIndex + 1);
+    if (!insertedTrackId) {
+      continue;
+    }
+    const sessions = options.programType === "event" ? track.sessions.slice(0, 1) : track.sessions;
+    for (const session of sessions) {
+      const sessionDate = options.programType === "event" ? options.eventDate : options.schedulePattern === "custom_dates" ? session.date : null;
+      if ((options.programType === "event" || options.schedulePattern === "custom_dates") && !sessionDate) {
+        continue;
+      }
+      const day = options.schedulePattern === "weekly" && options.programType !== "event"
+        ? session.day
+        : sessionDate
+          ? dayFromSessionDate(sessionDate)
+          : session.day;
+      const row = {
+        ...session,
+        date: sessionDate ?? undefined,
+        day,
+        start: normalizeScheduleTime(session.start) || session.start,
+        end: normalizeScheduleTime(session.end) || session.end || session.start,
+      };
+      const key = scheduleRowKey(row);
+      if (!sessionPayloadByKey.has(key)) {
+        sessionPayloadByKey.set(key, {
+          program_id: programId,
+          program_track_id: null,
+          session_date: sessionDate ?? null,
+          day_of_week: day,
+          start_time: row.start,
+          end_time: row.end,
+          title: options.programType === "event" ? options.title : `${day} Session`,
+          location: track.location?.trim() || options.location || null,
+          room: track.room?.trim() || options.room || null,
+          capacity: track.capacity ? Number(track.capacity) : null,
+        });
+      }
+      const nextKeys = linkKeysByTrackId.get(insertedTrackId) ?? new Set<string>();
+      nextKeys.add(key);
+      linkKeysByTrackId.set(insertedTrackId, nextKeys);
+    }
+  }
+
+  const sessionEntries = Array.from(sessionPayloadByKey.entries());
+  if (!sessionEntries.length) {
+    return;
+  }
+
+  const { data: insertedSessions, error: sessionsError } = await supabase
+    .from("program_sessions")
+    .insert(sessionEntries.map(([, payload]) => payload))
+    .select("id");
+  if (sessionsError) {
+    throw new Error(sessionsError.message);
+  }
+
+  const sessionIdByKey = new Map<string, string>();
+  sessionEntries.forEach(([key], index) => {
+    const insertedSessionId = insertedSessions?.[index]?.id;
+    if (insertedSessionId) {
+      sessionIdByKey.set(key, insertedSessionId);
+    }
+  });
+
+  const linkRows = Array.from(linkKeysByTrackId.entries()).flatMap(([programTrackId, keys]) =>
+    Array.from(keys).flatMap((key) => {
+      const programSessionId = sessionIdByKey.get(key);
+      return programSessionId ? [{ program_track_id: programTrackId, program_session_id: programSessionId }] : [];
+    }),
+  );
+
+  if (linkRows.length) {
+    const { error: linkError } = await supabase.from("program_track_sessions").insert(linkRows);
+    if (linkError) {
+      throw new Error(linkError.message);
+    }
+  }
+}
+
 function useTeacherPrograms(slug: string) {
   const [programs, setPrograms] = useState<ProgramScheduleSource[]>([]);
   const [allPrograms, setAllPrograms] = useState<ProgramScheduleSource[]>([]);
@@ -10416,9 +10628,10 @@ function useTeacherPrograms(slug: string) {
       const { data: trackRows } = programIds.length
         ? await supabase.from("program_tracks").select("*").in("program_id", programIds).eq("is_active", true).order("sort_order", { ascending: true })
         : { data: [] as ProgramTrack[] };
+      const hydratedTrackRows = await hydrateTracksWithLinkedSessions(supabase, programIds, trackRows ?? []);
       const programsWithTracks = (mosquePrograms ?? []).map((program) => ({
         ...program,
-        scheduleTracks: (trackRows ?? []).filter((track) => track.program_id === program.id),
+        scheduleTracks: hydratedTrackRows.filter((track) => track.program_id === program.id),
       }));
       if (active) {
         const nextRoleByProgramId: Record<string, TeacherProgramRole> = {};
@@ -10542,12 +10755,13 @@ function useAdminProgramsWithTracks(slug: string) {
             .eq("is_active", true)
             .order("sort_order", { ascending: true })
         : { data: [] as ProgramTrack[] };
+      const hydratedTrackRows = await hydrateTracksWithLinkedSessions(supabase, programIds, trackRows ?? []);
 
       if (active) {
         setPrograms(
           (programRows ?? []).map((program) => ({
             ...program,
-            scheduleTracks: (trackRows ?? []).filter((track) => track.program_id === program.id),
+            scheduleTracks: hydratedTrackRows.filter((track) => track.program_id === program.id),
           })),
         );
         setLoading(false);
@@ -10569,6 +10783,7 @@ function useStudentPrograms(slug: string) {
   const [programOwnerLabels, setProgramOwnerLabels] = useState<Record<string, string[]>>({});
   const [programTracksByProgramId, setProgramTracksByProgramId] = useState<Record<string, ProgramTrack[]>>({});
   const [accountType, setAccountType] = useState<string | null>(null);
+  const [viewerProfiles, setViewerProfiles] = useState<StudentDisplay[]>([]);
   const [enrollmentLoading, setEnrollmentLoading] = useState(true);
 
   useEffect(() => {
@@ -10592,33 +10807,37 @@ function useStudentPrograms(slug: string) {
           setProgramOwnerLabels({});
           setProgramTracksByProgramId({});
           setAccountType(null);
+          setViewerProfiles([]);
           setEnrollmentLoading(false);
         }
         return;
       }
 
       const [{ data: profile }, { data: mosque }] = await Promise.all([
-        supabase.from("profiles").select("account_type").eq("id", userId).maybeSingle(),
+        supabase.from("profiles").select("id, full_name, email, phone_number, avatar_url, age, gender, date_of_birth, account_type").eq("id", userId).maybeSingle(),
         supabase.from("mosques").select("id").eq("slug", slug).maybeSingle(),
       ]);
 
       const nextAccountType = profile?.account_type ?? null;
       if (nextAccountType === "parent" && mosque?.id) {
         const { children } = await fetchParentChildren(supabase, slug, userId, mosque.id);
+        const possibleProfiles = [profile, ...children].filter(Boolean) as StudentDisplay[];
         const childIds = children.map((child) => child.id);
-        if (childIds.length === 0) {
+        const possibleIds = Array.from(new Set([userId, ...childIds]));
+        if (possibleIds.length === 0) {
           if (active) {
             setEnrolledProgramIds([]);
             setProgramOwnerLabels({});
             setProgramTracksByProgramId({});
             setAccountType(nextAccountType);
+            setViewerProfiles(possibleProfiles);
             setEnrollmentLoading(false);
           }
           return;
         }
 
-        const { data } = await supabase.from("enrollments").select("id, program_id, student_profile_id").in("student_profile_id", childIds);
-        const childNameById = new Map(children.map((child) => [child.id, child.full_name?.trim() || "Child"]));
+        const { data } = await supabase.from("enrollments").select("id, program_id, student_profile_id").in("student_profile_id", possibleIds);
+        const childNameById = new Map(possibleProfiles.map((student) => [student.id, student.id === userId ? (student.full_name?.trim() || "You") : (student.full_name?.trim() || "Child")]));
         const owners: Record<string, string[]> = {};
         for (const row of data ?? []) {
           const childName = childNameById.get(row.student_profile_id);
@@ -10633,6 +10852,7 @@ function useStudentPrograms(slug: string) {
           setProgramOwnerLabels(owners);
           setProgramTracksByProgramId(trackMap);
           setAccountType(nextAccountType);
+          setViewerProfiles(possibleProfiles);
           setEnrollmentLoading(false);
         }
         return;
@@ -10645,6 +10865,7 @@ function useStudentPrograms(slug: string) {
         setProgramOwnerLabels({});
         setProgramTracksByProgramId(trackMap);
         setAccountType(nextAccountType);
+        setViewerProfiles(profile ? [profile as StudentDisplay] : []);
         setEnrollmentLoading(false);
       }
     }
@@ -10662,7 +10883,7 @@ function useStudentPrograms(slug: string) {
     };
   }, [slug]);
 
-  return { ...base, enrolledProgramIds, programOwnerLabels, programTracksByProgramId, accountType, enrollmentLoading };
+  return { ...base, enrolledProgramIds, programOwnerLabels, programTracksByProgramId, accountType, viewerProfiles, enrollmentLoading };
 }
 
 async function loadEnrollmentTrackMap(
@@ -10689,7 +10910,9 @@ async function loadEnrollmentTrackMap(
     .in("id", trackIds)
     .eq("is_active", true)
     .order("sort_order", { ascending: true });
-  const trackById = new Map((tracks ?? []).map((track) => [track.id, track]));
+  const programIds = Array.from(new Set(enrollments.map((enrollment) => enrollment.program_id)));
+  const hydratedTracks = await hydrateTracksWithLinkedSessions(supabase, programIds, tracks ?? []);
+  const trackById = new Map(hydratedTracks.map((track) => [track.id, track]));
   const enrollmentProgramById = new Map(enrollments.map((enrollment) => [enrollment.id, enrollment.program_id]));
   const next: Record<string, ProgramTrack[]> = {};
 
@@ -13481,12 +13704,16 @@ function ProgramCardGrid({
   emptyText,
   enrolledProgramIds = [],
   detailBaseHref,
+  accountType,
+  viewerProfiles = [],
 }: {
   programs: ProgramWithTeacher[];
   mosqueSlug: string;
   emptyText: string;
   enrolledProgramIds?: string[];
   detailBaseHref?: string;
+  accountType?: string | null;
+  viewerProfiles?: StudentDisplay[];
 }) {
   if (programs.length === 0) {
     return <EmptyState title="No programs available" text={emptyText} />;
@@ -13494,9 +13721,17 @@ function ProgramCardGrid({
 
   return (
     <div className="grid gap-4 bg-[var(--workspace)] p-4 md:grid-cols-2 lg:grid-cols-3">
-      {programs.map((program) => (
-        <ProgramCard key={program.id} program={program} enrolled={enrolledProgramIds.includes(program.id)} detailHref={`${detailBaseHref ?? `/m/${mosqueSlug}/programs`}/${program.id}`} />
-      ))}
+      {programs.map((program) => {
+        const eligibleCount = viewerProfiles.filter((profile) => isProfileEligibleForProgram(profile, program).eligible).length;
+        const eligibilityLabel = accountType === "parent" && viewerProfiles.length
+          ? `${eligibleCount}/${viewerProfiles.length} family members (including you) are eligible for this program.`
+          : viewerProfiles.length
+            ? `You ${eligibleCount > 0 ? "are" : "are not"} eligible for this program.`
+            : undefined;
+        return (
+          <ProgramCard key={program.id} program={program} enrolled={enrolledProgramIds.includes(program.id)} detailHref={`${detailBaseHref ?? `/m/${mosqueSlug}/programs`}/${program.id}`} eligibilityLabel={eligibilityLabel} />
+        );
+      })}
     </div>
   );
 }
@@ -13757,7 +13992,34 @@ function DisabledActionRow({ icon, label, tone = "default" }: { icon: ReactNode;
   );
 }
 
-function ProgramCard({ program, detailHref, enrolled = false }: { program: ProgramWithTeacher; detailHref: string; enrolled?: boolean }) {
+function programCoverPriceLabel(program: Program) {
+  if (program.cover_price_label?.trim()) {
+    return program.cover_price_label.trim();
+  }
+  return program.is_paid ? (programPaymentOptions(program)[0]?.price.replace("/month", "") ?? "Paid") : "Free";
+}
+
+function programRegistrationLabel(program: Program) {
+  if (program.publication_status === "draft" || program.lifecycle_status === "cancelled" || program.lifecycle_status === "archived") {
+    return { label: "Registration closed", tone: "closed" as const };
+  }
+  if (program.accepting_applications === false) {
+    return { label: "Registration closed", tone: "closed" as const };
+  }
+  if (program.application_status === "waitlist_only") {
+    return { label: "Waitlist open", tone: "waitlist" as const };
+  }
+  if (program.application_status === "invite_only" || program.application_mode === "invite_only") {
+    return { label: "Invite only", tone: "invite" as const };
+  }
+  if (program.application_status === "accepting") {
+    return { label: "Registration open", tone: "open" as const };
+  }
+  return { label: "Registration closed", tone: "closed" as const };
+}
+
+function ProgramCard({ program, detailHref, enrolled = false, eligibilityLabel }: { program: ProgramWithTeacher; detailHref: string; enrolled?: boolean; eligibilityLabel?: string }) {
+  const registration = programRegistrationLabel(program);
   return (
     <TransitionLink href={detailHref} label="Class Details" className={cn("group relative overflow-hidden rounded-xl bg-white shadow-[0_5px_18px_rgba(38,50,58,0.14)] transition-transform hover:-translate-y-0.5 hover:shadow-[0_8px_24px_rgba(38,50,58,0.18)]", enrolled && "opacity-70")}>
       <div className="relative">
@@ -13768,16 +14030,31 @@ function ProgramCard({ program, detailHref, enrolled = false }: { program: Progr
           </div>
         ) : null}
       </div>
-      <PriceTag price={program.is_paid ? (programPaymentOptions(program)[0]?.price.replace("/month", "") ?? "Paid") : "Free"} />
+      {program.cover_price_label_enabled !== false ? <PriceTag price={programCoverPriceLabel(program)} /> : null}
       <div className="space-y-3 p-4 pt-5">
         <div className="flex items-start gap-3">
           <Avatar src={program.teacher?.avatar_url ?? null} name={program.teacher?.full_name ?? "Teacher"} />
           <div className="min-w-0">
             <h3 className="line-clamp-2 text-lg font-medium leading-6 text-[#26323A]">{program.title}</h3>
-            <p className="mt-1 truncate text-sm text-[#6B747B]">{program.teacher?.full_name ?? "Teacher to be announced"}</p>
+            {program.summary ? <p className="mt-1 line-clamp-2 text-sm leading-5 text-[#52616A]">{program.summary}</p> : <p className="mt-1 truncate text-sm text-[#6B747B]">{program.teacher?.full_name ?? "Teacher to be announced"}</p>}
           </div>
         </div>
         <AudienceDetails age={formatAgeRange(program.age_range_text)} gender={formatGender(program.audience_gender)} />
+        <div className="grid gap-2 text-xs font-semibold">
+          <div className="flex items-center justify-between gap-3 rounded-[10px] bg-[#F5F8F9] px-3 py-2">
+            <span className="text-[#6B747B]">Registration</span>
+            <span className={cn(
+              "text-right",
+              registration.tone === "open" ? "text-[#17624F]" : registration.tone === "waitlist" ? "text-[#9B6B09]" : "text-[#6B747B]",
+            )}>
+              {registration.label}
+            </span>
+          </div>
+          <div className="flex items-center justify-between gap-3 rounded-[10px] bg-[#F5F8F9] px-3 py-2">
+            <span className="text-[#6B747B]">Eligibility</span>
+            <span className="text-right text-[#26323A]">{eligibilityLabel ?? `${formatAgeRange(program.age_range_text)} · ${formatGender(program.audience_gender)}`}</span>
+          </div>
+        </div>
       </div>
     </TransitionLink>
   );
@@ -14080,7 +14357,7 @@ function HomeUpcomingRows({
                 <h3 className="px-1 text-sm font-semibold text-[#26323A]">{formatHomeDate(group.day)}</h3>
                 <div className="space-y-3">
                   {group.lessons.map((lesson) => (
-                    <HomeUpcomingLesson key={`${lesson.program.id}-${lesson.ownerLabel ?? "self"}-${lesson.date.toISOString()}-${lesson.start}`} lesson={lesson} canCancel={canCancelSessions} onCancel={() => openCancelModal(lesson)} />
+                    <HomeUpcomingLesson key={[lesson.program.id, lesson.ownerLabel ?? "self", dayKey(lesson.date), normalizeScheduleTime(lesson.start) || lesson.start, normalizeScheduleTime(lesson.end) || lesson.end].join("|")} lesson={lesson} canCancel={canCancelSessions} onCancel={() => openCancelModal(lesson)} />
                   ))}
                 </div>
               </section>
@@ -14229,6 +14506,7 @@ function currentWeekDays() {
 
 function weekLessons(sources: Array<{ program: ProgramScheduleSource; ownerLabel?: string }>, week: Date[]) {
   const lessons: HomeLesson[] = [];
+  const seenLessonKeys = new Set<string>();
 
   sources.forEach(({ program, ownerLabel }) => {
     const trackSources = program.scheduleTracks?.length
@@ -14244,6 +14522,17 @@ function weekLessons(sources: Array<{ program: ProgramScheduleSource; ownerLabel
         }
 
         const startsAt = withTime(date, row.start);
+        const dedupeKey = [
+          program.id,
+          ownerLabel ?? "self",
+          dayKey(date),
+          normalizeScheduleTime(row.start) || row.start,
+          normalizeScheduleTime(row.end) || row.end,
+        ].join("|");
+        if (seenLessonKeys.has(dedupeKey)) {
+          return;
+        }
+        seenLessonKeys.add(dedupeKey);
         lessons.push({
           program,
           ownerLabel,
@@ -15756,6 +16045,13 @@ function annualDealText(program: Pick<Program, "price_monthly_cents" | "price_an
   return `Save ${formatPrice(savings)}${percent > 0 ? ` ` : ""}`;
 }
 
+function mosqueSlugLabel(mosque: Pick<Mosque, "slug" | "name"> | null | undefined) {
+  if (!mosque) {
+    return "";
+  }
+  return titleCase(mosque.slug || mosque.name);
+}
+
 function monthlyDealText(program: Pick<Program, "price_monthly_cents" | "price_annual_cents">) {
   const monthlyTotal = (program.price_monthly_cents ?? 0) * 10;
   const annual = program.price_annual_cents ?? 0;
@@ -15861,7 +16157,7 @@ function parseProgramSchedule(schedule: Json | null): ProgramScheduleRow[] {
   }
 
   const rows = rawRows
-    .map((item) => {
+    .map((item): ProgramScheduleRow | null => {
       if (!item || typeof item !== "object" || Array.isArray(item)) {
         return null;
       }
@@ -15869,6 +16165,8 @@ function parseProgramSchedule(schedule: Json | null): ProgramScheduleRow[] {
       const dayValue = readScheduleString(item, ["day", "weekday", "days"]);
       const startValue = readScheduleString(item, ["start", "start_time", "startTime", "from"]);
       const endValue = readScheduleString(item, ["end", "end_time", "endTime", "to"]);
+      const idValue = readScheduleString(item, ["id", "session_id", "sessionId"]);
+      const dateValue = readScheduleString(item, ["date", "session_date", "sessionDate"]);
       const day = dayValue ? normalizeScheduleDay(dayValue) : "";
       const start = startValue ? normalizeScheduleTime(startValue) : "";
       const end = endValue ? normalizeScheduleTime(endValue) : "";
@@ -15876,11 +16174,102 @@ function parseProgramSchedule(schedule: Json | null): ProgramScheduleRow[] {
         return null;
       }
 
-      return { day, start, end: end || start };
+      return { id: idValue || undefined, date: dateValue || undefined, day, start, end: end || start };
     })
     .filter((row): row is ProgramScheduleRow => Boolean(row));
 
   return sortScheduleRows(rows);
+}
+
+function scheduleRowKey(row: ProgramScheduleRow) {
+  return [row.date ?? "", row.day, normalizeScheduleTime(row.start) || row.start, normalizeScheduleTime(row.end) || row.end].join("|");
+}
+
+function uniqueScheduleRows(rows: ProgramScheduleRow[]) {
+  const byKey = new Map<string, ProgramScheduleRow>();
+  for (const row of rows) {
+    const start = normalizeScheduleTime(row.start) || row.start;
+    const end = normalizeScheduleTime(row.end) || row.end || start;
+    if (!row.day || !start) {
+      continue;
+    }
+    const normalized = { ...row, start, end };
+    if (!byKey.has(scheduleRowKey(normalized))) {
+      byKey.set(scheduleRowKey(normalized), normalized);
+    }
+  }
+  return sortScheduleRows(Array.from(byKey.values()));
+}
+
+function scheduleRowsToJson(rows: ProgramScheduleRow[]): Json {
+  return uniqueScheduleRows(rows).map((row) => ({
+    id: row.id,
+    date: row.date,
+    day: row.day,
+    start: row.start,
+    end: row.end,
+  })) as unknown as Json;
+}
+
+function dayFromSessionDate(value: string | null) {
+  if (!value) {
+    return "Monday" as const;
+  }
+  const parsed = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) {
+    return "Monday" as const;
+  }
+  return scheduleDayOptions[parsed.getDay() === 0 ? 6 : parsed.getDay() - 1];
+}
+
+function scheduleRowFromProgramSession(session: ProgramSession): ProgramScheduleRow {
+  const day = session.day_of_week ? normalizeScheduleDay(session.day_of_week) : dayFromSessionDate(session.session_date);
+  const start = normalizeScheduleTime(String(session.start_time)) || "18:00";
+  const end = normalizeScheduleTime(String(session.end_time ?? session.start_time)) || start;
+  return {
+    id: session.id,
+    date: session.session_date ?? undefined,
+    day: (day || "Monday") as (typeof scheduleDayOptions)[number],
+    start,
+    end,
+  };
+}
+
+function applyLinkedSessionsToTracks(tracks: ProgramTrack[], sessions: ProgramSession[], links: ProgramTrackSession[]) {
+  if (!tracks.length || !sessions.length || !links.length) {
+    return tracks;
+  }
+  const sessionById = new Map(sessions.map((session) => [session.id, session]));
+  const linksByTrackId = new Map<string, ProgramTrackSession[]>();
+  for (const link of links) {
+    linksByTrackId.set(link.program_track_id, [...(linksByTrackId.get(link.program_track_id) ?? []), link]);
+  }
+
+  return tracks.map((track) => {
+    const rows = (linksByTrackId.get(track.id) ?? [])
+      .map((link) => sessionById.get(link.program_session_id))
+      .filter((session): session is ProgramSession => Boolean(session))
+      .map(scheduleRowFromProgramSession);
+    return rows.length ? { ...track, schedule: scheduleRowsToJson(rows) } : track;
+  });
+}
+
+function linkedEditorTrackRows(tracks: ProgramTrack[], sessions: ProgramSession[], links: ProgramTrackSession[], fallback: ProgramScheduleRow) {
+  const linkedTracks = applyLinkedSessionsToTracks(tracks, sessions, links);
+  return linkedTracks.map((track) => {
+    const trackSchedule = parseProgramSchedule(track.schedule);
+    return {
+      id: track.id,
+      name: track.name,
+      sessions: trackSchedule.length ? trackSchedule : [fallback],
+      location: track.location ?? "",
+      room: track.room ?? "",
+      capacity: track.capacity ? String(track.capacity) : "",
+      pricingOverrideEnabled: track.pricing_override_enabled,
+      priceMonthly: track.price_monthly_cents ? String(track.price_monthly_cents / 100) : "",
+      priceAnnual: track.price_annual_cents ? String(track.price_annual_cents / 100) : "",
+    };
+  });
 }
 
 function expandRawScheduleRows(schedule: Json | null): Array<Record<string, Json>> {

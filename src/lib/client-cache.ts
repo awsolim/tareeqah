@@ -93,13 +93,13 @@ export async function loadMosqueChrome(slug: string) {
   }
 
   const promise = (async () => {
-    const { data } = await createSupabaseBrowserClient().from("mosques").select("name, logo_url").eq("slug", slug).maybeSingle();
+    const { data } = await createSupabaseBrowserClient().from("mosques").select("name, slug, logo_url").eq("slug", slug).maybeSingle();
 
       if (!data?.name) {
         return null;
       }
 
-      const chrome = { name: data.name, logoUrl: data.logo_url ?? null };
+      const chrome = { name: titleFromSlug(data.slug || slug), logoUrl: data.logo_url ?? null };
       mosqueChromeCache.set(slug, chrome);
       return chrome;
   })().finally(() => {
@@ -108,6 +108,14 @@ export async function loadMosqueChrome(slug: string) {
 
   mosqueChromePromises.set(slug, promise);
   return promise;
+}
+
+function titleFromSlug(slug: string) {
+  return slug
+    .split("-")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 export function getCachedUserAccess(slug: string, userId: string) {
