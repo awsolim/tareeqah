@@ -45,6 +45,7 @@ type UpdateProgramBody = {
   isPaid?: boolean;
   offersMonthlyPayment?: boolean;
   offersAnnualPayment?: boolean;
+  usesPerTrackPricing?: boolean;
   priceMonthlyCents?: number | null;
   priceAnnualCents?: number | null;
   thumbnailUrl?: string | null;
@@ -98,6 +99,79 @@ function cleanTags(value: unknown) {
   return tags.length ? Array.from(new Set(tags)).slice(0, 12) : null;
 }
 
+const optionalProgramBuilderColumns = new Set([
+  "internal_name",
+  "summary",
+  "category",
+  "program_type",
+  "publication_status",
+  "application_status",
+  "lifecycle_status",
+  "application_mode",
+  "accepting_applications",
+  "application_open_at",
+  "application_close_at",
+  "waitlist_enabled",
+  "capacity_behavior",
+  "default_capacity",
+  "tags",
+  "duration_type",
+  "start_now",
+  "start_date",
+  "end_date",
+  "duration_months",
+  "is_ongoing",
+  "schedule_pattern",
+  "registration_deadline_at",
+  "location",
+  "room",
+  "payment_kind",
+  "offers_monthly_payment",
+  "offers_annual_payment",
+  "allow_custom_prices",
+  "allow_waived_payments",
+  "manual_payment_note",
+  "financial_assistance_note",
+  "receipt_note",
+  "contact_name",
+  "contact_email",
+  "contact_phone",
+  "price_annual_cents",
+  "stripe_annual_price_id",
+  "track_selection_mode",
+  "track_selection_count",
+]);
+
+function schemaCacheMissingColumn(error: { message?: string } | null | undefined) {
+  const message = error?.message ?? "";
+  return message.match(/Could not find the '([^']+)' column/)?.[1] ?? null;
+}
+
+async function updateProgramWithSchemaFallback(
+  supabase: ReturnType<typeof createSupabaseServiceClient>,
+  programId: string,
+  payload: Record<string, unknown>,
+) {
+  const nextPayload = { ...payload };
+  let lastError: { message?: string } | null = null;
+
+  for (let attempt = 0; attempt < optionalProgramBuilderColumns.size + 1; attempt += 1) {
+    const { data, error } = await supabase.from("programs").update(nextPayload).eq("id", programId).select("*").single();
+    if (!error) {
+      return { data, error: null };
+    }
+
+    lastError = error;
+    const missingColumn = schemaCacheMissingColumn(error);
+    if (!missingColumn || !optionalProgramBuilderColumns.has(missingColumn) || !(missingColumn in nextPayload)) {
+      return { data: null, error };
+    }
+    delete nextPayload[missingColumn];
+  }
+
+  return { data: null, error: lastError };
+}
+
 async function getAuthenticatedUserId(request: Request) {
   const authorization = request.headers.get("authorization") ?? "";
   const token = authorization.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : "";
@@ -140,7 +214,6 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
     }
 
     const body = (await request.json()) as UpdateProgramBody;
-    const internalName = cleanText(body.internalName, 160);
     const title = cleanTitle(body.title);
     const summary = cleanText(body.summary, 400);
     const description = cleanDescription(body.description);
@@ -153,26 +226,27 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
     const isPaid = paymentKind === "tareeqah";
     const offersMonthlyPayment = isPaid ? body.offersMonthlyPayment !== false : false;
     const offersAnnualPayment = isPaid ? Boolean(body.offersAnnualPayment) : false;
+    const usesPerTrackPricing = isPaid && body.usesPerTrackPricing === true;
     const priceMonthlyCents = Number.isFinite(body.priceMonthlyCents) ? Number(body.priceMonthlyCents) : null;
     const priceAnnualCents = Number.isFinite(body.priceAnnualCents) ? Number(body.priceAnnualCents) : null;
-    const trackSelectionMode = body.trackSelectionMode === "minimum" || body.trackSelectionMode === "maximum" ? body.trackSelectionMode : "exact";
-    const trackSelectionCount = Number.isFinite(body.trackSelectionCount) ? Math.max(1, Math.round(Number(body.trackSelectionCount))) : 1;
+    const trackSelectionMode = "exact";
+    const trackSelectionCount = 1;
     const requestedDirectorProfileId = typeof body.directorProfileId === "string" && body.directorProfileId.trim() ? body.directorProfileId.trim() : null;
     const isDraft = publicationStatus === "draft";
 
-    if (!title && !internalName) {
-      return Response.json({ error: "Add an internal name or public title before saving." }, { status: 400 });
+    if (!title) {
+      return Response.json({ error: "Add a public title before saving." }, { status: 400 });
     }
 
     if (!isDraft && isPaid && !offersMonthlyPayment && !offersAnnualPayment) {
       return Response.json({ error: "Choose at least one payment option." }, { status: 400 });
     }
 
-    if (!isDraft && isPaid && offersMonthlyPayment && (!priceMonthlyCents || priceMonthlyCents < 50)) {
+    if (!isDraft && isPaid && !usesPerTrackPricing && offersMonthlyPayment && (!priceMonthlyCents || priceMonthlyCents < 50)) {
       return Response.json({ error: "Monthly payment needs a valid price." }, { status: 400 });
     }
 
-    if (!isDraft && isPaid && offersAnnualPayment && (!priceAnnualCents || priceAnnualCents < 50)) {
+    if (!isDraft && isPaid && !usesPerTrackPricing && offersAnnualPayment && (!priceAnnualCents || priceAnnualCents < 50)) {
       return Response.json({ error: "One-time annual payment needs a valid price." }, { status: 400 });
     }
 
@@ -228,7 +302,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
         await stripe.products.update(
           stripeProductId,
           {
-            name: title || internalName || "Untitled Program",
+            name: title || "Untitled Program",
             description: description ?? undefined,
           },
           stripeRequestOptions,
@@ -236,7 +310,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
       } else {
         const product = await stripe.products.create(
           {
-            name: title || internalName || "Untitled Program",
+            name: title || "Untitled Program",
             description: description ?? undefined,
             metadata: {
               mosque_id: existingProgram.mosque_id,
@@ -248,7 +322,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
         stripeProductId = product.id;
       }
 
-      if (offersMonthlyPayment && (priceMonthlyCents !== existingProgram.price_monthly_cents || !stripePriceId)) {
+      if (offersMonthlyPayment && !usesPerTrackPricing && (priceMonthlyCents !== existingProgram.price_monthly_cents || !stripePriceId)) {
         const price = await stripe.prices.create(
           {
             product: stripeProductId,
@@ -265,10 +339,10 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
         );
         stripePriceId = price.id;
       }
-      if (!offersMonthlyPayment) {
+      if (!offersMonthlyPayment || usesPerTrackPricing) {
         stripePriceId = null;
       }
-      if (offersAnnualPayment && (priceAnnualCents !== existingProgram.price_annual_cents || !stripeAnnualPriceId)) {
+      if (offersAnnualPayment && !usesPerTrackPricing && (priceAnnualCents !== existingProgram.price_annual_cents || !stripeAnnualPriceId)) {
         const annualPrice = await stripe.prices.create(
           {
             product: stripeProductId,
@@ -284,7 +358,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
         );
         stripeAnnualPriceId = annualPrice.id;
       }
-      if (!offersAnnualPayment) {
+      if (!offersAnnualPayment || usesPerTrackPricing) {
         stripeAnnualPriceId = null;
       }
     } else {
@@ -293,8 +367,8 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
     }
 
     const updatePayload = {
-      internal_name: internalName,
-      title: title || internalName || "Untitled Draft",
+      internal_name: null,
+      title: title || "Untitled Draft",
       summary,
       description,
       category: cleanText(body.category, 80),
@@ -325,9 +399,6 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
       payment_kind: paymentKind,
       offers_monthly_payment: isPaid ? offersMonthlyPayment : false,
       offers_annual_payment: isPaid ? offersAnnualPayment : false,
-      billing_start_behavior: pickAllowed(body.billingStartBehavior, ["on_payment", "program_start"], "on_payment"),
-      billing_end_behavior: pickAllowed(body.billingEndBehavior, ["manual_cancel", "program_end", "fixed_months"], "fixed_months"),
-      billing_duration_months: Number.isFinite(body.billingDurationMonths) ? Math.max(1, Math.round(Number(body.billingDurationMonths))) : 10,
       allow_custom_prices: body.allowCustomPrices !== false,
       allow_waived_payments: body.allowWaivedPayments !== false,
       manual_payment_note: cleanText(body.manualPaymentNote, 1000),
@@ -339,8 +410,8 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
       thumbnail_url: typeof body.thumbnailUrl === "string" && body.thumbnailUrl.trim() ? body.thumbnailUrl.trim() : null,
       audience_gender: typeof body.audienceGender === "string" && body.audienceGender.trim() ? body.audienceGender.trim() : null,
       age_range_text: typeof body.ageRangeText === "string" && body.ageRangeText.trim() ? body.ageRangeText.trim() : null,
-      price_monthly_cents: isPaid ? priceMonthlyCents : null,
-      price_annual_cents: isPaid ? priceAnnualCents : null,
+      price_monthly_cents: isPaid && !usesPerTrackPricing ? priceMonthlyCents : null,
+      price_annual_cents: isPaid && !usesPerTrackPricing ? priceAnnualCents : null,
       stripe_product_id: stripeProductId,
       stripe_price_id: stripePriceId,
       stripe_annual_price_id: stripeAnnualPriceId,
@@ -352,12 +423,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
       ...(nextDirectorProfileId ? { director_profile_id: nextDirectorProfileId } : {}),
     };
 
-    const { data: program, error: updateError } = await supabase
-      .from("programs")
-      .update(updatePayload)
-      .eq("id", programId)
-      .select("*")
-      .single();
+    const { data: program, error: updateError } = await updateProgramWithSchemaFallback(supabase, programId, updatePayload);
 
     if (updateError || !program) {
       return Response.json({ error: updateError?.message ?? "Could not update program." }, { status: 500 });
@@ -399,7 +465,16 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ p
     }
 
     const supabase = createSupabaseServiceClient();
-    const { error } = await supabase.from("programs").delete().eq("id", programId);
+    const { error } = await supabase
+      .from("programs")
+      .update({
+        is_active: false,
+        publication_status: "archived",
+        application_status: "closed",
+        lifecycle_status: "archived",
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", programId);
     if (error) {
       return Response.json({ error: error.message }, { status: 500 });
     }

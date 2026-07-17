@@ -57,6 +57,9 @@ type ProgramEditorTrackRow = {
   location?: string;
   room?: string;
   capacity?: string;
+  pricingOverrideEnabled?: boolean;
+  priceMonthly?: string;
+  priceAnnual?: string;
 };
 type ProgramBuilderStep = "basics" | "public" | "schedule" | "pricing" | "review";
 type ProgramBuilderStatus = {
@@ -128,6 +131,13 @@ const programBuilderSteps: Array<{ id: ProgramBuilderStep; label: string }> = [
   { id: "pricing", label: "Pricing" },
   { id: "review", label: "Review" },
 ];
+
+function scrollBuilderToTop() {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: "auto" }));
+}
 
 function defaultBuilderStatus(): ProgramBuilderStatus {
   return {
@@ -4343,6 +4353,11 @@ export function TeacherClassesData({ slug }: { slug: string }) {
                     setToast({ tone: "success", message: "You resigned from the class." });
                   }}
                   onResignError={(message) => setToast({ tone: "error", message })}
+                  onDeleted={() => {
+                    setHiddenProgramIds((current) => new Set([...current, program.id]));
+                    setToast({ tone: "success", message: "Class deleted." });
+                  }}
+                  onDeleteError={(message) => setToast({ tone: "error", message })}
                 />
               ))}
             </div>
@@ -4371,6 +4386,7 @@ export function TeacherClassesData({ slug }: { slug: string }) {
 export function AdminClassesData({ slug }: { slug: string }) {
   const { programs, canCreateClass, loading, error } = useTeacherPrograms(slug);
   const [toast, setToast] = useState<EditorToastState | null>(null);
+  const [hiddenProgramIds, setHiddenProgramIds] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     const queuedToast = readQueuedEditorToast();
@@ -4391,12 +4407,25 @@ export function AdminClassesData({ slug }: { slug: string }) {
     <section className="space-y-4 bg-[var(--workspace)] p-4">
       <EditorToast toast={toast} onClose={() => setToast(null)} />
       <AdminMosqueSwitcher slug={slug} target="programs" />
-      {programs.length === 0 ? (
+      {programs.filter((program) => !hiddenProgramIds.has(program.id)).length === 0 ? (
         <EmptyState title="No classes yet" text="Classes created for this masjid will appear here." />
       ) : (
         <div className="grid gap-4 md:grid-cols-2">
-          {programs.map((program) => (
-            <TeacherClassCard key={program.id} program={program} mosqueSlug={slug} role="director" basePath={`/m/${slug}/admin/programs`} controlLabel="Admin Control" canManageFinances />
+          {programs.filter((program) => !hiddenProgramIds.has(program.id)).map((program) => (
+            <TeacherClassCard
+              key={program.id}
+              program={program}
+              mosqueSlug={slug}
+              role="director"
+              basePath={`/m/${slug}/admin/programs`}
+              controlLabel="Admin Control"
+              canManageFinances
+              onDeleted={() => {
+                setHiddenProgramIds((current) => new Set([...current, program.id]));
+                setToast({ tone: "success", message: "Class deleted." });
+              }}
+              onDeleteError={(message) => setToast({ tone: "error", message })}
+            />
           ))}
         </div>
       )}
@@ -4505,9 +4534,209 @@ export function AdminMasjidData({ slug }: { slug: string }) {
             <h2 className="mt-3 text-2xl font-semibold leading-7 text-[#26323A]">{mosque.name}</h2>
           </div>
           <div className="divide-y divide-[#E3E8EC] border-t border-[#E3E8EC]">
-            <TeacherActionLink href={`/m/${slug}/admin/settings`} icon={<EditClassIcon />} label="Masjid Information" />
+            <TeacherActionLink href={`/m/${slug}/admin/masjid/information`} icon={<EditClassIcon />} label="Masjid Information" />
             <TeacherActionLink href={`/m/${slug}/admin/students`} icon={<StudentsIcon />} label="Manage Members" />
             <TeacherActionLink href={`/m/${slug}/admin/finances`} icon={<FinanceIcon />} label="Manage Finances" />
+          </div>
+        </div>
+      </article>
+    </section>
+  );
+}
+
+export function AdminMasjidInformationData({ slug }: { slug: string }) {
+  const [mosque, setMosque] = useState<Mosque | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [name, setName] = useState("");
+  const [address, setAddress] = useState("");
+  const [logoUrl, setLogoUrl] = useState("");
+  const [pictureUrl, setPictureUrl] = useState("");
+  const [logoFile, setLogoFile] = useState<File | null>(null);
+  const [pictureFile, setPictureFile] = useState<File | null>(null);
+  const [logoPreview, setLogoPreview] = useState("");
+  const [picturePreview, setPicturePreview] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [toast, setToast] = useState<EditorToastState | null>(null);
+  const logoInputRef = useRef<HTMLInputElement | null>(null);
+  const pictureInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      void (async () => {
+        setLoading(true);
+        setError(null);
+        const { data, error: mosqueError } = await createSupabaseBrowserClient().from("mosques").select("*").eq("slug", slug).maybeSingle();
+        if (mosqueError) {
+          setError(mosqueError.message);
+        }
+        setMosque(data ?? null);
+        setName(data?.name ?? "");
+        setAddress(data?.address ?? "");
+        setLogoUrl(data?.logo_url ?? "");
+        setPictureUrl(data?.picture_url ?? "");
+        setLogoFile(null);
+        setPictureFile(null);
+        setLoading(false);
+      })();
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, [slug]);
+
+  useEffect(() => {
+    if (!logoFile) {
+      setLogoPreview("");
+      return;
+    }
+    const nextUrl = URL.createObjectURL(logoFile);
+    setLogoPreview(nextUrl);
+    return () => URL.revokeObjectURL(nextUrl);
+  }, [logoFile]);
+
+  useEffect(() => {
+    if (!pictureFile) {
+      setPicturePreview("");
+      return;
+    }
+    const nextUrl = URL.createObjectURL(pictureFile);
+    setPicturePreview(nextUrl);
+    return () => URL.revokeObjectURL(nextUrl);
+  }, [pictureFile]);
+
+  async function uploadMosqueMedia(kind: "logo" | "picture", file: File) {
+    const accessToken = await getCurrentAccessToken();
+    if (!accessToken) {
+      throw new Error("Log in required.");
+    }
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("kind", kind);
+    const response = await fetch(`/api/mosques/${slug}/media/upload`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}` },
+      body: formData,
+    });
+    const result = (await response.json()) as { url?: string; error?: string };
+    if (!response.ok || !result.url) {
+      throw new Error(result.error ?? "Could not upload image.");
+    }
+    return result.url;
+  }
+
+  async function saveMasjidInformation() {
+    setToast(null);
+    if (!name.trim()) {
+      setToast({ tone: "error", message: "Masjid name is required." });
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const accessToken = await getCurrentAccessToken();
+      if (!accessToken) {
+        throw new Error("Log in required.");
+      }
+
+      const nextLogoUrl = logoFile ? await uploadMosqueMedia("logo", logoFile) : logoUrl.trim();
+      const nextPictureUrl = pictureFile ? await uploadMosqueMedia("picture", pictureFile) : pictureUrl.trim();
+      const response = await fetch(`/api/mosques/${slug}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
+        body: JSON.stringify({
+          name: name.trim(),
+          address: address.trim() || null,
+          logoUrl: nextLogoUrl || null,
+          pictureUrl: nextPictureUrl || null,
+        }),
+      });
+      const result = (await response.json()) as { mosque?: Mosque; error?: string };
+      if (!response.ok || !result.mosque) {
+        throw new Error(result.error ?? "Could not update masjid.");
+      }
+
+      setMosque(result.mosque);
+      setName(result.mosque.name);
+      setAddress(result.mosque.address ?? "");
+      setLogoUrl(result.mosque.logo_url ?? "");
+      setPictureUrl(result.mosque.picture_url ?? "");
+      setLogoFile(null);
+      setPictureFile(null);
+      setToast({ tone: "success", message: "Masjid information updated." });
+    } catch (saveError) {
+      setToast({ tone: "error", message: saveError instanceof Error ? saveError.message : "Could not update masjid." });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (loading) {
+    return <ClassesLoadingPlaceholders count={1} />;
+  }
+
+  if (error) {
+    return <EmptyState title="Could not load masjid" text={error} />;
+  }
+
+  if (!mosque) {
+    return <EmptyState title="Masjid not found" text="This masjid could not be loaded." />;
+  }
+
+  const activeLogo = logoPreview || logoUrl;
+  const activePicture = picturePreview || pictureUrl;
+
+  return (
+    <section className="space-y-4 bg-[var(--workspace)] p-3 sm:p-4">
+      <EditorToast toast={toast} onClose={() => setToast(null)} />
+      <article className="w-full max-w-full overflow-hidden rounded-[24px] border border-[#CBD8DE] bg-white shadow-[0_16px_40px_rgba(38,50,58,0.09)]">
+        <div className="relative h-40 bg-[#EAF4F2]">
+          {activePicture ? (
+            <img src={activePicture} alt="" className="h-full w-full object-cover" />
+          ) : (
+            <div className="flex h-full items-center justify-center text-3xl font-semibold text-[#17624F]">{initials(name || mosque.name)}</div>
+          )}
+          <button
+            type="button"
+            onClick={() => pictureInputRef.current?.click()}
+            className="absolute right-3 top-3 flex h-11 w-11 items-center justify-center rounded-full bg-white text-[#26323A] shadow-lg"
+            aria-label="Change thumbnail"
+            title="Change thumbnail"
+          >
+            <PhotoIcon />
+          </button>
+          <input ref={pictureInputRef} type="file" accept="image/*" className="hidden" onChange={(event) => setPictureFile(event.target.files?.[0] ?? null)} />
+        </div>
+        <div className="space-y-5 p-3 sm:p-4">
+          <div>
+            <span className="inline-flex min-h-7 items-center rounded-full bg-[#E7F3F8] px-3 text-xs font-bold uppercase tracking-wide text-[#2F6077]">Masjid Information</span>
+            <h2 className="mt-3 text-2xl font-semibold leading-7 text-[#26323A]">{name || mosque.name}</h2>
+          </div>
+          <div className="grid gap-4">
+            <label className="grid gap-1">
+              <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#7B858C]">Name</span>
+              <input value={name} onChange={(event) => setName(event.target.value)} className="h-12 min-w-0 rounded-[10px] border border-[#B9C3C8] bg-white px-3 text-sm font-semibold text-[#26323A] outline-none focus:border-[#2F8FB3]" />
+            </label>
+            <label className="grid gap-1">
+              <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#7B858C]">Address</span>
+              <input value={address} onChange={(event) => setAddress(event.target.value)} className="h-12 min-w-0 rounded-[10px] border border-[#B9C3C8] bg-white px-3 text-sm font-semibold text-[#26323A] outline-none focus:border-[#2F8FB3]" placeholder="Masjid address" />
+            </label>
+            <div className="grid gap-3 rounded-[18px] border border-[#E1E8EC] bg-[#F8FAFA] p-3">
+              <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#7B858C]">Logo</span>
+              <div className="grid grid-cols-[64px_minmax(0,1fr)] items-center gap-3">
+                <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-[16px] border border-[#DDE5E9] bg-white">
+                  {activeLogo ? <img src={activeLogo} alt="" className="h-full w-full object-contain" /> : <span className="text-lg font-semibold text-[#17624F]">{initials(name || mosque.name)}</span>}
+                </div>
+                <div className="min-w-0">
+                  <button type="button" onClick={() => logoInputRef.current?.click()} className="min-h-10 rounded-full bg-[#26323A] px-4 text-sm font-semibold text-white">
+                    Change logo
+                  </button>
+                  <input ref={logoInputRef} type="file" accept="image/*" className="hidden" onChange={(event) => setLogoFile(event.target.files?.[0] ?? null)} />
+                  {logoFile ? <p className="mt-2 truncate text-xs text-[#7B858C]">{logoFile.name}</p> : null}
+                </div>
+              </div>
+            </div>
+            <button type="button" onClick={() => void saveMasjidInformation()} disabled={saving} className="min-h-12 rounded-full bg-[#2F8FB3] px-5 text-sm font-semibold text-white disabled:opacity-60">
+              {saving ? "Saving..." : "Save masjid information"}
+            </button>
           </div>
         </div>
       </article>
@@ -4825,17 +5054,12 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
     const effectiveBuilderStatus = { ...builderStatus, ...statusOverride };
     setMessage(null);
     setToast(null);
-    if (!title.trim() && !effectiveBuilderStatus.internalName.trim()) {
-      setToast({ tone: "error", message: "Add an internal name or public title before saving." });
+    if (!title.trim()) {
+      setToast({ tone: "error", message: "Add a public title before saving." });
       return;
     }
     if (effectiveBuilderStatus.publicationStatus !== "draft" && !title.trim()) {
       setToast({ tone: "error", message: "Public title is required before publishing." });
-      setBuilderStep("basics");
-      return;
-    }
-    if (effectiveBuilderStatus.publicationStatus !== "draft" && !description.trim() && !effectiveBuilderStatus.summary.trim()) {
-      setToast({ tone: "error", message: "Add a summary or description before publishing." });
       setBuilderStep("basics");
       return;
     }
@@ -4873,26 +5097,39 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
     const eventPayment = effectiveBuilderStatus.programType === "event";
     const savedOffersMonthlyPayment = eventPayment ? false : offersMonthlyPayment;
     const savedOffersAnnualPayment = eventPayment ? true : offersAnnualPayment;
+    const usesPerTrackPricing =
+      effectiveBuilderStatus.paymentKind === "tareeqah" &&
+      effectiveBuilderStatus.programType === "recurring" &&
+      trackRows.some((track) => track.pricingOverrideEnabled);
     if (effectiveBuilderStatus.publicationStatus !== "draft" && effectiveBuilderStatus.paymentKind === "tareeqah" && !savedOffersMonthlyPayment && !savedOffersAnnualPayment) {
       setToast({ tone: "error", message: "Choose at least one payment option before publishing." });
       setBuilderStep("pricing");
       return;
     }
-    if (effectiveBuilderStatus.publicationStatus !== "draft" && effectiveBuilderStatus.paymentKind === "tareeqah" && savedOffersMonthlyPayment && Number(price || "0") <= 0) {
+    if (effectiveBuilderStatus.publicationStatus !== "draft" && effectiveBuilderStatus.paymentKind === "tareeqah" && !usesPerTrackPricing && savedOffersMonthlyPayment && Number(price || "0") <= 0) {
       setToast({ tone: "error", message: "Add a valid monthly price before publishing." });
       setBuilderStep("pricing");
       return;
     }
-    if (effectiveBuilderStatus.publicationStatus !== "draft" && effectiveBuilderStatus.paymentKind === "tareeqah" && savedOffersAnnualPayment && Number(annualPrice || "0") <= 0) {
+    if (effectiveBuilderStatus.publicationStatus !== "draft" && effectiveBuilderStatus.paymentKind === "tareeqah" && !usesPerTrackPricing && savedOffersAnnualPayment && Number(annualPrice || "0") <= 0) {
       setToast({ tone: "error", message: effectiveBuilderStatus.programType === "event" ? "Add a valid one-time price before publishing." : "Add a valid one-time annual price before publishing." });
       setBuilderStep("pricing");
       return;
     }
-    const savedTrackSelectionCount = Math.min(Math.max(1, trackSelectionCount), Math.max(1, trackRows.length));
-    if (savedTrackSelectionCount < 1 || savedTrackSelectionCount > trackRows.length) {
-      setToast({ tone: "error", message: "Track selection amount must fit the number of available tracks." });
+    if (
+      effectiveBuilderStatus.publicationStatus !== "draft" &&
+      usesPerTrackPricing &&
+      trackRows.some((track) =>
+        (savedOffersMonthlyPayment && Number(track.priceMonthly || "0") <= 0) ||
+        (savedOffersAnnualPayment && Number(track.priceAnnual || "0") <= 0)
+      )
+    ) {
+      setToast({ tone: "error", message: "Add valid prices for every track before publishing." });
+      setBuilderStep("pricing");
       return;
     }
+    const savedTrackSelectionMode: TrackSelectionMode = "exact";
+    const savedTrackSelectionCount = 1;
 
     setBusy(true);
     try {
@@ -4906,7 +5143,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
         body: JSON.stringify({
           mosqueSlug: slug,
-          internalName: effectiveBuilderStatus.internalName.trim() || null,
+          internalName: null,
           title: title.trim(),
           summary: effectiveBuilderStatus.summary.trim() || null,
           description: description.trim() || null,
@@ -4948,11 +5185,12 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
           isPaid: effectiveBuilderStatus.paymentKind === "tareeqah",
           offersMonthlyPayment: savedOffersMonthlyPayment,
           offersAnnualPayment: savedOffersAnnualPayment,
-          priceMonthlyCents: effectiveBuilderStatus.paymentKind === "tareeqah" && savedOffersMonthlyPayment ? Math.max(0, Math.round(Number(price || "0") * 100)) : null,
-          priceAnnualCents: effectiveBuilderStatus.paymentKind === "tareeqah" ? Math.max(0, Math.round(Number(annualPrice || "0") * 100)) : null,
+          usesPerTrackPricing,
+          priceMonthlyCents: effectiveBuilderStatus.paymentKind === "tareeqah" && !usesPerTrackPricing && savedOffersMonthlyPayment ? Math.max(0, Math.round(Number(price || "0") * 100)) : null,
+          priceAnnualCents: effectiveBuilderStatus.paymentKind === "tareeqah" && !usesPerTrackPricing && savedOffersAnnualPayment ? Math.max(0, Math.round(Number(annualPrice || "0") * 100)) : null,
           schedule,
           scheduleTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-          trackSelectionMode,
+          trackSelectionMode: savedTrackSelectionMode,
           trackSelectionCount: savedTrackSelectionCount,
           directorProfileId: creatorAccountType === "admin" ? selectedDirectorId : null,
         }),
@@ -4970,7 +5208,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
           method: "PATCH",
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
           body: JSON.stringify({
-            internalName: effectiveBuilderStatus.internalName.trim() || null,
+            internalName: null,
             title: program.title,
             summary: effectiveBuilderStatus.summary.trim() || null,
             description: program.description,
@@ -5012,12 +5250,13 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
             isPaid: effectiveBuilderStatus.paymentKind === "tareeqah",
             offersMonthlyPayment: savedOffersMonthlyPayment,
             offersAnnualPayment: savedOffersAnnualPayment,
-            priceMonthlyCents: effectiveBuilderStatus.paymentKind === "tareeqah" && savedOffersMonthlyPayment ? Math.max(0, Math.round(Number(price || "0") * 100)) : null,
-            priceAnnualCents: effectiveBuilderStatus.paymentKind === "tareeqah" ? Math.max(0, Math.round(Number(annualPrice || "0") * 100)) : null,
+            usesPerTrackPricing,
+            priceMonthlyCents: effectiveBuilderStatus.paymentKind === "tareeqah" && !usesPerTrackPricing && savedOffersMonthlyPayment ? Math.max(0, Math.round(Number(price || "0") * 100)) : null,
+            priceAnnualCents: effectiveBuilderStatus.paymentKind === "tareeqah" && !usesPerTrackPricing && savedOffersAnnualPayment ? Math.max(0, Math.round(Number(annualPrice || "0") * 100)) : null,
             schedule: program.schedule,
             scheduleTimezone: program.schedule_timezone,
             scheduleNotes: program.schedule_notes,
-            trackSelectionMode,
+            trackSelectionMode: savedTrackSelectionMode,
             trackSelectionCount: savedTrackSelectionCount,
           }),
         });
@@ -5074,9 +5313,9 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
           location: track.location?.trim() || effectiveBuilderStatus.location.trim() || null,
           room: track.room?.trim() || effectiveBuilderStatus.room.trim() || null,
           capacity: track.capacity ? Number(track.capacity) : null,
-          pricing_override_enabled: false,
-          price_monthly_cents: null,
-          price_annual_cents: null,
+          pricing_override_enabled: Boolean(track.pricingOverrideEnabled),
+          price_monthly_cents: track.pricingOverrideEnabled && track.priceMonthly ? Math.max(0, Math.round(Number(track.priceMonthly) * 100)) : null,
+          price_annual_cents: track.pricingOverrideEnabled && track.priceAnnual ? Math.max(0, Math.round(Number(track.priceAnnual) * 100)) : null,
           is_active: true,
         })))
         .select("id, sort_order");
@@ -5187,7 +5426,6 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
 
         {builderStep === "basics" ? (
           <div className="mt-5 grid gap-3">
-            <EditBox label="Internal name" required value={builderStatus.internalName} onChange={(value) => setBuilderStatus((current) => ({ ...current, internalName: value }))} />
             <EditBox label="Public name" required value={title} onChange={setTitle} />
             <label className="block">
               <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("Program type", true)}</span>
@@ -5197,7 +5435,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
               </select>
             </label>
             <EditBox label="Short summary / tagline" value={builderStatus.summary} onChange={(value) => setBuilderStatus((current) => ({ ...current, summary: value }))} />
-            <p className="text-xs leading-5 text-[#6B747B]">Internal name is only for staff. Public title is what parents see.</p>
+            <p className="text-xs leading-5 text-[#6B747B]">Public title is what parents and students see.</p>
           </div>
         ) : null}
 
@@ -5409,10 +5647,10 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
           <button type="button" disabled={busy} onClick={() => { const draftOverride = { publicationStatus: "draft", applicationStatus: "not_accepting", acceptingApplications: false } as const; setBuilderStatus((current) => ({ ...current, ...draftOverride })); void saveNewProgram(draftOverride); }} className="min-h-11 rounded-[10px] bg-[#2F8FB3] px-4 text-sm font-semibold text-white shadow-[0_8px_18px_rgba(47,143,179,0.20)] disabled:opacity-60">
             Save Draft
           </button>
-          <button type="button" disabled={busy || builderStep === "basics"} onClick={() => { const index = programBuilderSteps.findIndex((step) => step.id === builderStep); setBuilderStep(programBuilderSteps[Math.max(0, index - 1)]?.id ?? "basics"); }} className="min-h-11 rounded-[10px] border border-[#B9C3C8] bg-white px-4 text-sm font-semibold text-[#26323A] disabled:opacity-40">
+          <button type="button" disabled={busy || builderStep === "basics"} onClick={() => { const index = programBuilderSteps.findIndex((step) => step.id === builderStep); setBuilderStep(programBuilderSteps[Math.max(0, index - 1)]?.id ?? "basics"); scrollBuilderToTop(); }} className="min-h-11 rounded-[10px] border border-[#B9C3C8] bg-white px-4 text-sm font-semibold text-[#26323A] disabled:opacity-40">
             Back
           </button>
-          <button type="button" disabled={busy} onClick={() => { if (builderStep !== "review") { const index = programBuilderSteps.findIndex((step) => step.id === builderStep); setBuilderStep(programBuilderSteps[Math.min(programBuilderSteps.length - 1, index + 1)]?.id ?? "review"); return; } const publishOverride = { publicationStatus: "published" } as const; setBuilderStatus((current) => ({ ...current, ...publishOverride, applicationStatus: current.acceptingApplications ? current.applicationStatus : "not_accepting" })); void saveNewProgram(publishOverride); }} className="min-h-11 rounded-[10px] bg-[#17624F] px-5 text-sm font-semibold text-white disabled:opacity-60">
+          <button type="button" disabled={busy} onClick={() => { if (builderStep !== "review") { const index = programBuilderSteps.findIndex((step) => step.id === builderStep); setBuilderStep(programBuilderSteps[Math.min(programBuilderSteps.length - 1, index + 1)]?.id ?? "review"); scrollBuilderToTop(); return; } const publishOverride = { publicationStatus: "published" } as const; setBuilderStatus((current) => ({ ...current, ...publishOverride, applicationStatus: current.acceptingApplications ? current.applicationStatus : "not_accepting" })); void saveNewProgram(publishOverride); }} className="min-h-11 rounded-[10px] bg-[#17624F] px-5 text-sm font-semibold text-white disabled:opacity-60">
             {busy ? "Saving..." : builderStep === "review" ? "Publish" : "Continue"}
           </button>
         </div>
@@ -5436,7 +5674,6 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
 
         {builderStep === "basics" ? (
           <div className="mt-5 grid gap-3">
-            <EditBox label="Internal name" required value={builderStatus.internalName} onChange={(value) => setBuilderStatus((current) => ({ ...current, internalName: value }))} />
             <EditBox label="Public name" required value={title} onChange={setTitle} />
             <label className="block">
               <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("Program type", true)}</span>
@@ -5446,7 +5683,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
               </select>
             </label>
             <EditBox label="Short summary / tagline" value={builderStatus.summary} onChange={(value) => setBuilderStatus((current) => ({ ...current, summary: value }))} />
-            <p className="text-xs leading-5 text-[#6B747B]">Internal name is only for staff. Public title is what parents see.</p>
+            <p className="text-xs leading-5 text-[#6B747B]">Public title is what parents and students see.</p>
           </div>
         ) : null}
 
@@ -5717,6 +5954,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
             onClick={() => {
               const index = programBuilderSteps.findIndex((step) => step.id === builderStep);
               setBuilderStep(programBuilderSteps[Math.max(0, index - 1)]?.id ?? "basics");
+              scrollBuilderToTop();
             }}
             className="min-h-11 rounded-[10px] border border-[#B9C3C8] bg-white px-4 text-sm font-semibold text-[#26323A] disabled:opacity-40"
           >
@@ -5729,6 +5967,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
               if (builderStep !== "review") {
                 const index = programBuilderSteps.findIndex((step) => step.id === builderStep);
                 setBuilderStep(programBuilderSteps[Math.min(programBuilderSteps.length - 1, index + 1)]?.id ?? "review");
+                scrollBuilderToTop();
                 return;
               }
               const publishOverride = { publicationStatus: "published" } as const;
@@ -5758,7 +5997,6 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
         </div>
         {builderStep === "basics" ? (
           <div className="mt-5 grid gap-3 md:grid-cols-2">
-            <EditBox label="Internal name" required value={builderStatus.internalName} onChange={(value) => setBuilderStatus((current) => ({ ...current, internalName: value }))} />
             <EditBox label="Public name" required value={title} onChange={setTitle} />
             <label className="block">
               <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("Program type", true)}</span>
@@ -5769,7 +6007,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
             </label>
             <div className="md:col-span-2">
               <EditBox label="Short summary / tagline" value={builderStatus.summary} onChange={(value) => setBuilderStatus((current) => ({ ...current, summary: value }))} />
-              <p className="mt-2 text-xs leading-5 text-[#6B747B]">Internal name is only for staff. Public title is what parents see.</p>
+              <p className="mt-2 text-xs leading-5 text-[#6B747B]">Public title is what parents and students see.</p>
             </div>
             <div className="md:col-span-2">
               <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Tags</p>
@@ -6087,6 +6325,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
             onClick={() => {
               const index = programBuilderSteps.findIndex((step) => step.id === builderStep);
               setBuilderStep(programBuilderSteps[Math.max(0, index - 1)]?.id ?? "basics");
+              scrollBuilderToTop();
             }}
             className="min-h-11 rounded-[10px] border border-[#B9C3C8] bg-white px-4 text-sm font-semibold text-[#26323A] disabled:opacity-40"
           >
@@ -6099,6 +6338,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
               if (builderStep !== "review") {
                 const index = programBuilderSteps.findIndex((step) => step.id === builderStep);
                 setBuilderStep(programBuilderSteps[Math.min(programBuilderSteps.length - 1, index + 1)]?.id ?? "review");
+                scrollBuilderToTop();
                 return;
               }
               const publishOverride = { publicationStatus: "published" } as const;
@@ -6258,8 +6498,6 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         const nextInstructorDisplayName = detailResult.data?.instructor_display_name ?? directorProfile?.full_name ?? "";
         const nextInstructorCredentials = detailResult.data?.instructor_credentials ?? "";
         const nextInstructorContactPhone = detailResult.data?.instructor_contact_phone ?? directorProfile?.phone_number ?? directorProfile?.teacher_whatsapp_number ?? "";
-        const nextTrackSelectionMode = normalizeTrackSelectionMode(programRow.track_selection_mode);
-        const nextTrackSelectionCount = programRow.track_selection_count ?? 1;
         setNoRegistrationDeadline(!programRow.registration_deadline_at);
         setRoomVisible(Boolean(programRow.room));
         setEventTimeVisible(programRow.program_type === "event" && Boolean((sessionResult.data ?? [])[0]));
@@ -6326,6 +6564,9 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
                   location: track.location ?? "",
                   room: track.room ?? "",
                   capacity: track.capacity ? String(track.capacity) : "",
+                  pricingOverrideEnabled: track.pricing_override_enabled,
+                  priceMonthly: track.price_monthly_cents ? String(track.price_monthly_cents / 100) : "",
+                  priceAnnual: track.price_annual_cents ? String(track.price_annual_cents / 100) : "",
                 };
               })
             : [
@@ -6353,8 +6594,8 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         setInstructorDisplayName(nextInstructorDisplayName);
         setInstructorCredentials(nextInstructorCredentials);
         setInstructorContactPhone(nextInstructorContactPhone);
-        setTrackSelectionMode(nextTrackSelectionMode);
-        setTrackSelectionCount(nextTrackSelectionCount);
+        setTrackSelectionMode("exact");
+        setTrackSelectionCount(1);
         setOutcomeRows(nextOutcomeRows);
         setFaqRows(nextFaqRows);
         setMediaRows(nextMediaRows);
@@ -6455,21 +6696,21 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
     const effectiveBuilderStatus = { ...builderStatus, ...statusOverride };
     const savedOffersMonthlyPayment = effectiveBuilderStatus.programType === "event" ? false : offersMonthlyPayment;
     const savedOffersAnnualPayment = effectiveBuilderStatus.programType === "event" ? true : offersAnnualPayment;
-    const savedTrackSelectionCount = Math.min(Math.max(1, trackSelectionCount), Math.max(1, trackRows.length));
+    const usesPerTrackPricing =
+      effectiveBuilderStatus.paymentKind === "tareeqah" &&
+      effectiveBuilderStatus.programType === "recurring" &&
+      trackRows.some((track) => track.pricingOverrideEnabled);
+    const savedTrackSelectionMode: TrackSelectionMode = "exact";
+    const savedTrackSelectionCount = 1;
 
     setMessage(null);
     setToast(null);
-    if (!title.trim() && !effectiveBuilderStatus.internalName.trim()) {
-      setToast({ tone: "error", message: "Add an internal name or public title before saving." });
+    if (!title.trim()) {
+      setToast({ tone: "error", message: "Add a public title before saving." });
       return;
     }
     if (effectiveBuilderStatus.publicationStatus !== "draft" && !title.trim()) {
       setToast({ tone: "error", message: "Public title is required before publishing." });
-      setBuilderStep("basics");
-      return;
-    }
-    if (effectiveBuilderStatus.publicationStatus !== "draft" && !description.trim() && !effectiveBuilderStatus.summary.trim()) {
-      setToast({ tone: "error", message: "Add a summary or description before publishing." });
       setBuilderStep("basics");
       return;
     }
@@ -6509,13 +6750,25 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
       setBuilderStep("pricing");
       return;
     }
-    if (effectiveBuilderStatus.publicationStatus !== "draft" && effectiveBuilderStatus.paymentKind === "tareeqah" && savedOffersMonthlyPayment && Number(price || "0") <= 0) {
+    if (effectiveBuilderStatus.publicationStatus !== "draft" && effectiveBuilderStatus.paymentKind === "tareeqah" && !usesPerTrackPricing && savedOffersMonthlyPayment && Number(price || "0") <= 0) {
       setToast({ tone: "error", message: "Add a valid monthly price before publishing." });
       setBuilderStep("pricing");
       return;
     }
-    if (effectiveBuilderStatus.publicationStatus !== "draft" && effectiveBuilderStatus.paymentKind === "tareeqah" && savedOffersAnnualPayment && Number(annualPrice || "0") <= 0) {
+    if (effectiveBuilderStatus.publicationStatus !== "draft" && effectiveBuilderStatus.paymentKind === "tareeqah" && !usesPerTrackPricing && savedOffersAnnualPayment && Number(annualPrice || "0") <= 0) {
       setToast({ tone: "error", message: "Add a valid one-time annual price before publishing." });
+      setBuilderStep("pricing");
+      return;
+    }
+    if (
+      effectiveBuilderStatus.publicationStatus !== "draft" &&
+      usesPerTrackPricing &&
+      trackRows.some((track) =>
+        (savedOffersMonthlyPayment && Number(track.priceMonthly || "0") <= 0) ||
+        (savedOffersAnnualPayment && Number(track.priceAnnual || "0") <= 0)
+      )
+    ) {
+      setToast({ tone: "error", message: "Add valid prices for every track before publishing." });
       setBuilderStep("pricing");
       return;
     }
@@ -6523,11 +6776,6 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
       setToast({ tone: "error", message: "Choose a director for this class." });
       return;
     }
-    if (savedTrackSelectionCount < 1 || savedTrackSelectionCount > trackRows.length) {
-      setToast({ tone: "error", message: "Track selection amount must fit the number of available tracks." });
-      return;
-    }
-
     setBusy(true);
     const accessToken = await getCurrentAccessToken();
     if (!accessToken) {
@@ -6545,7 +6793,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         Authorization: `Bearer ${accessToken}`,
       },
       body: JSON.stringify({
-        internalName: effectiveBuilderStatus.internalName.trim() || null,
+        internalName: null,
         title: title.trim(),
         summary: effectiveBuilderStatus.summary.trim() || null,
         description: description.trim() || null,
@@ -6586,12 +6834,13 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         isPaid: effectiveBuilderStatus.paymentKind === "tareeqah",
         offersMonthlyPayment: savedOffersMonthlyPayment,
         offersAnnualPayment: savedOffersAnnualPayment,
-        priceMonthlyCents: effectiveBuilderStatus.paymentKind === "tareeqah" && savedOffersMonthlyPayment ? Math.max(0, Math.round(Number(price || "0") * 100)) : null,
-        priceAnnualCents: effectiveBuilderStatus.paymentKind === "tareeqah" && savedOffersAnnualPayment ? Math.max(0, Math.round(Number(annualPrice || "0") * 100)) : null,
+        usesPerTrackPricing,
+        priceMonthlyCents: effectiveBuilderStatus.paymentKind === "tareeqah" && !usesPerTrackPricing && savedOffersMonthlyPayment ? Math.max(0, Math.round(Number(price || "0") * 100)) : null,
+        priceAnnualCents: effectiveBuilderStatus.paymentKind === "tareeqah" && !usesPerTrackPricing && savedOffersAnnualPayment ? Math.max(0, Math.round(Number(annualPrice || "0") * 100)) : null,
         schedule,
         scheduleTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         scheduleNotes: null,
-        trackSelectionMode,
+        trackSelectionMode: savedTrackSelectionMode,
         trackSelectionCount: savedTrackSelectionCount,
         directorProfileId: isAdminEditor ? selectedDirectorId : null,
       }),
@@ -6692,9 +6941,9 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
           location: track.location?.trim() || effectiveBuilderStatus.location.trim() || null,
           room: track.room?.trim() || effectiveBuilderStatus.room.trim() || null,
           capacity: track.capacity ? Number(track.capacity) : null,
-          pricing_override_enabled: false,
-          price_monthly_cents: null,
-          price_annual_cents: null,
+          pricing_override_enabled: Boolean(track.pricingOverrideEnabled),
+          price_monthly_cents: track.pricingOverrideEnabled && track.priceMonthly ? Math.max(0, Math.round(Number(track.priceMonthly) * 100)) : null,
+          price_annual_cents: track.pricingOverrideEnabled && track.priceAnnual ? Math.max(0, Math.round(Number(track.priceAnnual) * 100)) : null,
           is_active: true,
         })),
       ).select("id, sort_order");
@@ -6774,7 +7023,6 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
 
         {builderStep === "basics" ? (
           <div className="mt-5 grid gap-3">
-            <EditBox label="Internal name" required value={builderStatus.internalName} onChange={(value) => setBuilderStatus((current) => ({ ...current, internalName: value }))} />
             <EditBox label="Public name" required value={title} onChange={setTitle} />
             <label className="block">
               <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("Program type", true)}</span>
@@ -6978,6 +7226,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
             onClick={() => {
               const index = programBuilderSteps.findIndex((step) => step.id === builderStep);
               setBuilderStep(programBuilderSteps[Math.max(0, index - 1)]?.id ?? "basics");
+              scrollBuilderToTop();
             }}
             className="min-h-11 rounded-[10px] border border-[#B9C3C8] bg-white px-4 text-sm font-semibold text-[#26323A] disabled:opacity-40"
           >
@@ -6990,6 +7239,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
               if (builderStep !== "review") {
                 const index = programBuilderSteps.findIndex((step) => step.id === builderStep);
                 setBuilderStep(programBuilderSteps[Math.min(programBuilderSteps.length - 1, index + 1)]?.id ?? "review");
+                scrollBuilderToTop();
                 return;
               }
               const publishOverride = { publicationStatus: "published" } as const;
@@ -7114,6 +7364,9 @@ function ProgramEditorPreview({
     description: null,
     schedule: track.sessions as unknown as Json,
     ...defaultProgramTrackBuilderColumns(),
+    pricing_override_enabled: Boolean(track.pricingOverrideEnabled),
+    price_monthly_cents: track.pricingOverrideEnabled && track.priceMonthly ? Math.max(0, Math.round(Number(track.priceMonthly) * 100)) : null,
+    price_annual_cents: track.pricingOverrideEnabled && track.priceAnnual ? Math.max(0, Math.round(Number(track.priceAnnual) * 100)) : null,
     sort_order: index + 1,
     is_active: true,
     created_at: "",
@@ -7508,6 +7761,17 @@ function ProgramEditorFields({
   const showSchedule = showAll || activeStep === "schedule";
   const showPricing = showAll || activeStep === "pricing";
   const showReview = activeStep === "review";
+  const canUsePerTrackPricing = paymentKind === "tareeqah" && programType === "recurring" && schedulePattern === "weekly" && trackRows.length > 0;
+  const perTrackPricingEnabled = canUsePerTrackPricing && trackRows.some((track) => track.pricingOverrideEnabled);
+
+  function setPerTrackPricingEnabled(enabled: boolean) {
+    setTrackRows((current) =>
+      current.map((track) => ({
+        ...track,
+        pricingOverrideEnabled: enabled,
+      })),
+    );
+  }
 
   function addLearningSection() {
     setLearningVisible(true);
@@ -7533,9 +7797,9 @@ function ProgramEditorFields({
       location: track.location?.trim() || null,
       room: track.room?.trim() || null,
       capacity: track.capacity ? Number(track.capacity) : null,
-      pricing_override_enabled: false,
-      price_monthly_cents: null,
-      price_annual_cents: null,
+      pricing_override_enabled: Boolean(track.pricingOverrideEnabled),
+      price_monthly_cents: track.pricingOverrideEnabled && track.priceMonthly ? Math.max(0, Math.round(Number(track.priceMonthly) * 100)) : null,
+      price_annual_cents: track.pricingOverrideEnabled && track.priceAnnual ? Math.max(0, Math.round(Number(track.priceAnnual) * 100)) : null,
       sort_order: index + 1,
       is_active: true,
       created_at: "",
@@ -7775,13 +8039,6 @@ function ProgramEditorFields({
 
         {showSchedule && programType === "recurring" && schedulePattern === "weekly" ? <DetailSection title="Schedule Tracks">
           <div className="divide-y divide-[#E6ECEF]">
-            <TrackSelectionRuleFields
-              trackCount={trackRows.length}
-              mode={trackSelectionMode}
-              count={trackSelectionCount}
-              onModeChange={setTrackSelectionMode}
-              onCountChange={setTrackSelectionCount}
-            />
             {trackRows.map((track, trackIndex) => (
               <div key={track.id} className="my-4 space-y-4 rounded-[18px] border border-[#DCE7EB] bg-[#FAFCFC] p-4 first:mt-0">
                 <div className="flex items-center justify-between gap-3">
@@ -7917,11 +8174,35 @@ function ProgramEditorFields({
               </div>
             ) : (
             <div className="mt-3 space-y-3">
+              {canUsePerTrackPricing ? (
+                <div className="grid grid-cols-2 gap-2 rounded-[14px] bg-[#F3F7F8] p-1">
+                  <button
+                    type="button"
+                    onClick={() => setPerTrackPricingEnabled(false)}
+                    className={cn(
+                      "min-h-10 rounded-[10px] px-3 text-sm font-semibold transition",
+                      !perTrackPricingEnabled ? "bg-white text-[#26323A] shadow-sm" : "text-[#6B747B]",
+                    )}
+                  >
+                    Program price
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPerTrackPricingEnabled(true)}
+                    className={cn(
+                      "min-h-10 rounded-[10px] px-3 text-sm font-semibold transition",
+                      perTrackPricingEnabled ? "bg-white text-[#26323A] shadow-sm" : "text-[#6B747B]",
+                    )}
+                  >
+                    Per-track prices
+                  </button>
+                </div>
+              ) : null}
               <label className="flex items-center gap-2 text-sm font-medium text-[#26323A]">
                 <input type="checkbox" checked={offersMonthlyPayment} onChange={(event) => setOffersMonthlyPayment(event.target.checked)} />
                 Offer monthly payments
               </label>
-              {offersMonthlyPayment ? (
+              {offersMonthlyPayment && !perTrackPricingEnabled ? (
                 <div>
                   <EditBox label="Monthly price" required value={price} onChange={setPrice} />
                   {formatMonthlyCycle(price, durationMonthsForPricing) ? <p className="mt-1 text-xs leading-5 text-[#6B747B]">{formatMonthlyCycle(price, durationMonthsForPricing)}</p> : null}
@@ -7931,10 +8212,43 @@ function ProgramEditorFields({
                 <input type="checkbox" checked={offersAnnualPayment} onChange={(event) => setOffersAnnualPayment(event.target.checked)} />
                 Offer one-time payment
               </label>
-              {offersAnnualPayment ? (
+              {offersAnnualPayment && !perTrackPricingEnabled ? (
                 <div className="space-y-2">
                   <EditBox label="One-time annual price" required value={annualPrice} onChange={setAnnualPrice} />
                   {formatAnnualSavings(price, annualPrice, durationMonthsForPricing) ? <p className="inline-flex rounded-full bg-[#E9F4F8] px-3 py-1 text-xs font-semibold text-[#2F6077]">{formatAnnualSavings(price, annualPrice, durationMonthsForPricing)}</p> : null}
+                </div>
+              ) : null}
+              {perTrackPricingEnabled ? (
+                <div className="space-y-3">
+                  {trackRows.map((track) => (
+                    <div key={track.id} className="rounded-[16px] border border-[#E1E8EC] bg-white p-3">
+                      <p className="truncate text-sm font-semibold text-[#26323A]">{track.name || "Untitled track"}</p>
+                      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                        {offersMonthlyPayment ? (
+                          <div>
+                            <EditBox
+                              label="Monthly price"
+                              required
+                              value={track.priceMonthly ?? ""}
+                              onChange={(value) => setTrackRows((current) => current.map((item) => item.id === track.id ? { ...item, priceMonthly: value, pricingOverrideEnabled: true } : item))}
+                            />
+                            {formatMonthlyCycle(track.priceMonthly ?? "", durationMonthsForPricing) ? <p className="mt-1 text-xs leading-5 text-[#6B747B]">{formatMonthlyCycle(track.priceMonthly ?? "", durationMonthsForPricing)}</p> : null}
+                          </div>
+                        ) : null}
+                        {offersAnnualPayment ? (
+                          <div className="space-y-2">
+                            <EditBox
+                              label="One-time annual price"
+                              required
+                              value={track.priceAnnual ?? ""}
+                              onChange={(value) => setTrackRows((current) => current.map((item) => item.id === track.id ? { ...item, priceAnnual: value, pricingOverrideEnabled: true } : item))}
+                            />
+                            {formatAnnualSavings(track.priceMonthly ?? "", track.priceAnnual ?? "", durationMonthsForPricing) ? <p className="inline-flex rounded-full bg-[#E9F4F8] px-3 py-1 text-xs font-semibold text-[#2F6077]">{formatAnnualSavings(track.priceMonthly ?? "", track.priceAnnual ?? "", durationMonthsForPricing)}</p> : null}
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                  ))}
                 </div>
               ) : null}
             </div>
@@ -7952,53 +8266,6 @@ function ProgramEditorFields({
       </div>
     </div>
   );
-}
-
-function TrackSelectionRuleFields({
-  trackCount,
-  mode,
-  count,
-  onModeChange,
-  onCountChange,
-}: {
-  trackCount: number;
-  mode: TrackSelectionMode;
-  count: number;
-  onModeChange: (value: TrackSelectionMode) => void;
-  onCountChange: (value: number) => void;
-}) {
-  const clampedCount = Math.min(Math.max(1, count), Math.max(1, trackCount));
-  return (
-    <div className="space-y-2 pb-4">
-      <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">Student track choice</p>
-      <div className="grid grid-cols-[minmax(0,1fr)_86px] gap-2">
-        <select
-          value={mode}
-          onChange={(event) => onModeChange(normalizeTrackSelectionMode(event.target.value))}
-          className="h-10 rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]"
-        >
-          <option value="exact">Exactly</option>
-          <option value="minimum">At least</option>
-          <option value="maximum">Up to</option>
-        </select>
-        <input
-          type="number"
-          min={1}
-          max={Math.max(1, trackCount)}
-          value={clampedCount}
-          onChange={(event) => onCountChange(Math.max(1, Math.round(Number(event.target.value || "1"))))}
-          className="h-10 rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]"
-        />
-      </div>
-      <p className="text-xs leading-5 text-[#7B858C]">
-        Students will be asked to choose {mode === "exact" ? "exactly" : mode === "minimum" ? "at least" : "up to"} {clampedCount} of the schedule options below.
-      </p>
-    </div>
-  );
-}
-
-function normalizeTrackSelectionMode(value: string | null | undefined): TrackSelectionMode {
-  return value === "minimum" || value === "maximum" ? value : "exact";
 }
 
 function parseAgeRangeForEdit(value: string | null) {
@@ -8592,6 +8859,7 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
   const [students, setStudents] = useState<Array<{ enrollment: Enrollment; profile: StudentDisplay | null; parent?: ParentDisplay | null; subscription?: ProgramSubscription | null; trackIds: string[] }>>([]);
   const [tracks, setTracks] = useState<ProgramTrack[]>([]);
   const [selectedRosterTrackIds, setSelectedRosterTrackIds] = useState<string[]>([]);
+  const [selectedRosterDays, setSelectedRosterDays] = useState<string[]>(() => [...scheduleDayOptions]);
   const [waitlist, setWaitlist] = useState<RequestWithContext[]>([]);
   const [studentSearch, setStudentSearch] = useState(financeStudentId ?? "");
   const [genderFilter, setGenderFilter] = useState("all");
@@ -8861,6 +9129,14 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
     setToast({ tone: "success", message: status === "approved" ? "Waitlisted application accepted." : "Waitlisted application rejected." });
   }
 
+  const trackDayMap = useMemo(() => {
+    const map = new Map<string, string[]>();
+    for (const track of tracks) {
+      map.set(track.id, parseProgramSchedule(track.schedule).map((row) => row.day));
+    }
+    return map;
+  }, [tracks]);
+
   const filteredStudents = useMemo(() => {
     const query = studentSearch.trim().toLowerCase();
     const sorted = students
@@ -8875,6 +9151,15 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
           selectedRosterTrackIds.length === tracks.length ||
           (student.trackIds ?? []).some((trackId) => selectedRosterTrackIds.includes(trackId));
         if (!trackMatches) {
+          return false;
+        }
+        const dayMatches =
+          tracks.length === 0 ||
+          selectedRosterDays.length === scheduleDayOptions.length ||
+          ((student.trackIds ?? []).length
+            ? (student.trackIds ?? []).some((trackId) => (trackDayMap.get(trackId) ?? []).some((day) => selectedRosterDays.includes(day)))
+            : selectedRosterDays.length > 0);
+        if (!dayMatches) {
           return false;
         }
         if (!query) {
@@ -8908,7 +9193,7 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
         return sortDirection === "asc" ? comparison : -comparison;
       });
     return sorted;
-  }, [genderFilter, selectedRosterTrackIds, sortDirection, studentSearch, studentSort, studentView, students, tracks]);
+  }, [genderFilter, selectedRosterDays, selectedRosterTrackIds, sortDirection, studentSearch, studentSort, studentView, students, trackDayMap, tracks]);
   const familyGroups = useMemo(() => {
     const groups = new Map<string, { parent: ParentDisplay | null; children: TeacherStudentItem[] }>();
     for (const student of filteredStudents) {
@@ -8971,6 +9256,7 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
             view={studentView}
             tracks={tracks}
             selectedTrackIds={selectedRosterTrackIds}
+            selectedDays={selectedRosterDays}
             onSearchChange={setStudentSearch}
             onGenderChange={setGenderFilter}
             onTrackToggle={(trackId) =>
@@ -8983,6 +9269,18 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
                   return [];
                 }
                 return current.includes(trackId) ? current.filter((id) => id !== trackId) : [...current, trackId];
+              })
+            }
+            onDayToggle={(day) =>
+              setSelectedRosterDays((current) => {
+                const allDays = [...scheduleDayOptions];
+                if (day === "select_all") {
+                  return allDays;
+                }
+                if (day === "deselect_all") {
+                  return [];
+                }
+                return current.includes(day) ? current.filter((item) => item !== day) : [...current, day];
               })
             }
             onSortChange={setStudentSort}
@@ -11645,9 +11943,11 @@ function TeacherStudentListControls({
   view,
   tracks,
   selectedTrackIds,
+  selectedDays,
   onSearchChange,
   onGenderChange,
   onTrackToggle,
+  onDayToggle,
   onSortChange,
   onSortDirectionChange,
   onViewChange,
@@ -11659,17 +11959,22 @@ function TeacherStudentListControls({
   view: "students" | "parents";
   tracks: ProgramTrack[];
   selectedTrackIds: string[];
+  selectedDays: string[];
   onSearchChange: (value: string) => void;
   onGenderChange: (value: string) => void;
   onTrackToggle: (trackId: string) => void;
+  onDayToggle: (day: string) => void;
   onSortChange: (value: "first" | "last" | "age") => void;
   onSortDirectionChange: (value: "asc" | "desc") => void;
   onViewChange: (value: "students" | "parents") => void;
 }) {
   const [viewMenuOpen, setViewMenuOpen] = useState(false);
   const [trackMenuOpen, setTrackMenuOpen] = useState(false);
+  const [dayMenuOpen, setDayMenuOpen] = useState(false);
   const allTracksSelected = tracks.length > 0 && selectedTrackIds.length === tracks.length;
   const trackLabel = tracks.length === 0 || allTracksSelected ? "All tracks" : selectedTrackIds.length === 0 ? "No tracks" : selectedTrackIds.length === 1 ? tracks.find((track) => track.id === selectedTrackIds[0])?.name ?? "1 track" : `${selectedTrackIds.length} tracks`;
+  const allDaysSelected = selectedDays.length === scheduleDayOptions.length;
+  const dayLabel = allDaysSelected ? "All days" : selectedDays.length === 0 ? "No days" : selectedDays.length === 1 ? formatDayAbbreviation(selectedDays[0]) : `${selectedDays.length} days`;
 
   return (
     <div className="space-y-4">
@@ -11739,16 +12044,16 @@ function TeacherStudentListControls({
           ) : null}
         </div>
       </div>
-      <div className="flex items-center gap-2">
+      <div className="grid gap-2">
         {tracks.length ? (
-          <div className="relative min-w-0 flex-1">
+          <div className="relative min-w-0">
             <button
               type="button"
               onClick={() => setTrackMenuOpen((value) => !value)}
               className="flex h-10 w-full items-center justify-between gap-2 rounded-full border border-[#DDE5E9] bg-white px-3 text-left text-sm font-semibold text-[#26323A] outline-none"
               aria-expanded={trackMenuOpen}
             >
-              <span className="min-w-0 truncate">{trackLabel}</span>
+              <span className="min-w-0 truncate">Tracks: {trackLabel}</span>
               <ChevronIcon expanded={trackMenuOpen} />
             </button>
             {trackMenuOpen ? (
@@ -11770,34 +12075,72 @@ function TeacherStudentListControls({
                   </button>
                 </div>
                 <div className="pt-1">
-                {tracks.map((track) => (
-                  <RosterTrackOption key={track.id} checked={selectedTrackIds.includes(track.id)} label={track.name} onClick={() => onTrackToggle(track.id)} />
-                ))}
+                  {tracks.map((track) => (
+                    <RosterTrackOption key={track.id} checked={selectedTrackIds.includes(track.id)} label={track.name} onClick={() => onTrackToggle(track.id)} />
+                  ))}
                 </div>
               </div>
             ) : null}
           </div>
         ) : null}
-        <label className="min-w-0 flex-1">
-          <span className="sr-only">Sort students</span>
-          <select
-            value={sort}
-            onChange={(event) => onSortChange(event.target.value as "first" | "last" | "age")}
-            className="h-10 w-full rounded-full border border-[#DDE5E9] bg-white px-3 text-sm font-semibold text-[#26323A] outline-none"
+        <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,130px)_38px] items-center gap-2">
+          <div className="relative min-w-0">
+            <button
+              type="button"
+              onClick={() => setDayMenuOpen((value) => !value)}
+              className="flex h-10 w-full items-center justify-between gap-2 rounded-full border border-[#DDE5E9] bg-white px-3 text-left text-sm font-semibold text-[#26323A] outline-none"
+              aria-expanded={dayMenuOpen}
+            >
+              <span className="min-w-0 truncate">Days: {dayLabel}</span>
+              <ChevronIcon expanded={dayMenuOpen} />
+            </button>
+            {dayMenuOpen ? (
+              <div className="absolute left-0 top-[calc(100%+8px)] z-30 w-56 rounded-[16px] border border-[#DDE5E9] bg-white p-2 shadow-[0_18px_44px_rgba(38,50,58,0.18)]">
+                <div className="grid grid-cols-2 gap-1.5 border-b border-[#EEF2F4] pb-2">
+                  <button
+                    type="button"
+                    onClick={() => onDayToggle("select_all")}
+                    className="min-h-8 rounded-[10px] bg-[#EAF7F1] px-2 text-xs font-semibold text-[#17624F] transition-colors hover:bg-[#DDF1E7]"
+                  >
+                    Select all
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onDayToggle("deselect_all")}
+                    className="min-h-8 rounded-[10px] bg-[#F2F4F5] px-2 text-xs font-semibold text-[#52616A] transition-colors hover:bg-[#E8ECEF]"
+                  >
+                    Deselect all
+                  </button>
+                </div>
+                <div className="pt-1">
+                  {scheduleDayOptions.map((day) => (
+                    <RosterTrackOption key={day} checked={selectedDays.includes(day)} label={formatDayAbbreviation(day)} onClick={() => onDayToggle(day)} />
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </div>
+          <label className="min-w-0">
+            <span className="sr-only">Sort students</span>
+            <select
+              value={sort}
+              onChange={(event) => onSortChange(event.target.value as "first" | "last" | "age")}
+              className="h-10 w-full rounded-full border border-[#DDE5E9] bg-white px-3 text-sm font-semibold text-[#26323A] outline-none"
+            >
+              <option value="first">First name</option>
+              <option value="last">Last name</option>
+              <option value="age">Age</option>
+            </select>
+          </label>
+          <button
+            type="button"
+            onClick={() => onSortDirectionChange(sortDirection === "asc" ? "desc" : "asc")}
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[#DDE5E9] bg-white text-[#26323A]"
+            aria-label={sortDirection === "asc" ? "Sort descending" : "Sort ascending"}
           >
-            <option value="first">First name</option>
-            <option value="last">Last name</option>
-            <option value="age">Age</option>
-          </select>
-        </label>
-        <button
-          type="button"
-          onClick={() => onSortDirectionChange(sortDirection === "asc" ? "desc" : "asc")}
-          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[#DDE5E9] bg-white text-[#26323A]"
-          aria-label={sortDirection === "asc" ? "Sort descending" : "Sort ascending"}
-        >
-          <SortDirectionIcon direction={sortDirection} />
-        </button>
+            <SortDirectionIcon direction={sortDirection} />
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -13005,20 +13348,16 @@ function ScheduleTrackControlRow({
   onToggle: () => void;
 }) {
   const selected = selectedTrackIds.includes(track.id);
-  const activeLimit = Math.min(Math.max(1, program.track_selection_count ?? 1), Math.max(1, trackCount));
-  const mode = program.track_selection_mode ?? "exact";
+  void program;
+  void trackCount;
   const selectedCount = selectedTrackIds.length;
-  const requiredCount = activeLimit;
-  const addWouldViolate = !selected && mode === "maximum" && selectedCount >= activeLimit;
-  const rowDisabled = disabled || addWouldViolate;
+  const rowDisabled = disabled;
   const schedule = scheduleSummary(track.schedule, null);
   const actionLabel = selected
     ? "Remove"
-    : mode === "exact" && selectedCount >= requiredCount
+    : selectedCount >= 1
       ? "Switch"
-      : addWouldViolate
-        ? "Limit"
-        : "Add";
+      : "Add";
 
   return (
     <button
@@ -13057,14 +13396,9 @@ function RosterTrackOption({ checked, label, onClick }: { checked: boolean; labe
 }
 
 function trackSelectionRuleText(program: Pick<Program, "track_selection_mode" | "track_selection_count">, trackCount: number) {
-  const count = Math.min(Math.max(1, program.track_selection_count ?? 1), Math.max(1, trackCount));
-  if (program.track_selection_mode === "minimum") {
-    return `Select at least ${count}`;
-  }
-  if (program.track_selection_mode === "maximum") {
-    return `Select up to ${count}`;
-  }
-  return `Select exactly ${count}`;
+  void program;
+  void trackCount;
+  return "Select one";
 }
 
 function nextProgramTrackSelection(
@@ -13077,17 +13411,8 @@ function nextProgramTrackSelection(
   if (current.includes(toggledTrackId)) {
     return current.filter((trackId) => trackId !== toggledTrackId);
   }
-
-  const limit = Math.min(Math.max(1, program.track_selection_count ?? 1), Math.max(1, tracks.length));
-  const mode = program.track_selection_mode ?? "exact";
-  if (mode === "exact" && limit === 1) {
-    return [toggledTrackId];
-  }
-  if ((mode === "exact" || mode === "maximum") && current.length >= limit) {
-    return current;
-  }
-
-  return [...current, toggledTrackId];
+  void program;
+  return [toggledTrackId];
 }
 
 function nextScheduleOptionSelection(
@@ -13098,20 +13423,12 @@ function nextScheduleOptionSelection(
 ) {
   const current = currentTrackIds.filter((trackId) => tracks.some((track) => track.id === trackId));
   const selected = current.includes(toggledTrackId);
-  const requiredCount = Math.min(Math.max(1, program.track_selection_count ?? 1), Math.max(1, tracks.length));
-  const mode = program.track_selection_mode ?? "exact";
 
   if (selected) {
     return current.filter((trackId) => trackId !== toggledTrackId);
   }
-
-  if (mode === "exact" && current.length >= requiredCount) {
-    return [...current.slice(1), toggledTrackId];
-  }
-  if (mode === "maximum" && current.length >= requiredCount) {
-    return current;
-  }
-  return [...current, toggledTrackId];
+  void program;
+  return [toggledTrackId];
 }
 
 function sameStringSet(left: string[], right: string[]) {
@@ -13128,15 +13445,9 @@ function validateTrackSelection(program: Pick<Program, "track_selection_mode" | 
   }
 
   const validSelectedCount = selectedTrackIds.filter((trackId) => tracks.some((track) => track.id === trackId)).length;
-  const requiredCount = Math.min(Math.max(1, program.track_selection_count ?? 1), tracks.length);
-  if (program.track_selection_mode === "minimum" && validSelectedCount < requiredCount) {
-    return { valid: false, message: `Choose at least ${requiredCount} schedule option${requiredCount === 1 ? "" : "s"}.` };
-  }
-  if (program.track_selection_mode === "maximum" && (validSelectedCount < 1 || validSelectedCount > requiredCount)) {
-    return { valid: false, message: `Choose up to ${requiredCount} schedule option${requiredCount === 1 ? "" : "s"}.` };
-  }
-  if ((program.track_selection_mode ?? "exact") === "exact" && validSelectedCount !== requiredCount) {
-    return { valid: false, message: `Choose exactly ${requiredCount} schedule option${requiredCount === 1 ? "" : "s"}.` };
+  void program;
+  if (validSelectedCount !== 1) {
+    return { valid: false, message: "Choose one schedule option." };
   }
   return { valid: true, message: "" };
 }
@@ -14018,6 +14329,8 @@ function TeacherClassCard({
   canManageFinances = false,
   onResigned,
   onResignError,
+  onDeleted,
+  onDeleteError,
 }: {
   program: Program;
   mosqueSlug: string;
@@ -14027,9 +14340,13 @@ function TeacherClassCard({
   canManageFinances?: boolean;
   onResigned?: () => void;
   onResignError?: (message: string) => void;
+  onDeleted?: () => void;
+  onDeleteError?: (message: string) => void;
 }) {
   const [resignOpen, setResignOpen] = useState(false);
   const [resigning, setResigning] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const schedule = scheduleSummary(program.schedule, program.schedule_notes);
   const age = formatAgeRange(program.age_range_text);
   const gender = formatGender(program.audience_gender);
@@ -14053,8 +14370,32 @@ function TeacherClassCard({
     window.dispatchEvent(new Event("tareeqah:notifications-changed"));
   }
 
+  async function deleteClass() {
+    setDeleting(true);
+    const accessToken = await getCurrentAccessToken();
+    if (!accessToken) {
+      setDeleting(false);
+      onDeleteError?.("Log in required.");
+      return;
+    }
+
+    const response = await fetch(`/api/programs/${program.id}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    const result = (await response.json().catch(() => ({}))) as { error?: string };
+    setDeleting(false);
+    if (!response.ok) {
+      onDeleteError?.(result.error ?? "Could not delete class.");
+      return;
+    }
+    setDeleteOpen(false);
+    onDeleted?.();
+  }
+
   return (
-    <article className="overflow-hidden rounded-[22px] border border-[#CBD8DE] bg-white shadow-[0_16px_40px_rgba(38,50,58,0.09)]">
+    <article className="relative overflow-hidden rounded-[22px] border border-[#CBD8DE] bg-white shadow-[0_16px_40px_rgba(38,50,58,0.09)]">
+      {isDirector ? <ClassCardActionMenu onDelete={() => setDeleteOpen(true)} /> : null}
       <TransitionLink href={primaryHref} label={primaryLabel} className="block transition-opacity hover:opacity-95">
         <ProgramHero program={program} />
       </TransitionLink>
@@ -14085,6 +14426,14 @@ function TeacherClassCard({
           busy={resigning}
           onCancel={() => setResignOpen(false)}
           onConfirm={() => void resignFromClass()}
+        />
+      ) : null}
+      {deleteOpen ? (
+        <ConfirmClassDeleteModal
+          programTitle={program.title}
+          busy={deleting}
+          onCancel={() => setDeleteOpen(false)}
+          onConfirm={() => void deleteClass()}
         />
       ) : null}
     </article>
@@ -14126,6 +14475,43 @@ function TeacherActionButton({ icon, label, onClick }: { icon: ReactNode; label:
   );
 }
 
+function ClassCardActionMenu({ onDelete }: { onDelete: () => void }) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div className="absolute right-3 top-3 z-20">
+      <button
+        type="button"
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          setOpen((current) => !current);
+        }}
+        className={cn("flex h-10 w-10 items-center justify-center rounded-full border border-white/70 shadow-[0_10px_26px_rgba(38,50,58,0.16)] backdrop-blur", open ? "bg-[#26323A] text-white" : "bg-white/92 text-[#26323A] hover:bg-white")}
+        aria-label="Class actions"
+      >
+        <MoreVerticalIcon />
+      </button>
+      {open ? (
+        <div className="absolute right-0 top-12 w-44 rounded-[16px] border border-[#DDE5E9] bg-white p-1 text-sm shadow-[0_18px_44px_rgba(38,50,58,0.18)]">
+          <button
+            type="button"
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              setOpen(false);
+              onDelete();
+            }}
+            className="flex min-h-10 w-full items-center rounded-[12px] px-3 text-left font-semibold text-[#C83F31] transition-colors hover:bg-[#FFF1EF]"
+          >
+            Delete class
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function ConfirmInstructorResignModal({
   programTitle,
   busy,
@@ -14148,6 +14534,38 @@ function ConfirmInstructorResignModal({
         <div className="mt-6 grid gap-2">
           <button type="button" onClick={onConfirm} disabled={busy} className="min-h-11 rounded-[8px] bg-[#26323A] px-4 text-sm font-semibold text-white disabled:opacity-60">
             {busy ? "Leaving..." : "Resign from class"}
+          </button>
+          <button type="button" onClick={onCancel} disabled={busy} className="min-h-11 rounded-[8px] bg-[#EEF3F5] px-4 text-sm font-semibold text-[#52616A] disabled:opacity-60">
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+function ConfirmClassDeleteModal({
+  programTitle,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  programTitle: string;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#26323A]/35 px-5 backdrop-blur-sm">
+      <div className="w-full max-w-sm rounded-[28px] bg-white p-6 text-[#26323A] shadow-[0_24px_60px_rgba(38,50,58,0.22)]">
+        <h2 className="text-xl font-semibold">Delete class?</h2>
+        <p className="mt-2 text-sm leading-6 text-[#6B747B]">
+          {programTitle} will be removed from class lists and closed to new applications. Existing records are preserved.
+        </p>
+        <div className="mt-6 grid gap-2">
+          <button type="button" onClick={onConfirm} disabled={busy} className="min-h-11 rounded-[8px] bg-[#C83F31] px-4 text-sm font-semibold text-white disabled:opacity-60">
+            {busy ? "Deleting..." : "Delete class"}
           </button>
           <button type="button" onClick={onCancel} disabled={busy} className="min-h-11 rounded-[8px] bg-[#EEF3F5] px-4 text-sm font-semibold text-[#52616A] disabled:opacity-60">
             Cancel

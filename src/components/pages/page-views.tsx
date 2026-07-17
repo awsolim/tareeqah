@@ -4,7 +4,7 @@ import { GoogleAuthCallback } from "@/components/auth/google-auth-callback";
 import { OAuthProfileCompletion } from "@/components/auth/oauth-profile-completion";
 import { ForgotPasswordPanel, ResetPasswordPanel } from "@/components/auth/password-reset";
 import { PortalRoleRedirect } from "@/components/data/portal-role-redirect";
-import { AdminClassesData, AdminHomeData, AdminMasjidData, AdminMasjidFinancesData, AdminMembersData, InboxAnnouncementsData, MosqueDirectoryRows, PortalAccountData, ProgramDetailData, ProgramFinancesData, PublicMasjidData, PublicProgramsData, StudentClassesData, StudentHomeData, StudentScheduleOptionsData, StudentWithdrawalRequestData, TeacherAnnouncementData, TeacherClassesData, TeacherHomeData, TeacherInboxData, TeacherInstructorsData, TeacherProgramCreateData, TeacherProgramSettingsData, TeacherScheduleData, TeacherStudentNotesData, TeacherStudentsData } from "@/components/data/supabase-public-sections";
+import { AdminClassesData, AdminHomeData, AdminMasjidData, AdminMasjidFinancesData, AdminMasjidInformationData, AdminMembersData, InboxAnnouncementsData, MosqueDirectoryRows, PortalAccountData, ProgramDetailData, ProgramFinancesData, PublicMasjidData, PublicProgramsData, StudentClassesData, StudentHomeData, StudentScheduleOptionsData, StudentWithdrawalRequestData, TeacherAnnouncementData, TeacherClassesData, TeacherHomeData, TeacherInboxData, TeacherInstructorsData, TeacherProgramCreateData, TeacherProgramSettingsData, TeacherScheduleData, TeacherStudentNotesData, TeacherStudentsData } from "@/components/data/supabase-public-sections";
 import { ActionToolbar } from "@/components/ui/action-toolbar";
 import { DataRow } from "@/components/ui/data-row";
 import { DataTable } from "@/components/ui/data-table";
@@ -653,6 +653,17 @@ export function AdminMasjidPage({ slug }: { slug: string }) {
       <PageTitleBar title="Masjid" tone="teal" />
       <Workspace>
         <AdminMasjidData slug={slug} />
+      </Workspace>
+    </PageShell>
+  );
+}
+
+export function AdminMasjidInformationPage({ slug }: { slug: string }) {
+  return (
+    <PageShell section="admin" slug={slug}>
+      <PageTitleBar title="Masjid Information" backHref={`/m/${slug}/admin/masjid`} backLabel="Masjid" tone="teal" />
+      <Workspace>
+        <AdminMasjidInformationData slug={slug} />
       </Workspace>
     </PageShell>
   );
