@@ -4,7 +4,7 @@ import { GoogleAuthCallback } from "@/components/auth/google-auth-callback";
 import { OAuthProfileCompletion } from "@/components/auth/oauth-profile-completion";
 import { ForgotPasswordPanel, ResetPasswordPanel } from "@/components/auth/password-reset";
 import { PortalRoleRedirect } from "@/components/data/portal-role-redirect";
-import { AdminClassesData, AdminHomeData, AdminMasjidData, AdminMasjidFinancesData, AdminMasjidInformationData, AdminMembersData, InboxAnnouncementsData, MosqueDirectoryRows, PortalAccountData, ProgramDetailData, ProgramFinancesData, PublicMasjidData, PublicProgramsData, StudentClassesData, StudentHomeData, StudentScheduleOptionsData, StudentWithdrawalRequestData, TeacherAnnouncementData, TeacherClassesData, TeacherHomeData, TeacherInboxData, TeacherInstructorsData, TeacherProgramCreateData, TeacherProgramSettingsData, TeacherScheduleData, TeacherStudentNotesData, TeacherStudentsData } from "@/components/data/supabase-public-sections";
+import { AdminClassesData, AdminHomeData, AdminMasjidData, AdminMasjidFinancesData, AdminMasjidInformationData, AdminMembersData, InboxAnnouncementsData, MosqueDirectoryRows, PortalAccountData, ProgramApplicationsData, ProgramApplyData, ProgramDetailData, ProgramFinancesData, PublicMasjidData, PublicProgramsData, RegistrationConfirmationData, StudentClassesData, StudentHomeData, StudentScheduleOptionsData, StudentWithdrawalRequestData, TeacherAnnouncementData, TeacherClassesData, TeacherHomeData, TeacherInboxData, TeacherInstructorsData, TeacherProgramCreateData, TeacherProgramSettingsData, TeacherScheduleData, TeacherStudentNotesData, TeacherStudentsData } from "@/components/data/supabase-public-sections";
 import { ActionToolbar } from "@/components/ui/action-toolbar";
 import { DataRow } from "@/components/ui/data-row";
 import { DataTable } from "@/components/ui/data-table";
@@ -138,13 +138,13 @@ function ScheduleRows({ limit }: { limit?: number }) {
   );
 }
 
-function AuthForm({ mode, slug }: { mode: "login" | "signup"; slug: string }) {
+function AuthForm({ mode, slug, returnTo }: { mode: "login" | "signup"; slug: string; returnTo?: string }) {
   return (
     <main className="min-h-screen bg-white">
       <PageTitleBar title={mode === "login" ? "Log In" : "Create Account"} subtitle={masjid.name} tone="teal" />
       <Workspace>
         <Panel>
-          <AuthPanel mode={mode} slug={slug} />
+          <AuthPanel mode={mode} slug={slug} returnTo={returnTo} />
         </Panel>
       </Workspace>
     </main>
@@ -211,6 +211,28 @@ export function PublicProgramDetailPage({ programId, slug, returnTo }: { program
   );
 }
 
+export function RegistrationConfirmationPage({ requestId, slug }: { requestId: string; slug: string }) {
+  return (
+    <PageShell slug={slug}>
+      <PageTitleBar title="Registration Confirmation" backHref={`/m/${slug}/portal`} backLabel="Portal" tone="teal" />
+      <Workspace>
+        <RegistrationConfirmationData slug={slug} requestId={requestId} />
+      </Workspace>
+    </PageShell>
+  );
+}
+
+export function ProgramApplyPage({ programId, slug }: { programId: string; slug: string }) {
+  return (
+    <PageShell slug={slug}>
+      <PageTitleBar title="Apply to Register" backHref={`/m/${slug}/programs/${programId}`} backLabel="Program" tone="teal" />
+      <Workspace>
+        <ProgramApplyData slug={slug} programId={programId} />
+      </Workspace>
+    </PageShell>
+  );
+}
+
 export function PortalProgramDetailPage({ programId, slug }: { programId: string; slug: string }) {
   return (
     <>
@@ -255,12 +277,12 @@ export function TeacherInstructorsPage({ programId, slug }: { programId: string;
   );
 }
 
-export function LoginPage({ slug }: { slug: string }) {
-  return <AuthForm mode="login" slug={slug} />;
+export function LoginPage({ slug, returnTo }: { slug: string; returnTo?: string }) {
+  return <AuthForm mode="login" slug={slug} returnTo={returnTo} />;
 }
 
-export function SignupPage({ slug }: { slug: string }) {
-  return <AuthForm mode="signup" slug={slug} />;
+export function SignupPage({ slug, returnTo }: { slug: string; returnTo?: string }) {
+  return <AuthForm mode="signup" slug={slug} returnTo={returnTo} />;
 }
 
 export function ForgotPasswordPage({ slug }: { slug: string }) {
@@ -525,6 +547,17 @@ export function TeacherProgramFinancesPage({ slug, programId }: { slug: string; 
   );
 }
 
+export function TeacherProgramApplicationsPage({ slug, programId }: { slug: string; programId: string }) {
+  return (
+    <>
+      <PageTitleBar title="Applications" backHref={`/m/${slug}/teacher/classes`} backLabel="Classes" tone="teal" />
+      <Workspace overlapOffset="-172px" surfaceClassName="bg-white">
+        <ProgramApplicationsData slug={slug} programId={programId} mode="teacher" />
+      </Workspace>
+    </>
+  );
+}
+
 export function TeacherSchedulePage({ slug, programId }: { slug: string; programId: string }) {
   return (
     <>
@@ -741,6 +774,17 @@ export function AdminProgramFinancesPage({ slug, programId }: { slug: string; pr
       <PageTitleBar title="Finances" backHref={`/m/${slug}/admin/programs`} backLabel="Classes" tone="teal" />
       <Workspace overlapOffset="-172px" surfaceClassName="bg-white">
         <ProgramFinancesData slug={slug} programId={programId} mode="admin" />
+      </Workspace>
+    </PageShell>
+  );
+}
+
+export function AdminProgramApplicationsPage({ slug, programId }: { slug: string; programId: string }) {
+  return (
+    <PageShell section="admin" slug={slug}>
+      <PageTitleBar title="Applications" backHref={`/m/${slug}/admin/programs`} backLabel="Classes" tone="teal" />
+      <Workspace overlapOffset="-172px" surfaceClassName="bg-white">
+        <ProgramApplicationsData slug={slug} programId={programId} mode="admin" />
       </Workspace>
     </PageShell>
   );

@@ -30,6 +30,10 @@ function portalInboxUrl(mosqueSlug: string) {
   return `${getAppBaseUrl()}/m/${mosqueSlug}/portal/announcements`;
 }
 
+function registrationConfirmationUrl(mosqueSlug: string, requestId: string) {
+  return `${getAppBaseUrl()}/m/${mosqueSlug}/registration/${requestId}`;
+}
+
 function teacherInboxUrl(mosqueSlug: string) {
   return `${getAppBaseUrl()}/m/${mosqueSlug}/teacher/inbox`;
 }
@@ -164,7 +168,9 @@ export async function sendEnrollmentReviewedEmail(requestId: string, reviewerUse
   const isRejected = status === "rejected";
   const isCancelled = status === "cancelled";
   const title = isApproved ? "Enrollment Request Approved" : isRejected ? "Enrollment Request Returned" : isCancelled ? "Enrollment Cancelled" : "Enrollment Request Updated";
-  const action = isApproved && context.program.is_paid ? "Complete registration from your inbox to finish joining the class." : "Open your inbox to view the update.";
+  const needsConfirmation = isApproved && !context.request.admission_completed_at;
+  const action = needsConfirmation ? "Complete your registration to finish joining the class." : "Open your inbox to view the update.";
+  const actionHref = needsConfirmation ? registrationConfirmationUrl(context.mosque.slug, context.request.id) : portalInboxUrl(context.mosque.slug);
   const body = `
     <p style="margin:0 0 12px;">${escapeHtml(isParentRequest ? `Your request for ${studentName}` : "Your request")} has been updated.</p>
     <p style="margin:0 0 12px;"><strong>Class:</strong> ${escapeHtml(className)}</p>
@@ -175,8 +181,8 @@ export async function sendEnrollmentReviewedEmail(requestId: string, reviewerUse
   const result = await sendEmail({
     to: recipient.email,
     subject: `${title}: ${className}`,
-    html: renderShell(title, body, { label: isApproved && context.program.is_paid ? "Complete Registration" : "Open Inbox", href: portalInboxUrl(context.mosque.slug) }),
-    text: `${title}\nClass: ${className}\nStatus: ${status}\n${action}\n${portalInboxUrl(context.mosque.slug)}`,
+    html: renderShell(title, body, { label: needsConfirmation ? "Complete Registration" : "Open Inbox", href: actionHref }),
+    text: `${title}\nClass: ${className}\nStatus: ${status}\n${action}\n${actionHref}`,
   });
 
   return { sent: result.skipped ? 0 : 1, skipped: result.skipped ? 1 : 0 };

@@ -1,0 +1,4 @@
+-- Placeholder: original file not present anywhere in repo history.
+-- This migration already ran against production; this file only exists so the
+-- Supabase CLI's local migration history has an entry to reconcile against.
+-- No-op intentionally — do not re-run.

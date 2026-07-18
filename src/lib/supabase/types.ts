@@ -306,6 +306,11 @@ export type Database = {
           current_period_start: string | null;
           current_period_end: string | null;
           cancel_at_period_end: boolean;
+          payment_paused: boolean;
+          payment_paused_until: string | null;
+          payment_waived: boolean;
+          payment_waived_reason: string | null;
+          payment_waived_at: string | null;
           created_at: string;
           updated_at: string;
         };
@@ -569,6 +574,10 @@ export type Database = {
         Returns: boolean;
       };
       can_manage_program: {
+        Args: { check_program_id: string; check_profile_id?: string };
+        Returns: boolean;
+      };
+      can_manage_program_finances: {
         Args: { check_program_id: string; check_profile_id?: string };
         Returns: boolean;
       };

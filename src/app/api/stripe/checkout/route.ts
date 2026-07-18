@@ -1,4 +1,6 @@
-import { getStripe } from "@/lib/stripe/server";
+import { getStripe, shouldUseStripeConnect } from "@/lib/stripe/server";
+import { getCheckoutOrigin, getRegistrationConfirmationPath } from "@/lib/stripe/checkout-url";
+import { toProgramStatusFields } from "@/lib/programs/status";
 import { createSupabaseServiceClient } from "@/lib/supabase/service";
 
 export const runtime = "nodejs";
@@ -6,40 +8,6 @@ export const runtime = "nodejs";
 type CheckoutRequestBody = {
   enrollmentRequestId?: string;
 };
-
-function getOrigin(request: Request) {
-  const requestOrigin = request.headers.get("origin");
-  if (requestOrigin) {
-    return requestOrigin.replace(/\/$/, "");
-  }
-
-  const referer = request.headers.get("referer");
-  if (referer) {
-    return new URL(referer).origin;
-  }
-
-  const configuredOrigin = process.env.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_SITE_URL;
-  if (configuredOrigin) {
-    return configuredOrigin.replace(/\/$/, "");
-  }
-
-  return new URL(request.url).origin;
-}
-
-function shouldUseStripeConnect() {
-  return process.env.STRIPE_CONNECT_PLATFORM === "true";
-}
-
-function isMasjidSubdomain(origin: string, mosqueSlug: string) {
-  try {
-    const hostname = new URL(origin).hostname.toLowerCase();
-    const rootDomain = (process.env.NEXT_PUBLIC_ROOT_DOMAIN || "tareeqah.ca").toLowerCase();
-
-    return hostname === `${mosqueSlug}.${rootDomain}` || hostname === `${mosqueSlug}.localhost`;
-  } catch {
-    return false;
-  }
-}
 
 export async function POST(request: Request) {
   try {
@@ -82,15 +50,29 @@ export async function POST(request: Request) {
     if (enrollmentRequest.status !== "approved") {
       return Response.json({ error: "This request has not been approved yet." }, { status: 409 });
     }
+    if (enrollmentRequest.admission_completed_at) {
+      return Response.json({ error: "This registration has already been completed." }, { status: 409 });
+    }
 
-    const [{ data: program }, { data: mosque }, { data: profile }] = await Promise.all([
+    const [{ data: program }, { data: mosque }, { data: profile }, { data: existingSubscription }] = await Promise.all([
       supabase.from("programs").select("*").eq("id", enrollmentRequest.program_id).maybeSingle(),
       supabase.from("mosques").select("*").eq("id", enrollmentRequest.mosque_id).maybeSingle(),
       supabase.from("profiles").select("*").eq("id", user.id).maybeSingle(),
+      supabase
+        .from("program_subscriptions")
+        .select("status")
+        .eq("program_id", enrollmentRequest.program_id)
+        .eq("student_profile_id", enrollmentRequest.student_profile_id)
+        .maybeSingle(),
     ]);
 
     if (!program || !mosque) {
       return Response.json({ error: "Class payment details could not be loaded." }, { status: 404 });
+    }
+
+    const programStatusFields = toProgramStatusFields(program);
+    if (programStatusFields.publicationStatus === "draft" || ["cancelled", "archived", "completed"].includes(programStatusFields.lifecycleStatus)) {
+      return Response.json({ error: "This program is no longer available for payment." }, { status: 409 });
     }
 
     if (!program.is_paid) {
@@ -99,6 +81,12 @@ export async function POST(request: Request) {
 
     if (enrollmentRequest.payment_bypassed) {
       return Response.json({ error: "Payment is not required for this registration." }, { status: 409 });
+    }
+
+    // Only a genuinely live subscription blocks a new checkout attempt — "checkout_started"
+    // (an abandoned prior attempt) or a since-ended subscription should not.
+    if (existingSubscription && ["active", "trialing"].includes(existingSubscription.status?.toLowerCase() ?? "")) {
+      return Response.json({ error: "An active subscription already exists for this registration." }, { status: 409 });
     }
 
     const paymentType = enrollmentRequest.payment_type === "annual" ? "annual" : "monthly";
@@ -112,8 +100,8 @@ export async function POST(request: Request) {
 
     const stripeRequestOptions = shouldUseStripeConnect() && mosque.stripe_account_id ? { stripeAccount: mosque.stripe_account_id } : undefined;
 
-    const origin = getOrigin(request);
-    const returnPath = isMasjidSubdomain(origin, mosque.slug) ? "/portal/announcements" : `/m/${mosque.slug}/portal/announcements`;
+    const origin = getCheckoutOrigin(request);
+    const returnPath = getRegistrationConfirmationPath(origin, mosque.slug, enrollmentRequest.id);
     const stripe = getStripe();
     const productId = program.stripe_product_id;
     if (!productId) {
@@ -154,8 +142,8 @@ export async function POST(request: Request) {
         line_items: [{ price: dynamicPrice.id, quantity: 1 }],
         customer_email: profile?.email ?? user.email ?? undefined,
         client_reference_id: enrollmentRequest.id,
-        success_url: `${origin}${returnPath}?payment=success&session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${origin}${returnPath}?payment=cancelled`,
+        success_url: `${origin}${returnPath}?result=success&session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${origin}${returnPath}?result=cancelled`,
         ...(paymentType === "monthly" ? { subscription_data: { metadata: checkoutMetadata } } : {}),
         metadata: checkoutMetadata,
       },

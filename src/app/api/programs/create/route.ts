@@ -1,6 +1,7 @@
-import { getStripe } from "@/lib/stripe/server";
+import { getStripe, shouldUseStripeConnect } from "@/lib/stripe/server";
 import { createSupabaseServiceClient } from "@/lib/supabase/service";
 import type { Database, Json } from "@/lib/supabase/types";
+import { deriveLifecycleStatus, normalizeProgramStatusFields, validateProgramStatusCombination, type ProgramStatusFields } from "@/lib/programs/status";
 
 export const runtime = "nodejs";
 
@@ -61,10 +62,6 @@ type CreateProgramBody = {
   directorProfileId?: string | null;
   tags?: unknown;
 };
-
-function shouldUseStripeConnect() {
-  return process.env.STRIPE_CONNECT_PLATFORM === "true";
-}
 
 function cleanTitle(value: unknown) {
   return typeof value === "string" ? value.trim().slice(0, 160) : "";
@@ -194,8 +191,8 @@ export async function POST(request: Request) {
     const summary = cleanText(body.summary, 400);
     const description = cleanDescription(body.description);
     const publicationStatus = pickAllowed(body.publicationStatus, ["draft", "published", "hidden", "archived"], "published");
-    const applicationStatus = pickAllowed(body.applicationStatus, ["accepting", "not_accepting", "waitlist_only", "closed", "invite_only"], "accepting");
-    const lifecycleStatus = pickAllowed(body.lifecycleStatus, ["upcoming", "active", "completed", "cancelled", "archived"], "upcoming");
+    const applicationStatus = pickAllowed(body.applicationStatus, ["accepting", "not_accepting", "opens_later", "waitlist_only", "closed", "invite_only"], "accepting");
+    const lifecycleStatus = pickAllowed(body.lifecycleStatus, ["upcoming", "active", "paused", "completed", "cancelled", "archived"], "upcoming");
     const applicationMode = pickAllowed(body.applicationMode, ["application_required", "open_enrollment", "invite_only", "hidden_private"], "application_required");
     const durationType = pickAllowed(body.durationType, ["ongoing", "fixed_months"], "ongoing");
     const paymentKind = pickAllowed(body.paymentKind, ["free", "tareeqah", "manual"], "free");
@@ -209,6 +206,30 @@ export async function POST(request: Request) {
     const trackSelectionCount = 1;
     const requestedDirectorProfileId = typeof body.directorProfileId === "string" && body.directorProfileId.trim() ? body.directorProfileId.trim() : null;
     const isDraft = publicationStatus === "draft";
+    const billingEndBehavior = pickAllowed(body.billingEndBehavior, ["manual_cancel", "program_end", "fixed_months"], "fixed_months");
+    const endDateValue = durationType === "ongoing" ? null : typeof body.endDate === "string" && body.endDate.trim() ? body.endDate : null;
+    const startDateValue = body.startNow ? null : typeof body.startDate === "string" && body.startDate.trim() ? body.startDate : null;
+    const applicationOpenAtValue = cleanDateTime(body.applicationOpenAt);
+    const applicationCloseAtValue = cleanDateTime(body.applicationCloseAt);
+    const derivedLifecycleStatus = deriveLifecycleStatus({
+      lifecycleStatus: lifecycleStatus as ProgramStatusFields["lifecycleStatus"],
+      startNow: Boolean(body.startNow),
+      startDate: startDateValue,
+      endDate: endDateValue,
+      isOngoing: durationType === "ongoing",
+    });
+    const statusFields = normalizeProgramStatusFields({
+      publicationStatus: publicationStatus as ProgramStatusFields["publicationStatus"],
+      applicationStatus: applicationStatus as ProgramStatusFields["applicationStatus"],
+      lifecycleStatus: derivedLifecycleStatus,
+      applicationOpenAt: applicationOpenAtValue,
+      applicationCloseAt: applicationCloseAtValue,
+      startDate: startDateValue,
+      endDate: endDateValue,
+      isOngoing: durationType === "ongoing",
+      billingEndBehavior: billingEndBehavior as ProgramStatusFields["billingEndBehavior"],
+      offersAnnualPayment,
+    });
 
     if (!mosqueSlug) {
       return Response.json({ error: "Missing masjid." }, { status: 400 });
@@ -216,6 +237,13 @@ export async function POST(request: Request) {
 
     if (!title) {
       return Response.json({ error: "Add a public title before saving." }, { status: 400 });
+    }
+
+    if (!isDraft) {
+      const validation = validateProgramStatusCombination(statusFields);
+      if (!validation.valid) {
+        return Response.json({ error: validation.errors[0]?.message ?? "Invalid program status combination." }, { status: 400 });
+      }
     }
 
     if (!isDraft && isPaid && !offersMonthlyPayment && !offersAnnualPayment) {
@@ -227,7 +255,7 @@ export async function POST(request: Request) {
     }
 
     if (!isDraft && isPaid && !usesPerTrackPricing && offersAnnualPayment && (!priceAnnualCents || priceAnnualCents < 50)) {
-      return Response.json({ error: "One-time annual payment needs a valid price." }, { status: 400 });
+      return Response.json({ error: "Pay in Full needs a valid price." }, { status: 400 });
     }
 
     const supabase = createSupabaseServiceClient();
@@ -349,31 +377,31 @@ export async function POST(request: Request) {
         category: cleanText(body.category, 80),
         program_type: pickAllowed(body.programType, ["recurring", "event"], "recurring"),
         publication_status: publicationStatus,
-        application_status: publicationStatus === "draft" ? "not_accepting" : applicationStatus,
-        lifecycle_status: lifecycleStatus,
+        application_status: statusFields.applicationStatus,
+        lifecycle_status: derivedLifecycleStatus,
         application_mode: applicationMode,
-        accepting_applications: publicationStatus !== "draft" && body.acceptingApplications !== false,
-        application_open_at: cleanDateTime(body.applicationOpenAt),
-        application_close_at: cleanDateTime(body.applicationCloseAt),
+        accepting_applications: statusFields.applicationStatus === "accepting",
+        application_open_at: applicationOpenAtValue,
+        application_close_at: applicationCloseAtValue,
         waitlist_enabled: body.waitlistEnabled !== false,
         capacity_behavior: pickAllowed(body.capacityBehavior, ["manual_review", "close_when_full", "allow_waitlist"], "manual_review"),
         default_capacity: Number.isFinite(body.defaultCapacity) ? Math.max(0, Math.round(Number(body.defaultCapacity))) : null,
         tags: cleanTags(body.tags),
         duration_type: durationType,
         start_now: Boolean(body.startNow),
-        start_date: body.startNow ? null : typeof body.startDate === "string" && body.startDate.trim() ? body.startDate : null,
-        end_date: null,
+        start_date: startDateValue,
+        end_date: endDateValue,
         duration_months: Number.isFinite(body.durationMonths) ? Math.max(1, Math.round(Number(body.durationMonths))) : null,
         is_ongoing: durationType === "ongoing",
         schedule_pattern: pickAllowed(body.schedulePattern, ["weekly", "custom_dates"], "weekly"),
         registration_deadline_at: cleanDateTime(body.registrationDeadlineAt),
         location: cleanText(body.location, 180),
         room: cleanText(body.room, 120),
-        is_active: publicationStatus !== "draft" && lifecycleStatus !== "cancelled" && lifecycleStatus !== "archived",
+        is_active: publicationStatus !== "draft" && derivedLifecycleStatus !== "cancelled" && derivedLifecycleStatus !== "archived",
         is_paid: isPaid,
         payment_kind: paymentKind,
         billing_start_behavior: pickAllowed(body.billingStartBehavior, ["on_payment", "program_start"], "on_payment"),
-        billing_end_behavior: pickAllowed(body.billingEndBehavior, ["manual_cancel", "program_end", "fixed_months"], "fixed_months"),
+        billing_end_behavior: billingEndBehavior,
         billing_duration_months: Number.isFinite(body.billingDurationMonths) ? Math.max(1, Math.round(Number(body.billingDurationMonths))) : 10,
         offers_monthly_payment: isPaid ? offersMonthlyPayment : false,
         offers_annual_payment: isPaid ? offersAnnualPayment : false,

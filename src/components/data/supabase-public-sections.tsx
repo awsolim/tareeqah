@@ -15,6 +15,19 @@ import { clearUserScopedCaches, loadCachedSession, loadCachedUserAccess, setCach
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import type { Database, Json } from "@/lib/supabase/types";
 import { cn } from "@/lib/utils";
+import { deriveLifecycleStatus, getApplicationButtonState, getProgramPrimaryCta, getProgramStatusBadges, isPubliclyListed, toProgramStatusFields, validateProgramStatusCombination, type ApplicationStatus as ProgramApplicationStatus, type LifecycleStatus as ProgramLifecycleStatus, type PublicationStatus as ProgramPublicationStatus, type ProgramStatusFields } from "@/lib/programs/status";
+import {
+  applicationStatusTone,
+  getApplicationPaymentStatus,
+  getApplicationRowActions,
+  getApplicationRowStatusLabel,
+  getApplicationStatus,
+  paymentStatusTone,
+  PAYMENT_STATUS_LABELS,
+  type ApplicationRowAction,
+  type ApplicationStatus as RequestApplicationStatus,
+} from "@/lib/programs/applications";
+import { getApplicantPrimaryAction, isApplicationActionRequired } from "@/lib/programs/applicant-actions";
 
 type Mosque = Database["public"]["Tables"]["mosques"]["Row"];
 type Program = Database["public"]["Tables"]["programs"]["Row"];
@@ -51,6 +64,7 @@ type TeacherProgramRole = "director" | "instructor";
 type PaymentType = "monthly" | "annual";
 type ProgramEditorMediaRow = { id: string; url: string; title: string; mediaType: string; file?: File | null; previewUrl?: string };
 type ProgramEditorFaqRow = { id: string; question: string; answer: string };
+type ProgramEditorContentSectionRow = { id: string; title: string; description: string; durationText: string };
 type ProgramEditorTrackRow = {
   id: string;
   name: string;
@@ -68,11 +82,13 @@ type ProgramBuilderStatus = {
   summary: string;
   category: string;
   programType: "recurring" | "event";
-  publicationStatus: "draft" | "published" | "hidden" | "archived";
-  applicationStatus: "accepting" | "not_accepting" | "waitlist_only" | "closed" | "invite_only";
-  lifecycleStatus: "upcoming" | "active" | "completed" | "cancelled" | "archived";
+  publicationStatus: ProgramPublicationStatus;
+  applicationStatus: ProgramApplicationStatus;
+  lifecycleStatus: ProgramLifecycleStatus;
   applicationMode: "application_required" | "open_enrollment" | "invite_only" | "hidden_private";
   acceptingApplications: boolean;
+  applicationOpenAt: string;
+  applicationCloseAt: string;
   waitlistEnabled: boolean;
   capacityBehavior: "manual_review" | "close_when_full" | "allow_waitlist";
   defaultCapacity: string;
@@ -109,23 +125,6 @@ type AnnouncementWithContext = Database["public"]["Tables"]["program_announcemen
 
 const ANNOUNCEMENT_THREAD_PAGE_SIZE = 25;
 const NOTE_THREAD_PAGE_SIZE = 25;
-const defaultProgramFaqRows: ProgramEditorFaqRow[] = [
-  {
-    id: "faq-eligibility",
-    question: "Who can join this class?",
-    answer: "Students who match the listed age and audience requirements can apply. The teaching team reviews each request before enrollment is confirmed.",
-  },
-  {
-    id: "faq-materials",
-    question: "What should students bring?",
-    answer: "Bring regular learning materials, a notebook, and anything the instructor requests after enrollment.",
-  },
-  {
-    id: "faq-schedule",
-    question: "How do schedule choices work?",
-    answer: "If this class has multiple schedules, choose the option that works best when applying. Enrolled families can manage eligible changes from the class page.",
-  },
-];
 
 const programBuilderSteps: Array<{ id: ProgramBuilderStep; label: string }> = [
   { id: "basics", label: "Basics" },
@@ -153,6 +152,8 @@ function defaultBuilderStatus(): ProgramBuilderStatus {
     lifecycleStatus: "upcoming",
     applicationMode: "application_required",
     acceptingApplications: true,
+    applicationOpenAt: "",
+    applicationCloseAt: "",
     waitlistEnabled: true,
     capacityBehavior: "manual_review",
     defaultCapacity: "",
@@ -269,6 +270,9 @@ function programAlreadyStarted(program: Program | null) {
   if (!program) {
     return false;
   }
+  if (program.start_now) {
+    return true;
+  }
   if (program.lifecycle_status === "active" || program.lifecycle_status === "completed") {
     return true;
   }
@@ -312,6 +316,19 @@ function estimateEndMonth(startDate: string, months: string) {
   }
   date.setMonth(date.getMonth() + Math.round(count));
   return date.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+}
+
+function monthsBetweenDates(startDate: string, endDate: string): number | null {
+  if (!startDate || !endDate) {
+    return null;
+  }
+  const start = new Date(`${startDate}T00:00:00`);
+  const end = new Date(`${endDate}T00:00:00`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end.getTime() <= start.getTime()) {
+    return null;
+  }
+  const months = (end.getFullYear() - start.getFullYear()) * 12 + (end.getMonth() - start.getMonth());
+  return Math.max(1, months);
 }
 
 function formatMonthlyCycle(priceText: string, monthsText: string) {
@@ -532,6 +549,31 @@ async function getCurrentAccessToken() {
   const supabase = createSupabaseBrowserClient();
   const { data: sessionData } = await supabase.auth.getSession();
   return sessionData.session?.access_token ?? null;
+}
+
+type ApplicationActionEndpoint = "approve" | "waitlist" | "reject" | "cancel-approval" | "change-price" | "waive" | "note" | "confirm" | "reopen";
+
+async function callApplicationAction<T = Record<string, unknown>>(
+  programId: string,
+  requestId: string,
+  endpoint: ApplicationActionEndpoint,
+  payload: Record<string, unknown>,
+): Promise<{ ok: true; data: T } | { ok: false; error: string }> {
+  const token = await getCurrentAccessToken();
+  if (!token) {
+    return { ok: false, error: "Please sign in again to continue." };
+  }
+
+  const response = await fetch(`/api/programs/${programId}/applications/${requestId}/${endpoint}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  });
+  const result = (await response.json().catch(() => ({}))) as T & { error?: string };
+  if (!response.ok) {
+    return { ok: false, error: result.error ?? "Something went wrong." };
+  }
+  return { ok: true, data: result };
 }
 
 function queueEnrollmentRequestSubmittedEmails(requestIds: string[]) {
@@ -791,6 +833,7 @@ export function PublicMasjidData({ slug }: { slug: string }) {
 export function StudentHomeData({ slug }: { slug: string }) {
   const { programs, enrolledProgramIds, programOwnerLabels, programTracksByProgramId, accountType, viewerProfiles, loading, enrollmentLoading, error } = useStudentPrograms(slug);
   const { unreadCount } = useStudentUnreadAnnouncements(slug);
+  const { rows: applicationRows, loading: applicationsLoading } = useApplicantApplications(slug);
 
   if (loading || enrollmentLoading) {
     return <HomeLoadingState />;
@@ -807,8 +850,20 @@ export function StudentHomeData({ slug }: { slug: string }) {
       scheduleTracks: programTracksByProgramId[program.id],
     }));
 
+  const actionRequiredRows = applicationsLoading
+    ? []
+    : applicationRows.filter((row) => isApplicationActionRequired(getApplicationStatus(row.request)));
+
   return (
     <section className="space-y-5 bg-[var(--workspace)] p-4">
+      {actionRequiredRows.length > 0 ? (
+        <div className="space-y-3">
+          <HomeSectionTitle title="Action Required" />
+          {actionRequiredRows.map((row) => (
+            <ActionRequiredCard key={row.request.id} slug={slug} row={row} />
+          ))}
+        </div>
+      ) : null}
       <HomeNotification
         tone={unreadCount > 0 ? "active" : "empty"}
         title={unreadCount > 0 ? `${unreadCount} unread message${unreadCount === 1 ? "" : "s"}` : "No new inbox items"}
@@ -822,6 +877,35 @@ export function StudentHomeData({ slug }: { slug: string }) {
         <HomeUpcomingRows programs={enrolledPrograms} ownerLabelsByProgramId={programOwnerLabels} />
       )}
     </section>
+  );
+}
+
+function ActionRequiredCard({ slug, row }: { slug: string; row: ApplicantApplicationRow }) {
+  const status = getApplicationStatus(row.request);
+  const paymentStatus = getApplicationPaymentStatus(row.request, row.program, row.subscription);
+  const action = getApplicantPrimaryAction(status, paymentStatus, row.request);
+  const statusLabel = getApplicationRowStatusLabel(status, paymentStatus);
+  const childName = row.student?.full_name?.trim();
+  const explanation =
+    paymentStatus === "not_required" || paymentStatus === "waived"
+      ? "Your application was approved. Confirm registration to activate the class."
+      : "Your application was approved. Complete payment to activate the class.";
+
+  return (
+    <div className="relative overflow-hidden rounded-[20px] border border-[#CFE8D6] bg-[#FBFEFC] p-4 shadow-[0_10px_26px_rgba(38,50,58,0.06)]">
+      <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#17624F]">{statusLabel}</p>
+      <h3 className="mt-1 text-base font-semibold text-[#26323A]">
+        {row.program?.title ?? "Class"}
+        {childName ? ` — ${childName}` : ""}
+      </h3>
+      <p className="mt-1 text-sm leading-5 text-[#52616A]">{explanation}</p>
+      <Link
+        href={`/m/${slug}/registration/${row.request.id}`}
+        className="mt-3 inline-flex min-h-10 w-full items-center justify-center rounded-[6px] bg-[#2E6E52] px-4 text-sm font-semibold !text-white shadow-[0_8px_18px_rgba(46,110,82,0.22)] transition-colors hover:bg-[#265D45]"
+      >
+        {action.label}
+      </Link>
+    </div>
   );
 }
 
@@ -852,22 +936,13 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
   const [faqs, setFaqs] = useState<ProgramFaq[]>([]);
   const [mediaItems, setMediaItems] = useState<ProgramMedia[]>([]);
   const [tracks, setTracks] = useState<ProgramTrack[]>([]);
-  const [selectedTrackIds, setSelectedTrackIds] = useState<string[]>([]);
-  const [selectedPaymentType, setSelectedPaymentType] = useState<PaymentType>("monthly");
-  const [enrollmentOptionsOpen, setEnrollmentOptionsOpen] = useState(false);
   const [isSignedIn, setIsSignedIn] = useState(false);
-  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [accountType, setAccountType] = useState<string | null>(null);
-  const [selfProfile, setSelfProfile] = useState<StudentDisplay | null>(null);
-  const [parentChildren, setParentChildren] = useState<StudentDisplay[]>([]);
   const [childStatuses, setChildStatuses] = useState<Record<string, { enrolled: boolean; requestStatus: string | null }>>({});
-  const [childSelectorOpen, setChildSelectorOpen] = useState(false);
-  const [selectedChildIds, setSelectedChildIds] = useState<string[]>([]);
   const [requestStatus, setRequestStatus] = useState<string | null>(null);
   const [isEnrolled, setIsEnrolled] = useState(false);
   const [isStaffForProgram, setIsStaffForProgram] = useState(false);
-  const [requestMessage, setRequestMessage] = useState<string | null>(null);
-  const [requestBusy, setRequestBusy] = useState(false);
+  const [enrolledCount, setEnrolledCount] = useState<number | null>(null);
   const [toast, setToast] = useState<EditorToastState | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -877,14 +952,12 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
 
     loadCachedSession().then((session) => {
       setIsSignedIn(Boolean(session));
-      setCurrentUserId(session?.user.id ?? null);
     });
 
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, session) => {
       setIsSignedIn(Boolean(session));
-      setCurrentUserId(session?.user.id ?? null);
     });
 
     async function load() {
@@ -938,14 +1011,14 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
       }
 
       if (programData) {
-        setSelectedPaymentType(defaultPaymentType(programData));
-        const [detailsResult, outcomesResult, contentResult, faqResult, mediaResult, tracksResult] = await Promise.all([
+        const [detailsResult, outcomesResult, contentResult, faqResult, mediaResult, tracksResult, enrolledCountResult] = await Promise.all([
           supabase.from("program_details").select("*").eq("program_id", programData.id).maybeSingle(),
           supabase.from("program_outcomes").select("*").eq("program_id", programData.id).order("sort_order", { ascending: true }),
           supabase.from("program_content_sections").select("*").eq("program_id", programData.id).order("sort_order", { ascending: true }),
           supabase.from("program_faqs").select("*").eq("program_id", programData.id).order("sort_order", { ascending: true }),
           supabase.from("program_media").select("*").eq("program_id", programData.id).order("sort_order", { ascending: true }),
           supabase.from("program_tracks").select("*").eq("program_id", programData.id).eq("is_active", true).order("sort_order", { ascending: true }),
+          supabase.from("enrollments").select("id", { count: "exact", head: true }).eq("program_id", programData.id).eq("status", "active"),
         ]);
 
         setDetails(detailsResult.data ?? null);
@@ -953,22 +1026,12 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
         setContentSections(contentResult.data ?? []);
         setFaqs(faqResult.data ?? []);
         setMediaItems(mediaResult.data ?? []);
-        const activeTracks = tracksResult.data ?? [];
-        setTracks(activeTracks);
-        setSelectedTrackIds((current) => {
-          if (current.length) {
-            return current.filter((trackId) => activeTracks.some((track) => track.id === trackId));
-          }
-          return activeTracks[0]?.id ? [activeTracks[0].id] : [];
-        });
+        setTracks(tracksResult.data ?? []);
+        setEnrolledCount(typeof enrolledCountResult.count === "number" ? enrolledCountResult.count : null);
 
         if (userId) {
           const [profileResult, enrollmentResult, requestResult, teacherAssignmentResult, access] = await Promise.all([
-            supabase
-              .from("profiles")
-              .select("id, full_name, email, phone_number, avatar_url, age, gender, date_of_birth, account_type")
-              .eq("id", userId)
-              .maybeSingle(),
+            supabase.from("profiles").select("account_type").eq("id", userId).maybeSingle(),
             supabase.from("enrollments").select("*").eq("program_id", programData.id).eq("student_profile_id", userId).maybeSingle(),
             supabase
               .from("enrollment_requests")
@@ -984,14 +1047,12 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
           ]);
           const nextAccountType = profileResult.data?.account_type ?? access.accountType ?? null;
           setAccountType(nextAccountType);
-          setSelfProfile((profileResult.data as StudentDisplay | null) ?? null);
           setIsEnrolled(Boolean(enrollmentResult.data));
           setRequestStatus(requestResult.data?.status ?? null);
           setIsStaffForProgram(Boolean(teacherAssignmentResult.data) || directorProfileId === userId || access.isMosqueAdmin);
 
           if (nextAccountType === "parent") {
             const { children } = await fetchParentChildren(supabase, slug, userId, mosqueData.id);
-            setParentChildren(children);
             const childIds = children.map((child) => child.id);
             if (childIds.length) {
               const [childEnrollments, childRequests] = await Promise.all([
@@ -1018,13 +1079,10 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
               setChildStatuses({});
             }
           } else {
-            setParentChildren([]);
             setChildStatuses({});
           }
         } else {
           setAccountType(null);
-          setSelfProfile(null);
-          setParentChildren([]);
           setChildStatuses({});
           setIsEnrolled(false);
           setRequestStatus(null);
@@ -1063,214 +1121,55 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
   const age = formatAgeRange(program.age_range_text);
   const gender = formatGender(program.audience_gender);
   const paymentOptions = programPaymentOptions(program);
-  const price = program.is_paid ? (paymentOptions[0]?.price ?? "Payment details pending") : "Free";
+  const price = program.is_paid ? (paymentOptions[0]?.price ?? "Payment details pending") : program.payment_kind === "manual" ? "Price determined after review" : "Free";
   const schedule = scheduleSummary(program.schedule, program.schedule_notes);
-  const selectedTracks = tracks.filter((track) => selectedTrackIds.includes(track.id));
-  const selectedTrackSchedule = selectedTracks.length
+  const primaryTrack = tracks[0] ?? null;
+  const primaryTrackSchedule = primaryTrack
     ? {
-        short: selectedTracks.map((track) => track.name).join(", "),
-        full: selectedTracks.map((track) => `${track.name}: ${scheduleSummary(track.schedule, null).full}`).join("; "),
+        short: tracks.map((track) => track.name).join(", "),
+        full: tracks.map((track) => `${track.name}: ${scheduleSummary(track.schedule, null).full}`).join("; "),
       }
     : schedule;
+  const locationName = primaryTrack?.location?.trim() || program.location?.trim() || "";
+  const locationRoom = primaryTrack?.room?.trim() || program.room?.trim() || "";
+  const locationDisplay = locationName ? `${locationName}${locationRoom ? `, ${locationRoom}` : ""}` : "Location will be announced";
   const learningIntro = details?.learning_intro?.trim() ?? "";
   const learningOutcomes = outcomes.map((item) => item.text);
   const hasLearningSection = Boolean(learningIntro) || learningOutcomes.length > 0;
   const publicInfoRows = [
     { title: "Topics Covered", body: details?.topics_intro?.trim() ?? "" },
     { title: "Requirements", body: details?.requirements_text?.trim() ?? "" },
-    { title: "What To Bring", body: details?.what_to_bring_text?.trim() ?? "" },
     { title: "Policies", body: details?.policies_text?.trim() ?? "" },
   ].filter((row) => row.body);
   const classContent = contentSections;
   const hasContentSection = classContent.length > 0;
   const galleryItems = mediaItems;
   const hasMediaSection = galleryItems.length > 0;
-  const selfEligibility = accountType === "student" ? isProfileEligibleForProgram(selfProfile, program) : { eligible: true, reason: null };
-  const parentApplicantProfiles = accountType === "parent" ? [selfProfile, ...parentChildren].filter((profile): profile is StudentDisplay => Boolean(profile?.id)) : [];
-  const parentApplicantStatuses =
-    accountType === "parent" && currentUserId
-      ? {
-          ...childStatuses,
-          [currentUserId]: { enrolled: isEnrolled, requestStatus },
-        }
-      : childStatuses;
   const viewerHasActiveEnrollment =
     isEnrolled || (accountType === "parent" && Object.values(childStatuses).some((status) => status.enrolled));
-  const applicationStatus = program.accepting_applications === false ? "not_accepting" : program.application_status ?? (program.is_active ? "accepting" : "closed");
-  const now = Date.now();
-  const applicationOpenAt = program.application_open_at ? new Date(program.application_open_at).getTime() : null;
-  const applicationCloseAt = program.application_close_at ? new Date(program.application_close_at).getTime() : null;
-  const applicationsHaveOpened = applicationOpenAt === null || applicationOpenAt <= now;
-  const applicationsHaveNotClosed = applicationCloseAt === null || applicationCloseAt >= now;
-  const canRequestApplication =
-    program.publication_status !== "draft" &&
-    applicationsHaveOpened &&
-    applicationsHaveNotClosed &&
-    (applicationStatus === "accepting" || applicationStatus === "waitlist_only");
-  const applicationUnavailableMessage =
-    applicationStatus === "waitlist_only"
-      ? "This class is accepting waitlist requests."
-      : applicationStatus === "invite_only"
-        ? "This class is invite only."
-        : !applicationsHaveOpened
-          ? "Applications are not open yet."
-          : !applicationsHaveNotClosed
-            ? "Applications are closed."
-            : "This class is not currently accepting applications.";
 
-  async function requestEnrollment() {
-    if (!currentUserId || !mosque || !program) {
-      return;
-    }
+  const totalCapacity = tracks.length
+    ? tracks.reduce((sum, track) => (track.capacity != null ? sum + track.capacity : sum), 0) || null
+    : program.default_capacity;
+  const capacityFull = totalCapacity != null && enrolledCount != null && enrolledCount >= totalCapacity;
+  const spotsRemaining = totalCapacity != null && enrolledCount != null ? Math.max(0, totalCapacity - enrolledCount) : null;
+  const waitlistAllowed = program.capacity_behavior === "allow_waitlist";
 
-    setRequestBusy(true);
-    setRequestMessage(null);
-    if (!canRequestApplication) {
-      setRequestMessage(applicationUnavailableMessage);
-      setRequestBusy(false);
-      return;
-    }
-    const supabase = createSupabaseBrowserClient();
-    const trackValidation = validateTrackSelection(program, tracks, selectedTrackIds);
-    if (!trackValidation.valid) {
-      setRequestMessage(trackValidation.message);
-      setRequestBusy(false);
-      return;
-    }
-    const primaryTrackId = selectedTrackIds[0] ?? null;
-
-    if (accountType === "teacher") {
-      setRequestMessage("Teacher accounts cannot request enrollment in classes.");
-      setRequestBusy(false);
-      return;
-    }
-
-    if (accountType === "parent") {
-      const requestableStudentIds = selectedChildIds.filter((studentId) => {
-        const status = parentApplicantStatuses[studentId];
-        const applicant = studentId === currentUserId ? selfProfile : parentChildren.find((item) => item.id === studentId);
-        return Boolean(applicant) && isProfileEligibleForProgram(applicant, program).eligible && !status?.enrolled && status?.requestStatus !== "pending" && status?.requestStatus !== "waitlisted";
-      });
-
-      if (requestableStudentIds.length === 0) {
-        setRequestMessage("Select at least one eligible student who is not already enrolled, pending review, or waitlisted.");
-        setRequestBusy(false);
-        return;
-      }
-
-      const { data: parentRequestRows, error: parentInsertError } = await supabase
-        .from("enrollment_requests")
-        .upsert(
-          requestableStudentIds.map((studentId) => ({
-            mosque_id: mosque.id,
-            program_id: program.id,
-            program_track_id: primaryTrackId,
-            student_profile_id: studentId,
-            parent_profile_id: studentId === currentUserId ? null : currentUserId,
-            status: "pending",
-            reviewed_by: null,
-            reviewed_at: null,
-            review_note: null,
-            decision_note: null,
-            payment_type: selectedPaymentType,
-            approved_price_monthly_cents: null,
-            approved_price_annual_cents: null,
-            payment_bypassed: false,
-            admission_completed_at: null,
-            student_dismissed_at: null,
-          })),
-          { onConflict: "program_id,student_profile_id" },
-        )
-        .select("id, student_profile_id");
-
-      if (parentInsertError) {
-        setRequestMessage(parentInsertError.message);
-        setRequestBusy(false);
-        return;
-      }
-      const trackWriteError = await replaceEnrollmentRequestTracks(
-        supabase,
-        (parentRequestRows ?? []).map((row) => row.id),
-        selectedTrackIds,
-      );
-      if (trackWriteError) {
-        setRequestMessage(trackWriteError);
-        setRequestBusy(false);
-        return;
-      }
-
-      setChildStatuses((current) => {
-        const next = { ...current };
-        for (const studentId of requestableStudentIds) {
-          if (studentId === currentUserId) {
-            continue;
-          }
-          next[studentId] = { enrolled: false, requestStatus: "pending" };
-        }
-        return next;
-      });
-      if (requestableStudentIds.includes(currentUserId)) {
-        setRequestStatus("pending");
-      }
-      setSelectedChildIds([]);
-      setChildSelectorOpen(false);
-      setEnrollmentOptionsOpen(false);
-      setToast({ tone: "success", message: `${requestableStudentIds.length} enrollment request${requestableStudentIds.length === 1 ? "" : "s"} sent. Check inbox for status.` });
-      queueEnrollmentRequestSubmittedEmails((parentRequestRows ?? []).map((row) => row.id));
-      setRequestBusy(false);
-      return;
-    }
-
-    const eligibility = isProfileEligibleForProgram(selfProfile, program);
-    if (!eligibility.eligible) {
-      setRequestMessage(eligibility.reason ?? "This class is not available for this profile.");
-      setRequestBusy(false);
-      return;
-    }
-
-    const { data: requestRows, error: insertError } = await supabase
-      .from("enrollment_requests")
-      .upsert(
-        {
-          mosque_id: mosque.id,
-          program_id: program.id,
-          program_track_id: primaryTrackId,
-          student_profile_id: currentUserId,
-          parent_profile_id: null,
-          status: "pending",
-          reviewed_by: null,
-          reviewed_at: null,
-          review_note: null,
-          decision_note: null,
-          payment_type: selectedPaymentType,
-          approved_price_monthly_cents: null,
-          approved_price_annual_cents: null,
-          payment_bypassed: false,
-          admission_completed_at: null,
-          student_dismissed_at: null,
-        },
-        { onConflict: "program_id,student_profile_id" },
-      )
-      .select("id");
-
-    if (insertError) {
-      setRequestMessage(insertError.message);
-      setRequestBusy(false);
-      return;
-    }
-    const trackWriteError = await replaceEnrollmentRequestTracks(supabase, (requestRows ?? []).map((row) => row.id), selectedTrackIds);
-    if (trackWriteError) {
-      setRequestMessage(trackWriteError);
-      setRequestBusy(false);
-      return;
-    }
-
-    setRequestStatus("pending");
-    setEnrollmentOptionsOpen(false);
-    setToast({ tone: "success", message: "Enrollment request sent. Check inbox for status." });
-    queueEnrollmentRequestSubmittedEmails((requestRows ?? []).map((row) => row.id));
-    setRequestBusy(false);
-  }
+  const applyHref = `/m/${slug}/programs/${programId}/apply`;
+  const viewEnrollmentHref = `/m/${slug}/portal/classes`;
+  const completePaymentHref = `/m/${slug}/portal/announcements`;
+  const primaryCta = getProgramPrimaryCta({
+    fields: toProgramStatusFields(program),
+    isSignedIn,
+    isEnrolled,
+    requestStatus,
+    paymentDue: requestStatus === "approved" && !isEnrolled,
+    capacityFull,
+    waitlistAllowed,
+    applyHref,
+    viewEnrollmentHref,
+    completePaymentHref,
+  });
 
   return (
     <div className="bg-[var(--workspace)] p-4">
@@ -1349,144 +1248,67 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
               <div className="flex items-baseline gap-2">
                 <p className="text-2xl font-semibold text-[#26323A]">{price}</p>
               </div>
+              {spotsRemaining !== null ? (
+                <p className={cn("mt-1 text-xs font-semibold", capacityFull ? "text-[#C0392B]" : "text-[#6B747B]")}>
+                  {capacityFull ? "Full" : `${spotsRemaining} spot${spotsRemaining === 1 ? "" : "s"} remaining`}
+                </p>
+              ) : null}
               <ProgramScheduleOptionsDisplay tracks={tracks} fallbackSchedule={schedule.full} />
               <ProgramPaymentOptionsDisplay program={program} />
-              {isSignedIn ? (
-                isTeacherContext || isStaffForProgram ? (
-                  <div className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#EEF6F8] px-4 text-sm font-semibold text-[#2F6F83] ring-1 ring-[#CFE2E8]">
-                    {accountType === "admin" ? "Admin Control" : "Teaching"}
-                  </div>
-                ) : accountType === "admin" ? (
-                  <div className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#EEF6F8] px-4 text-sm font-semibold text-[#2F6F83] ring-1 ring-[#CFE2E8]">
-                    Admin Account
-                  </div>
-                ) : accountType === "teacher" ? (
-                  <div className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#EEF6F8] px-4 text-sm font-semibold text-[#2F6F83] ring-1 ring-[#CFE2E8]">
-                    Teacher Account
-                  </div>
-                ) : !canRequestApplication && accountType === "parent" ? (
-                  <div className="mt-4 rounded-2xl bg-[#F6F8F9] p-4 text-sm leading-6 text-[#52616A] ring-1 ring-[#DDE6EA]">
-                    {applicationUnavailableMessage}
-                  </div>
-                ) : accountType === "parent" ? (
-                  <>
-                    {childSelectorOpen ? (
-                      <div className="mt-4 space-y-4">
-                        {tracks.length > 0 ? (
-                          <ProgramTrackSelector
-                            tracks={tracks}
-                            selectedTrackIds={selectedTrackIds}
-                            program={program}
-                            onToggle={(trackId) => setSelectedTrackIds((current) => nextProgramTrackSelection(program, tracks, current, trackId))}
-                          />
-                        ) : null}
-                        <ProgramPaymentOptionSelector program={program} selectedPaymentType={selectedPaymentType} onChange={setSelectedPaymentType} />
-                        <ChildEnrollmentSelector
-                          program={program}
-                          childrenProfiles={parentApplicantProfiles}
-                          statuses={parentApplicantStatuses}
-                          selfProfileId={currentUserId}
-                          selectedChildIds={selectedChildIds}
-                          onToggle={(childId) =>
-                            setSelectedChildIds((current) =>
-                              current.includes(childId) ? current.filter((id) => id !== childId) : [...current, childId],
-                            )
-                          }
-                          onSubmit={requestEnrollment}
-                          busy={requestBusy}
-                        />
-                      </div>
-                    ) : (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => setChildSelectorOpen(true)}
-                          disabled={parentApplicantProfiles.length === 0}
-                          className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#248B72] px-4 text-sm font-semibold !text-white shadow-[0_10px_22px_rgba(36,139,114,0.24)] transition-colors hover:bg-[#17624F] disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          Request Enrollment
-                        </button>
-                        {parentApplicantProfiles.length === 0 ? (
-                          <p className="mt-3 rounded-xl bg-[#FFF7E6] p-3 text-sm leading-6 text-[#8A5A00]">Complete your profile before requesting enrollment.</p>
-                        ) : null}
-                      </>
-                    )}
-                  </>
-                ) : isEnrolled ? (
-                  <div className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#E8F7F2] px-4 text-sm font-semibold text-[#17624F] ring-1 ring-[#B9E4D7]">
-                    Enrolled
-                  </div>
-                ) : requestStatus === "pending" ? (
-                  <div className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#FFF7E6] px-4 text-sm font-semibold text-[#8A5A00] ring-1 ring-[#F3D28A]">
-                    Pending Review
-                  </div>
-                ) : requestStatus === "waitlisted" ? (
-                  <div className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-white px-4 text-sm font-semibold text-[#8A6418] ring-1 ring-[#FFE3A3]">
-                    Waitlisted
-                  </div>
-                ) : !canRequestApplication ? (
-                  <div className="mt-4 rounded-2xl bg-[#F6F8F9] p-4 text-sm leading-6 text-[#52616A] ring-1 ring-[#DDE6EA]">
-                    {applicationUnavailableMessage}
-                  </div>
-                ) : !selfEligibility.eligible ? (
-                  <div className="mt-4 rounded-2xl bg-[#FFF7E6] p-4 text-sm leading-6 text-[#8A5A00] ring-1 ring-[#F3D28A]">
-                    {selfEligibility.reason ?? "This class is not available for this profile."}
-                  </div>
-                ) : (
-                  <>
-                    {enrollmentOptionsOpen ? (
-                      <div className="mt-4 space-y-4">
-                        {tracks.length > 0 ? (
-                          <ProgramTrackSelector
-                            tracks={tracks}
-                            selectedTrackIds={selectedTrackIds}
-                            program={program}
-                            onToggle={(trackId) => setSelectedTrackIds((current) => nextProgramTrackSelection(program, tracks, current, trackId))}
-                          />
-                        ) : null}
-                        <ProgramPaymentOptionSelector program={program} selectedPaymentType={selectedPaymentType} onChange={setSelectedPaymentType} />
-                        <button
-                          type="button"
-                          onClick={requestEnrollment}
-                          disabled={requestBusy}
-                          className="flex min-h-12 w-full items-center justify-center rounded-full bg-[#248B72] px-4 text-sm font-semibold !text-white shadow-[0_10px_22px_rgba(36,139,114,0.24)] transition-colors hover:bg-[#17624F] disabled:opacity-60"
-                        >
-                          {requestBusy ? "Sending..." : "Submit Request"}
-                        </button>
-                      </div>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => setEnrollmentOptionsOpen(true)}
-                        disabled={requestBusy}
-                        className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#248B72] px-4 text-sm font-semibold !text-white shadow-[0_10px_22px_rgba(36,139,114,0.24)] transition-colors hover:bg-[#17624F] disabled:opacity-60"
-                      >
-                        Request Enrollment
-                      </button>
-                    )}
-                  </>
-                )
+              {program.publication_status === "hidden" ? (
+                <p className="mt-3 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-[#8A6418]">
+                  <span aria-hidden>🔒</span> Private class — shared by direct link only
+                </p>
+              ) : null}
+              {isTeacherContext || isStaffForProgram ? (
+                <div className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#EEF6F8] px-4 text-sm font-semibold text-[#2F6F83] ring-1 ring-[#CFE2E8]">
+                  {accountType === "admin" ? "Admin Control" : "Teaching"}
+                </div>
+              ) : accountType === "admin" ? (
+                <div className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#EEF6F8] px-4 text-sm font-semibold text-[#2F6F83] ring-1 ring-[#CFE2E8]">
+                  Admin Account
+                </div>
+              ) : accountType === "teacher" ? (
+                <div className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#EEF6F8] px-4 text-sm font-semibold text-[#2F6F83] ring-1 ring-[#CFE2E8]">
+                  Teacher Account
+                </div>
+              ) : primaryCta.kind === "pill" ? (
+                <div
+                  className={cn(
+                    "mt-4 flex min-h-12 w-full items-center justify-center rounded-full px-4 text-sm font-semibold ring-1",
+                    primaryCta.tone === "positive"
+                      ? "bg-[#E8F7F2] text-[#17624F] ring-[#B9E4D7]"
+                      : primaryCta.tone === "warning"
+                        ? "bg-[#FFF7E6] text-[#8A5A00] ring-[#F3D28A]"
+                        : "bg-[#F6F8F9] text-[#52616A] ring-[#DDE6EA]",
+                  )}
+                >
+                  {primaryCta.label}
+                </div>
+              ) : primaryCta.kind === "disabled" ? (
+                <div className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#F6F8F9] px-4 text-center text-sm font-semibold text-[#52616A] ring-1 ring-[#DDE6EA]">
+                  {primaryCta.label}
+                </div>
               ) : (
-                <Link href={`/m/${slug}/login`} className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#248B72] px-4 text-sm font-semibold !text-white shadow-[0_10px_22px_rgba(36,139,114,0.24)] transition-colors hover:bg-[#17624F]">
-                  Log In to Request Enrollment
+                <Link
+                  href={primaryCta.href}
+                  className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#248B72] px-4 text-sm font-semibold !text-white shadow-[0_10px_22px_rgba(36,139,114,0.24)] transition-colors hover:bg-[#17624F]"
+                >
+                  {primaryCta.label}
                 </Link>
               )}
-              {requestMessage ? (
-                <div className="mt-3 rounded-xl border border-[#F3D28A] bg-[#FFF7E6] p-3 text-sm leading-6 text-[#8A5A00]">
-                  <p>{requestMessage}</p>
-                </div>
-              ) : null}
 
               <dl className="mt-5 divide-y divide-[#E6ECEF] text-sm">
                 <SidebarFact label="Age" value={age} />
                 <SidebarFact label="Audience" value={gender} />
-                <SidebarFact label="Schedule" value={selectedTrackSchedule.full} />
+                <SidebarFact label="Schedule" value={primaryTrackSchedule.full} />
+                <SidebarFact label="Location" value={locationDisplay} />
                 {section === "portal" && viewerHasActiveEnrollment ? (
                   <div className="py-3 text-xs leading-5 text-[#6B747B]">
                     Go to Schedule Options from your class card to view different schedule options.
                   </div>
                 ) : null}
-                <SidebarFact label="Applications" value={canRequestApplication ? (applicationStatus === "waitlist_only" ? "Waitlist only" : "Open") : "Closed"} />
+                <SidebarFact label="Applications" value={getApplicationButtonState(toProgramStatusFields(program)).label} />
               </dl>
             </aside>
 
@@ -1530,55 +1352,875 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
   );
 }
 
-export function StudentClassesData({ slug }: { slug: string }) {
-  const { mosque, programs, enrolledProgramIds, accountType, viewerProfiles, loading, enrollmentLoading, error } = useStudentPrograms(slug);
+export function ProgramApplyData({ slug, programId }: { slug: string; programId: string }) {
   const router = useRouter();
-  const searchParams = useSearchParams();
-  const initialStudentClassesTab = searchParams.get("tab");
-  const [tab, setTab] = useState<"enrolled" | "browse">(initialStudentClassesTab === "browse" ? "browse" : "enrolled");
+  const [mosque, setMosque] = useState<Mosque | null>(null);
+  const [program, setProgram] = useState<Program | null>(null);
+  const [tracks, setTracks] = useState<ProgramTrack[]>([]);
+  const [isSignedIn, setIsSignedIn] = useState(false);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [accountType, setAccountType] = useState<string | null>(null);
+  const [selfProfile, setSelfProfile] = useState<StudentDisplay | null>(null);
+  const [parentChildren, setParentChildren] = useState<StudentDisplay[]>([]);
+  const [childStatuses, setChildStatuses] = useState<Record<string, { enrolled: boolean; requestStatus: string | null }>>({});
+  const [requestStatus, setRequestStatus] = useState<string | null>(null);
+  const [isEnrolled, setIsEnrolled] = useState(false);
+  const [selectedTrackIds, setSelectedTrackIds] = useState<string[]>([]);
+  const [selectedPaymentType, setSelectedPaymentType] = useState<PaymentType>("monthly");
+  const [selectedChildIds, setSelectedChildIds] = useState<string[]>([]);
+  const [submitBusy, setSubmitBusy] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitted, setSubmitted] = useState(false);
+  const [submittedCount, setSubmittedCount] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const nextTab = searchParams.get("tab");
-    if (nextTab === "enrolled" || nextTab === "browse") {
-      setTab(nextTab);
+    let cancelled = false;
+
+    async function load() {
+      setLoading(true);
+      setError(null);
+      const supabase = createSupabaseBrowserClient();
+      const session = await loadCachedSession();
+      const userId = session?.user.id ?? null;
+      if (cancelled) {
+        return;
+      }
+      setIsSignedIn(Boolean(session));
+      setCurrentUserId(userId);
+
+      const { data: mosqueData, error: mosqueError } = await supabase.from("mosques").select("*").eq("slug", slug).maybeSingle();
+      if (cancelled) {
+        return;
+      }
+      if (mosqueError || !mosqueData) {
+        setError(mosqueError?.message ?? "Masjid not found.");
+        setLoading(false);
+        return;
+      }
+
+      const { data: programData, error: programError } = await supabase
+        .from("programs")
+        .select("*")
+        .eq("id", programId)
+        .eq("mosque_id", mosqueData.id)
+        .maybeSingle();
+      if (cancelled) {
+        return;
+      }
+      if (programError || !programData) {
+        setError(programError?.message ?? "This class could not be loaded.");
+        setLoading(false);
+        return;
+      }
+      if (!["published", "hidden"].includes(programData.publication_status ?? "published")) {
+        setError("This program is not published yet.");
+        setLoading(false);
+        return;
+      }
+
+      const { data: tracksData } = await supabase
+        .from("program_tracks")
+        .select("*")
+        .eq("program_id", programData.id)
+        .eq("is_active", true)
+        .order("sort_order", { ascending: true });
+      const activeTracks = tracksData ?? [];
+      setTracks(activeTracks);
+      setSelectedTrackIds(activeTracks[0]?.id ? [activeTracks[0].id] : []);
+      setSelectedPaymentType(defaultPaymentType(programData));
+      setMosque(mosqueData);
+      setProgram(programData);
+
+      if (!userId) {
+        setLoading(false);
+        return;
+      }
+
+      const [profileResult, enrollmentResult, requestResult, access] = await Promise.all([
+        supabase
+          .from("profiles")
+          .select("id, full_name, email, phone_number, avatar_url, age, gender, date_of_birth, account_type")
+          .eq("id", userId)
+          .maybeSingle(),
+        supabase.from("enrollments").select("*").eq("program_id", programData.id).eq("student_profile_id", userId).maybeSingle(),
+        supabase
+          .from("enrollment_requests")
+          .select("*")
+          .eq("program_id", programData.id)
+          .eq("student_profile_id", userId)
+          .is("student_dismissed_at", null)
+          .order("requested_at", { ascending: false })
+          .limit(1)
+          .maybeSingle(),
+        loadCachedUserAccess(slug, userId),
+      ]);
+      if (cancelled) {
+        return;
+      }
+      const nextAccountType = profileResult.data?.account_type ?? access.accountType ?? null;
+      setAccountType(nextAccountType);
+      setSelfProfile((profileResult.data as StudentDisplay | null) ?? null);
+      setIsEnrolled(Boolean(enrollmentResult.data));
+      setRequestStatus(requestResult.data?.status ?? null);
+
+      if (nextAccountType === "parent") {
+        const { children } = await fetchParentChildren(supabase, slug, userId, mosqueData.id);
+        if (cancelled) {
+          return;
+        }
+        setParentChildren(children);
+        const childIds = children.map((child) => child.id);
+        if (childIds.length) {
+          const [childEnrollments, childRequests] = await Promise.all([
+            supabase.from("enrollments").select("student_profile_id").eq("program_id", programData.id).in("student_profile_id", childIds),
+            supabase
+              .from("enrollment_requests")
+              .select("student_profile_id, status")
+              .eq("program_id", programData.id)
+              .eq("parent_profile_id", userId)
+              .in("student_profile_id", childIds)
+              .is("student_dismissed_at", null)
+              .order("requested_at", { ascending: false }),
+          ]);
+          if (cancelled) {
+            return;
+          }
+          const enrolledChildIds = new Set((childEnrollments.data ?? []).map((row) => row.student_profile_id));
+          const statuses: Record<string, { enrolled: boolean; requestStatus: string | null }> = {};
+          for (const child of children) {
+            statuses[child.id] = {
+              enrolled: enrolledChildIds.has(child.id),
+              requestStatus: childRequests.data?.find((row) => row.student_profile_id === child.id)?.status ?? null,
+            };
+          }
+          setChildStatuses(statuses);
+        }
+      }
+
+      setLoading(false);
     }
+
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [programId, slug]);
+
+  if (loading) {
+    return <ProgramDetailLoadingState />;
+  }
+
+  if (error) {
+    return <EmptyState title="Could not load application" text={error} />;
+  }
+
+  if (!mosque || !program) {
+    return <EmptyState title="Program not found" text="This class may no longer be available." />;
+  }
+
+  const programHref = `/m/${slug}/programs/${programId}`;
+
+  if (!isSignedIn) {
+    const returnTo = `${programHref}/apply`;
+    router.replace(`/m/${slug}/login?returnTo=${encodeURIComponent(returnTo)}`);
+    return <ProgramDetailLoadingState />;
+  }
+
+  const applicationState = getApplicationButtonState(toProgramStatusFields(program));
+  const canApply = applicationState.type === "open" || applicationState.type === "waitlist";
+  const parentApplicantProfiles = accountType === "parent" ? [selfProfile, ...parentChildren].filter((profile): profile is StudentDisplay => Boolean(profile?.id)) : [];
+  const parentApplicantStatuses =
+    accountType === "parent" && currentUserId
+      ? {
+          ...childStatuses,
+          [currentUserId]: { enrolled: isEnrolled, requestStatus },
+        }
+      : childStatuses;
+  const selfEligibility = accountType === "student" ? isProfileEligibleForProgram(selfProfile, program) : { eligible: true, reason: null };
+
+  async function submitApplication() {
+    if (!currentUserId || !mosque || !program) {
+      return;
+    }
+    setSubmitBusy(true);
+    setSubmitError(null);
+
+    if (!canApply) {
+      setSubmitError(applicationState.label);
+      setSubmitBusy(false);
+      return;
+    }
+    const supabase = createSupabaseBrowserClient();
+    const trackValidation = validateTrackSelection(program, tracks, selectedTrackIds);
+    if (!trackValidation.valid) {
+      setSubmitError(trackValidation.message);
+      setSubmitBusy(false);
+      return;
+    }
+    const primaryTrackId = selectedTrackIds[0] ?? null;
+
+    if (accountType === "teacher") {
+      setSubmitError("Teacher accounts cannot apply to classes.");
+      setSubmitBusy(false);
+      return;
+    }
+
+    if (accountType === "parent") {
+      const requestableStudentIds = selectedChildIds.filter((studentId) => {
+        const status = parentApplicantStatuses[studentId];
+        const applicant = studentId === currentUserId ? selfProfile : parentChildren.find((item) => item.id === studentId);
+        return Boolean(applicant) && isProfileEligibleForProgram(applicant, program).eligible && !status?.enrolled && status?.requestStatus !== "pending" && status?.requestStatus !== "waitlisted";
+      });
+
+      if (requestableStudentIds.length === 0) {
+        setSubmitError("Select at least one eligible student who is not already enrolled, pending review, or waitlisted.");
+        setSubmitBusy(false);
+        return;
+      }
+
+      const { data: parentRequestRows, error: parentInsertError } = await supabase
+        .from("enrollment_requests")
+        .upsert(
+          requestableStudentIds.map((studentId) => ({
+            mosque_id: mosque.id,
+            program_id: program.id,
+            program_track_id: primaryTrackId,
+            student_profile_id: studentId,
+            parent_profile_id: studentId === currentUserId ? null : currentUserId,
+            status: "pending",
+            reviewed_by: null,
+            reviewed_at: null,
+            review_note: null,
+            decision_note: null,
+            payment_type: selectedPaymentType,
+            approved_price_monthly_cents: null,
+            approved_price_annual_cents: null,
+            payment_bypassed: false,
+            admission_completed_at: null,
+            student_dismissed_at: null,
+          })),
+          { onConflict: "program_id,student_profile_id" },
+        )
+        .select("id, student_profile_id");
+
+      if (parentInsertError) {
+        setSubmitError(parentInsertError.message);
+        setSubmitBusy(false);
+        return;
+      }
+      const trackWriteError = await replaceEnrollmentRequestTracks(
+        supabase,
+        (parentRequestRows ?? []).map((row) => row.id),
+        selectedTrackIds,
+      );
+      if (trackWriteError) {
+        setSubmitError(trackWriteError);
+        setSubmitBusy(false);
+        return;
+      }
+
+      queueEnrollmentRequestSubmittedEmails((parentRequestRows ?? []).map((row) => row.id));
+      setSubmittedCount(requestableStudentIds.length);
+      setSubmitted(true);
+      setSubmitBusy(false);
+      return;
+    }
+
+    const eligibility = isProfileEligibleForProgram(selfProfile, program);
+    if (!eligibility.eligible) {
+      setSubmitError(eligibility.reason ?? "This class is not available for this profile.");
+      setSubmitBusy(false);
+      return;
+    }
+
+    const { data: requestRows, error: insertError } = await supabase
+      .from("enrollment_requests")
+      .upsert(
+        {
+          mosque_id: mosque.id,
+          program_id: program.id,
+          program_track_id: primaryTrackId,
+          student_profile_id: currentUserId,
+          parent_profile_id: null,
+          status: "pending",
+          reviewed_by: null,
+          reviewed_at: null,
+          review_note: null,
+          decision_note: null,
+          payment_type: selectedPaymentType,
+          approved_price_monthly_cents: null,
+          approved_price_annual_cents: null,
+          payment_bypassed: false,
+          admission_completed_at: null,
+          student_dismissed_at: null,
+        },
+        { onConflict: "program_id,student_profile_id" },
+      )
+      .select("id");
+
+    if (insertError) {
+      setSubmitError(insertError.message);
+      setSubmitBusy(false);
+      return;
+    }
+    const trackWriteError = await replaceEnrollmentRequestTracks(supabase, (requestRows ?? []).map((row) => row.id), selectedTrackIds);
+    if (trackWriteError) {
+      setSubmitError(trackWriteError);
+      setSubmitBusy(false);
+      return;
+    }
+
+    queueEnrollmentRequestSubmittedEmails((requestRows ?? []).map((row) => row.id));
+    setSubmittedCount(1);
+    setSubmitted(true);
+    setSubmitBusy(false);
+  }
+
+  if (submitted) {
+    return (
+      <div className="bg-[var(--workspace)] p-4">
+        <div className="mx-auto max-w-xl space-y-4">
+          <section className="rounded-[28px] bg-white p-6 text-center shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
+            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-[#E8F7F2] text-2xl text-[#17624F]">✓</div>
+            <h1 className="mt-4 text-xl font-semibold text-[#26323A]">Application submitted</h1>
+            <p className="mt-2 text-sm leading-6 text-[#52616A]">
+              {submittedCount > 1 ? `${submittedCount} applications have` : "Your application has"} been sent to {program.title}. Administration will review your application, and you can track its status from your inbox.
+            </p>
+            <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:justify-center">
+              <Link href={programHref} className="flex min-h-11 items-center justify-center rounded-full border border-[#D6DCE0] px-5 text-sm font-semibold text-[#26323A]">
+                Back to Program
+              </Link>
+              <Link href={`/m/${slug}/portal`} className="flex min-h-11 items-center justify-center rounded-full bg-[#17624F] px-5 text-sm font-semibold text-white">
+                Go to Portal
+              </Link>
+            </div>
+          </section>
+        </div>
+      </div>
+    );
+  }
+
+  const blockedMessage = isEnrolled
+    ? "You're already enrolled in this class."
+    : requestStatus === "pending"
+      ? "Your application is pending review."
+      : requestStatus === "waitlisted"
+        ? "You're on the waitlist for this class."
+        : accountType === "student" && !selfEligibility.eligible
+          ? (selfEligibility.reason ?? "This class is not available for this profile.")
+          : !canApply
+            ? applicationState.label
+            : null;
+
+  return (
+    <div className="bg-[var(--workspace)] p-4">
+      <div className="mx-auto max-w-xl space-y-5">
+        <section className="rounded-[24px] bg-white p-4 shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
+          <Link href={programHref} className="text-xs font-semibold uppercase tracking-wide text-[#17624F]">
+            ← Back to program
+          </Link>
+          <div className="mt-3 flex items-center gap-3">
+            {program.thumbnail_url ? (
+              <img src={program.thumbnail_url} alt="" className="h-14 w-14 shrink-0 rounded-[14px] object-cover" />
+            ) : (
+              <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-[14px] bg-[#EEF6F7] text-[#17624F]">📘</div>
+            )}
+            <div className="min-w-0">
+              <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">{mosqueSlugLabel(mosque)}</p>
+              <h1 className="truncate text-lg font-semibold text-[#26323A]">{program.title}</h1>
+            </div>
+          </div>
+        </section>
+
+        {blockedMessage ? (
+          <section className="rounded-[24px] bg-white p-5 text-sm leading-6 text-[#52616A] shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
+            {blockedMessage}
+          </section>
+        ) : accountType === "teacher" ? (
+          <section className="rounded-[24px] bg-white p-5 text-sm leading-6 text-[#52616A] shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
+            Teacher accounts cannot apply to classes.
+          </section>
+        ) : (
+          <>
+            {accountType === "parent" ? (
+              <DetailSection title="Choose student">
+                <ChildEnrollmentSelector
+                  program={program}
+                  childrenProfiles={parentApplicantProfiles}
+                  statuses={parentApplicantStatuses}
+                  selfProfileId={currentUserId}
+                  selectedChildIds={selectedChildIds}
+                  onToggle={(childId) =>
+                    setSelectedChildIds((current) => (current.includes(childId) ? current.filter((id) => id !== childId) : [...current, childId]))
+                  }
+                  onSubmit={submitApplication}
+                  busy={submitBusy}
+                />
+              </DetailSection>
+            ) : null}
+
+            {tracks.length > 0 ? (
+              <DetailSection title="Choose schedule">
+                <ProgramTrackSelector
+                  tracks={tracks}
+                  selectedTrackIds={selectedTrackIds}
+                  program={program}
+                  onToggle={(trackId) => setSelectedTrackIds((current) => nextProgramTrackSelection(program, tracks, current, trackId))}
+                />
+              </DetailSection>
+            ) : null}
+
+            {program.is_paid ? (
+              <DetailSection title="Choose payment plan">
+                <ProgramPaymentOptionSelector program={program} selectedPaymentType={selectedPaymentType} onChange={setSelectedPaymentType} />
+              </DetailSection>
+            ) : null}
+
+            {accountType !== "parent" ? (
+              <DetailSection title="Review & Submit">
+                <p className="text-sm leading-6 text-[#52616A]">
+                  Administration will review your application after you submit it. You&apos;ll be notified once a decision is made.
+                </p>
+                {submitError ? <p className="mt-3 text-sm font-semibold text-[#C0392B]">{submitError}</p> : null}
+                <button
+                  type="button"
+                  onClick={submitApplication}
+                  disabled={submitBusy}
+                  className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#248B72] px-4 text-sm font-semibold !text-white shadow-[0_10px_22px_rgba(36,139,114,0.24)] transition-colors hover:bg-[#17624F] disabled:opacity-60"
+                >
+                  {submitBusy ? "Submitting..." : "Submit Application"}
+                </button>
+              </DetailSection>
+            ) : submitError ? (
+              <p className="text-sm font-semibold text-[#C0392B]">{submitError}</p>
+            ) : null}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+type ConfirmationState = "payment_required_monthly" | "payment_required_annual" | "no_payment_required" | "completed" | "blocked";
+
+function getConfirmationState(request: EnrollmentRequest, program: Program): ConfirmationState {
+  if (request.admission_completed_at) {
+    return "completed";
+  }
+  if (request.status !== "approved") {
+    return "blocked";
+  }
+  if (!program.is_paid || request.payment_bypassed) {
+    return "no_payment_required";
+  }
+  return request.payment_type === "annual" ? "payment_required_annual" : "payment_required_monthly";
+}
+
+export function RegistrationConfirmationData({ slug, requestId }: { slug: string; requestId: string }) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const [mosque, setMosque] = useState<Mosque | null>(null);
+  const [program, setProgram] = useState<Program | null>(null);
+  const [request, setRequest] = useState<EnrollmentRequest | null>(null);
+  const [track, setTrack] = useState<ProgramTrack | null>(null);
+  const [student, setStudent] = useState<Pick<Profile, "id" | "full_name" | "email"> | null>(null);
+  const [parent, setParent] = useState<Pick<Profile, "id" | "full_name" | "email"> | null>(null);
+  const [agreed, setAgreed] = useState(false);
+  const [checkoutBusy, setCheckoutBusy] = useState(false);
+  const [confirmBusy, setConfirmBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [confirmedResult, setConfirmedResult] = useState<"success" | "cancelled" | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  async function loadRegistration() {
+    setLoading(true);
+    setError(null);
+    const supabase = createSupabaseBrowserClient();
+    const session = await loadCachedSession();
+    const userId = session?.user.id ?? null;
+    if (!userId) {
+      const returnTo = `/m/${slug}/registration/${requestId}`;
+      router.replace(`/m/${slug}/login?returnTo=${encodeURIComponent(returnTo)}`);
+      return;
+    }
+
+    const { data: mosqueRow, error: mosqueError } = await supabase.from("mosques").select("*").eq("slug", slug).maybeSingle();
+    if (mosqueError || !mosqueRow) {
+      setError(mosqueError?.message ?? "Masjid not found.");
+      setLoading(false);
+      return;
+    }
+
+    const { data: requestRow, error: requestError } = await supabase
+      .from("enrollment_requests")
+      .select("*")
+      .eq("id", requestId)
+      .eq("mosque_id", mosqueRow.id)
+      .maybeSingle();
+    if (requestError || !requestRow) {
+      setError("This registration could not be found.");
+      setLoading(false);
+      return;
+    }
+
+    const ownsRequest = requestRow.student_profile_id === userId || requestRow.parent_profile_id === userId;
+    const { data: canManage } = await supabase.rpc("can_manage_program", { check_program_id: requestRow.program_id, check_profile_id: userId });
+    if (!ownsRequest && !canManage) {
+      setError("You do not have access to this registration.");
+      setLoading(false);
+      return;
+    }
+
+    const [{ data: programRow }, { data: trackRow }, { data: studentRow }, { data: parentRow }] = await Promise.all([
+      supabase.from("programs").select("*").eq("id", requestRow.program_id).maybeSingle(),
+      requestRow.program_track_id
+        ? supabase.from("program_tracks").select("*").eq("id", requestRow.program_track_id).maybeSingle()
+        : Promise.resolve({ data: null }),
+      supabase.from("profiles").select("id, full_name, email").eq("id", requestRow.student_profile_id).maybeSingle(),
+      requestRow.parent_profile_id
+        ? supabase.from("profiles").select("id, full_name, email").eq("id", requestRow.parent_profile_id).maybeSingle()
+        : Promise.resolve({ data: null }),
+    ]);
+
+    if (!programRow) {
+      setError("This class is no longer available.");
+      setLoading(false);
+      return;
+    }
+
+    setMosque(mosqueRow);
+    setProgram(programRow);
+    setRequest(requestRow);
+    setTrack((trackRow as ProgramTrack | null) ?? null);
+    setStudent(studentRow ?? null);
+    setParent(parentRow ?? null);
+    setLoading(false);
+  }
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      void loadRegistration();
+    }, 0);
+    return () => window.clearTimeout(timeout);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requestId, slug]);
+
+  async function confirmPaidSession(sessionId: string) {
+    setConfirmBusy(true);
+    const token = await getCurrentAccessToken();
+    if (!token) {
+      setConfirmBusy(false);
+      return;
+    }
+    await fetch("/api/stripe/confirm", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ checkoutSessionId: sessionId }),
+    });
+    setConfirmBusy(false);
+    void loadRegistration();
+  }
+
+  useEffect(() => {
+    const result = searchParams.get("result");
+    const sessionId = searchParams.get("session_id");
+    if (result !== "success" && result !== "cancelled") {
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      setConfirmedResult(result);
+      router.replace(`/m/${slug}/registration/${requestId}`, { scroll: false });
+      if (result === "success" && sessionId) {
+        void confirmPaidSession(sessionId);
+      }
+    }, 0);
+    return () => window.clearTimeout(timeout);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
 
-  function changeClassesTab(nextTab: "enrolled" | "browse") {
+  async function handleStartCheckout() {
+    setCheckoutBusy(true);
+    setActionError(null);
+    const token = await getCurrentAccessToken();
+    if (!token) {
+      setCheckoutBusy(false);
+      setActionError("Please sign in again.");
+      return;
+    }
+    const response = await fetch("/api/stripe/checkout", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ enrollmentRequestId: requestId }),
+    });
+    const result = (await response.json().catch(() => ({}))) as { url?: string; error?: string };
+    if (!response.ok || !result.url) {
+      setCheckoutBusy(false);
+      setActionError(result.error ?? "Could not start checkout.");
+      return;
+    }
+    window.location.href = result.url;
+  }
+
+  async function handleConfirmFree() {
+    if (!program) {
+      return;
+    }
+    setConfirmBusy(true);
+    setActionError(null);
+    const result = await callApplicationAction(program.id, requestId, "confirm", {});
+    setConfirmBusy(false);
+    if (!result.ok) {
+      setActionError(result.error);
+      return;
+    }
+    void loadRegistration();
+  }
+
+  if (loading) {
+    return <ProgramDetailLoadingState />;
+  }
+
+  if (error) {
+    return <EmptyState title="Registration unavailable" text={error} />;
+  }
+
+  if (!mosque || !program || !request) {
+    return <EmptyState title="Registration not found" text="This registration could not be loaded." />;
+  }
+
+  const state = getConfirmationState(request, program);
+  const schedule = track ? scheduleSummary(track.schedule, null) : scheduleSummary(program.schedule, program.schedule_notes);
+  const location = track?.location || program.location || "Location will be announced";
+  const durationLabel = program.is_ongoing
+    ? "Ongoing — continues until ended"
+    : program.start_date && program.end_date
+      ? `${formatFinanceShortDate(program.start_date)} – ${formatFinanceShortDate(program.end_date)}`
+      : "Dates to be announced";
+  const listedPrice = request.payment_bypassed
+    ? "Waived"
+    : formatPrice(request.payment_type === "annual" ? request.approved_price_annual_cents ?? track?.price_annual_cents ?? program.price_annual_cents : request.approved_price_monthly_cents ?? track?.price_monthly_cents ?? program.price_monthly_cents);
+  const viewEnrollmentHref = `/m/${slug}/portal/classes`;
+  const programHref = `/m/${slug}/programs/${program.id}`;
+
+  return (
+    <div className="bg-[var(--workspace)] p-4">
+      <div className="mx-auto max-w-xl space-y-5">
+        <section className="rounded-[24px] bg-white p-5 shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
+          <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">{mosqueSlugLabel(mosque)}</p>
+          <h1 className="mt-1 text-xl font-semibold text-[#26323A]">
+            {state === "completed" ? "Registration Complete" : "Complete Registration"}
+          </h1>
+          <p className="mt-2 text-sm leading-6 text-[#52616A]">{program.title}</p>
+        </section>
+
+        {confirmedResult === "cancelled" ? (
+          <section className="rounded-[20px] border border-[#F3D28A] bg-[#FFF7E6] p-4 text-sm leading-6 text-[#8A5A00]">
+            Payment was not completed. Your existing registration status is unchanged — you can try again below.
+          </section>
+        ) : null}
+
+        {state === "blocked" ? (
+          <section className="rounded-[24px] bg-white p-6 text-center shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
+            <p className="text-sm leading-6 text-[#52616A]">
+              {request.status === "cancelled" ? "This application is no longer available for confirmation." : "This registration link is no longer active."}
+            </p>
+            <Link href={programHref} className="mt-4 inline-flex min-h-11 items-center justify-center rounded-full border border-[#D6DCE0] px-5 text-sm font-semibold text-[#26323A]">
+              Back to Program
+            </Link>
+          </section>
+        ) : (
+          <>
+            <section className="space-y-3 rounded-[24px] bg-white p-5 shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
+              <h2 className="text-sm font-semibold uppercase tracking-wide text-[#6B747B]">Registration Summary</h2>
+              <div className="grid gap-2 text-sm">
+                <div className="flex items-center justify-between">
+                  <span className="text-[#6B747B]">Student</span>
+                  <span className="font-semibold text-[#26323A]">{student?.full_name || student?.email || "Student"}</span>
+                </div>
+                {parent ? (
+                  <div className="flex items-center justify-between">
+                    <span className="text-[#6B747B]">Parent/Guardian</span>
+                    <span className="font-semibold text-[#26323A]">{parent.full_name || parent.email}</span>
+                  </div>
+                ) : null}
+                <div className="flex items-center justify-between">
+                  <span className="text-[#6B747B]">Track/Schedule</span>
+                  <span className="font-semibold text-[#26323A]">{track ? track.name : "—"}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-[#6B747B]">Schedule</span>
+                  <span className="font-semibold text-[#26323A]">{schedule.full}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-[#6B747B]">Location</span>
+                  <span className="font-semibold text-[#26323A]">{location}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-[#6B747B]">Duration</span>
+                  <span className="font-semibold text-[#26323A]">{durationLabel}</span>
+                </div>
+              </div>
+            </section>
+
+            <section className="space-y-3 rounded-[24px] bg-white p-5 shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
+              <h2 className="text-sm font-semibold uppercase tracking-wide text-[#6B747B]">Payment</h2>
+              {state === "completed" ? (
+                <p className="text-sm leading-6 text-[#52616A]">Registration completed.</p>
+              ) : state === "no_payment_required" ? (
+                <p className="text-sm leading-6 text-[#52616A]">Your registration has been approved. No payment is required.</p>
+              ) : state === "payment_required_annual" ? (
+                <p className="text-sm leading-6 text-[#52616A]">Your registration has been approved. Pay in full to complete registration — {listedPrice} once, covering the full program.</p>
+              ) : (
+                <p className="text-sm leading-6 text-[#52616A]">Your registration has been approved. Start your monthly subscription to complete registration — {listedPrice}/month.</p>
+              )}
+              {state !== "completed" ? (
+                <div className="rounded-[14px] bg-[#F7FAFB] p-3 text-sm">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[#6B747B]">Amount</span>
+                    <span className="font-semibold text-[#26323A]">{listedPrice}</span>
+                  </div>
+                </div>
+              ) : null}
+            </section>
+
+            {state !== "completed" ? (
+              <section className="rounded-[24px] bg-white p-5 shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
+                <label className="flex items-start gap-3 text-sm leading-6 text-[#52616A]">
+                  <input type="checkbox" checked={agreed} onChange={(event) => setAgreed(event.target.checked)} className="mt-1" />
+                  I confirm these registration details are correct.
+                </label>
+                {actionError ? <p className="mt-3 text-sm font-semibold text-[#C0392B]">{actionError}</p> : null}
+                <button
+                  type="button"
+                  disabled={!agreed || checkoutBusy || confirmBusy}
+                  onClick={state === "no_payment_required" ? handleConfirmFree : handleStartCheckout}
+                  className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#248B72] px-4 text-sm font-semibold !text-white shadow-[0_10px_22px_rgba(36,139,114,0.24)] transition-colors hover:bg-[#17624F] disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {checkoutBusy || confirmBusy
+                    ? "Please wait..."
+                    : state === "no_payment_required"
+                      ? "Confirm Registration"
+                      : state === "payment_required_annual"
+                        ? "Pay in Full"
+                        : "Start Subscription"}
+                </button>
+              </section>
+            ) : (
+              <section className="rounded-[24px] bg-white p-6 text-center shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
+                <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-[#E8F7F2] text-2xl text-[#17624F]">✓</div>
+                <p className="mt-4 text-sm leading-6 text-[#52616A]">{student?.full_name || "This student"} is enrolled in {program.title}.</p>
+                <Link
+                  href={viewEnrollmentHref}
+                  className="mt-4 inline-flex min-h-11 items-center justify-center rounded-full bg-[#17624F] px-5 text-sm font-semibold text-white"
+                >
+                  View Enrollment
+                </Link>
+              </section>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+type StudentClassesTab = "classes" | "applications" | "browse";
+
+function parseStudentClassesTab(value: string | null): StudentClassesTab {
+  if (value === "browse") {
+    return "browse";
+  }
+  if (value === "applications") {
+    return "applications";
+  }
+  return "classes";
+}
+
+export function StudentClassesData({ slug }: { slug: string }) {
+  const { mosque, programs, enrolledProgramIds, accountType, viewerProfiles, loading, enrollmentLoading, error } = useStudentPrograms(slug);
+  const { rows: applicationRows, loading: applicationsLoading } = useApplicantApplications(slug);
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const [tab, setTab] = useState<StudentClassesTab>(parseStudentClassesTab(searchParams.get("tab")));
+  const [detailsRow, setDetailsRow] = useState<ApplicantApplicationRow | null>(null);
+
+  useEffect(() => {
+    setTab(parseStudentClassesTab(searchParams.get("tab")));
+  }, [searchParams]);
+
+  function changeClassesTab(nextTab: StudentClassesTab) {
     setTab(nextTab);
     router.replace(`/m/${slug}/portal/classes?tab=${nextTab}`, { scroll: false });
   }
 
   const enrolledPrograms = programs.filter((program) => enrolledProgramIds.includes(program.id));
   const browsePrograms = programs;
+  const applicationStatusByProgramId = useMemo(() => {
+    const map: Record<string, ApplicantApplicationRow> = {};
+    for (const row of applicationRows) {
+      const existing = map[row.request.program_id];
+      if (!existing || Date.parse(row.request.requested_at) > Date.parse(existing.request.requested_at)) {
+        map[row.request.program_id] = row;
+      }
+    }
+    return map;
+  }, [applicationRows]);
 
   let content: ReactNode;
-  if (loading || enrollmentLoading) {
+  if (loading || enrollmentLoading || (tab === "applications" && applicationsLoading)) {
     content = <ClassesLoadingPlaceholders count={tab === "browse" ? 2 : 1} />;
   } else if (error) {
     content = <EmptyState title="Could not load classes" text={error} />;
   } else if (!mosque) {
     content = <EmptyState title="Masjid not found" text="Classes could not be loaded for this masjid." />;
-  } else if (tab === "enrolled") {
+  } else if (tab === "classes") {
     content =
       enrolledPrograms.length === 0 ? (
         <EmptyState title="You are not enrolled in any classes" text="Browse available classes to find a program." />
       ) : (
         <EnrolledClassList programs={enrolledPrograms} mosqueSlug={mosque.slug} />
       );
+  } else if (tab === "applications") {
+    content =
+      applicationRows.length === 0 ? (
+        <EmptyState title="You have not submitted any applications" text="Applications you submit will appear here with their status." />
+      ) : (
+        <MyApplicationsList slug={slug} rows={applicationRows} onViewDetails={setDetailsRow} />
+      );
   } else {
-    content = <ProgramCardGrid programs={browsePrograms} mosqueSlug={mosque.slug} emptyText="No available classes to browse right now." enrolledProgramIds={enrolledProgramIds} detailBaseHref={`/m/${mosque.slug}/portal/classes`} accountType={accountType} viewerProfiles={viewerProfiles} />;
+    content = (
+      <ProgramCardGrid
+        programs={browsePrograms}
+        mosqueSlug={mosque.slug}
+        emptyText="No available classes to browse right now."
+        enrolledProgramIds={enrolledProgramIds}
+        detailBaseHref={`/m/${mosque.slug}/portal/classes`}
+        accountType={accountType}
+        viewerProfiles={viewerProfiles}
+        applicationStatusByProgramId={applicationStatusByProgramId}
+      />
+    );
   }
 
   return (
     <section className="bg-[var(--workspace)]">
-      <div className="grid grid-cols-2 border-b border-[#D6DCE0] md:hidden">
+      <div className="grid grid-cols-3 border-b border-[#D6DCE0] md:hidden">
         <button
           type="button"
-          onClick={() => changeClassesTab("enrolled")}
-          className={cn("min-h-12 text-sm font-medium", tab === "enrolled" ? "border-b-2 border-[#2F8FB3] text-[#2F8FB3]" : "text-[#6B747B]")}
+          onClick={() => changeClassesTab("classes")}
+          className={cn("min-h-12 text-sm font-medium", tab === "classes" ? "border-b-2 border-[#2F8FB3] text-[#2F8FB3]" : "text-[#6B747B]")}
         >
-          Enrolled
+          My Classes
+        </button>
+        <button
+          type="button"
+          onClick={() => changeClassesTab("applications")}
+          className={cn("min-h-12 text-sm font-medium", tab === "applications" ? "border-b-2 border-[#2F8FB3] text-[#2F8FB3]" : "text-[#6B747B]")}
+        >
+          My Applications
         </button>
         <button
           type="button"
@@ -1588,8 +2230,30 @@ export function StudentClassesData({ slug }: { slug: string }) {
           Browse
         </button>
       </div>
+      <div className="hidden gap-2 border-b border-[#D6DCE0] px-4 py-3 md:flex">
+        {(
+          [
+            ["classes", "My Classes"],
+            ["applications", "My Applications"],
+            ["browse", "Browse Programs"],
+          ] as const
+        ).map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => changeClassesTab(id)}
+            className={cn(
+              "min-h-9 rounded-full px-4 text-sm font-semibold transition-colors",
+              tab === id ? "bg-[#17624F] text-white" : "bg-[#F0F4F5] text-[#52616A] hover:bg-[#E3E9EB]",
+            )}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
 
       {content}
+      {detailsRow ? <ApplicantDetailsDrawer row={detailsRow} onClose={() => setDetailsRow(null)} /> : null}
     </section>
   );
 }
@@ -2489,7 +3153,6 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
   const [noteThreadLoadingOlder, setNoteThreadLoadingOlder] = useState<Record<string, boolean>>({});
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [seenRequestIds, setSeenRequestIds] = useState<Set<string>>(new Set());
-  const [checkoutRequestId, setCheckoutRequestId] = useState<string | null>(null);
   const [paymentNotice, setPaymentNotice] = useState<"success" | "cancelled" | null>(null);
   const [protectedClear, setProtectedClear] = useState<{ mode: "single" | "all"; requestIds: string[]; count: number } | null>(null);
   const [rescindTarget, setRescindTarget] = useState<RequestWithContext | null>(null);
@@ -2878,36 +3541,6 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
     await dismissWithdrawalRequests(returnedWithdrawalIds);
   }
 
-  async function startCheckout(requestId: string) {
-    setCheckoutRequestId(requestId);
-    setError(null);
-    const supabase = createSupabaseBrowserClient();
-    const { data: sessionData } = await supabase.auth.getSession();
-    const accessToken = sessionData.session?.access_token;
-    if (!accessToken) {
-      setError("Please sign in again before completing registration.");
-      setCheckoutRequestId(null);
-      return;
-    }
-
-    const response = await fetch("/api/stripe/checkout", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${accessToken}`,
-      },
-      body: JSON.stringify({ enrollmentRequestId: requestId }),
-    });
-    const payload = (await response.json()) as { url?: string; error?: string };
-    if (!response.ok || !payload.url) {
-      setError(payload.error ?? "Could not start checkout.");
-      setCheckoutRequestId(null);
-      return;
-    }
-
-    window.location.href = payload.url;
-  }
-
   const pendingRequests = requests.filter((request) => request.status === "pending");
   const returnedRequests = requests.filter((request) => request.status !== "pending");
   const pendingWithdrawals = studentWithdrawals.filter((request) => request.status === "pending");
@@ -3255,8 +3888,8 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
                     <StudentRequestCard
                       key={request.id}
                       request={request}
-                      checkoutBusy={checkoutRequestId === request.id}
-                      onCompleteRegistration={request.status === "approved" && request.program?.is_paid && !request.payment_bypassed ? () => startCheckout(request.id) : undefined}
+                      completeRegistrationHref={request.status === "approved" && !request.admission_completed_at ? `/m/${slug}/registration/${request.id}` : undefined}
+                      viewClassHref={request.status === "approved" && request.admission_completed_at ? `/m/${slug}/portal/classes/${request.program_id}` : undefined}
                       onDismiss={() => updateRequest(request.id, "dismiss")}
                     />
                   ))}
@@ -3634,49 +4267,20 @@ export function TeacherInboxData({ slug }: { slug: string }) {
       return;
     }
 
-    const approvalPaymentType = options.paymentType ?? (request.payment_type === "annual" ? "annual" : "monthly");
-    const approvalPrice = approvalPaymentType === "annual" ? options.priceAnnualCents : options.priceMonthlyCents;
-    if (status === "approved" && request.program?.is_paid && !options.paymentBypassed && (approvalPrice ?? 0) < 50) {
-      setError(`Paid approvals need a ${approvalPaymentType === "annual" ? "one-time annual" : "monthly"} price of at least $0.50, or choose bypass payment.`);
-      return;
-    }
-
     setReviewBusy(true);
-    const supabase = createSupabaseBrowserClient();
-    const now = new Date().toISOString();
-    const { error: reviewError } = await supabase
-      .from("enrollment_requests")
-      .update({
-        status,
-        reviewed_by: currentUserId,
-        reviewed_at: now,
-        review_note: options.note?.trim() || null,
-        decision_note: options.note?.trim() || null,
-        payment_type: status === "approved" ? approvalPaymentType : request.payment_type,
-        approved_price_monthly_cents: status === "approved" ? (options.paymentBypassed ? 0 : approvalPaymentType === "monthly" ? options.priceMonthlyCents ?? request.program?.price_monthly_cents ?? null : null) : null,
-        approved_price_annual_cents: status === "approved" ? (options.paymentBypassed ? 0 : approvalPaymentType === "annual" ? options.priceAnnualCents ?? request.program?.price_annual_cents ?? null : null) : null,
-        payment_bypassed: status === "approved" ? Boolean(options.paymentBypassed) : false,
-        admission_completed_at: status === "approved" && (!request.program?.is_paid || options.paymentBypassed) ? now : null,
-        teacher_dismissed_at: null,
-      })
-      .eq("id", request.id);
+    const endpoint = status === "approved" ? "approve" : status === "waitlisted" ? "waitlist" : "reject";
+    const result = await callApplicationAction(request.program_id, request.id, endpoint, {
+      paymentType: options.paymentType,
+      priceMonthlyCents: options.priceMonthlyCents,
+      priceAnnualCents: options.priceAnnualCents,
+      paymentBypassed: options.paymentBypassed,
+      note: options.note,
+    });
 
-    if (reviewError) {
+    if (!result.ok) {
       setReviewBusy(false);
-      setError(reviewError.message);
+      setError(result.error);
       return;
-    }
-
-    if (status === "approved" && (!request.program?.is_paid || options.paymentBypassed)) {
-      await supabase.from("enrollments").upsert(
-        {
-          program_id: request.program_id,
-          student_profile_id: request.student_profile_id,
-          program_track_id: request.program_track_id,
-          status: "active",
-        },
-        { onConflict: "program_id,student_profile_id" },
-      );
     }
 
     queueEnrollmentRequestReviewedEmail(request.id);
@@ -4935,20 +5539,19 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
   const [offersAnnualPayment, setOffersAnnualPayment] = useState(false);
   const [annualPrice, setAnnualPrice] = useState("");
   const [eventDate, setEventDate] = useState("");
-  const [learningVisible, setLearningVisible] = useState(true);
+  const [learningVisible, setLearningVisible] = useState(false);
   const [learningTitle, setLearningTitle] = useState("What You Will Learn");
   const [learningIntro, setLearningIntro] = useState("");
   const [learningDescriptionVisible, setLearningDescriptionVisible] = useState(false);
   const [topicsIntro, setTopicsIntro] = useState("");
   const [requirementsText, setRequirementsText] = useState("");
-  const [whatToBringText, setWhatToBringText] = useState("");
   const [policiesText, setPoliciesText] = useState("");
-  const [outcomeRows, setOutcomeRows] = useState<Array<{ id: string; text: string }>>([
-    { id: crypto.randomUUID(), text: "Learning outcome #1" },
-    { id: crypto.randomUUID(), text: "Learning outcome #2" },
-    { id: crypto.randomUUID(), text: "Learning outcome #3" },
-  ]);
-  const [faqRows, setFaqRows] = useState<ProgramEditorFaqRow[]>(defaultProgramFaqRows);
+  const [outcomeRows, setOutcomeRows] = useState<Array<{ id: string; text: string }>>([]);
+  const [faqVisible, setFaqVisible] = useState(false);
+  const [faqRows, setFaqRows] = useState<ProgramEditorFaqRow[]>([]);
+  const [contentSectionsVisible, setContentSectionsVisible] = useState(false);
+  const [contentSectionRows, setContentSectionRows] = useState<ProgramEditorContentSectionRow[]>([]);
+  const [mediaVisible, setMediaVisible] = useState(false);
   const [mediaRows, setMediaRows] = useState<ProgramEditorMediaRow[]>([]);
   const [trackRows, setTrackRows] = useState<ProgramEditorTrackRow[]>([
     { id: crypto.randomUUID(), name: "Main Track", sessions: [{ day: "Monday", start: "18:00", end: "20:00" }] },
@@ -4958,12 +5561,15 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
   const [instructorDisplayName, setInstructorDisplayName] = useState("");
   const [instructorCredentials, setInstructorCredentials] = useState("");
   const [instructorContactPhone, setInstructorContactPhone] = useState("");
+  const [contactPhoneOmitted, setContactPhoneOmitted] = useState(false);
+  const [contactEmailOmitted, setContactEmailOmitted] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [toast, setToast] = useState<EditorToastState | null>(null);
+  const [missingFieldsModal, setMissingFieldsModal] = useState<{ fields: ProgramBuilderMissingField[]; allowContinue: boolean } | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const thumbnailInputRef = useRef<HTMLInputElement | null>(null);
-  const pricingDurationMonths = builderStatus.durationType === "fixed_months" ? builderStatus.durationMonths : builderStatus.billingDurationMonths;
+  const pricingDurationMonths = builderStatus.durationType === "fixed_months" ? String(monthsBetweenDates(builderStatus.startDate, builderStatus.endDate) ?? builderStatus.durationMonths) : builderStatus.billingDurationMonths;
 
   useEffect(() => {
     async function loadDefaults() {
@@ -5108,6 +5714,24 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
       setBuilderStep("schedule");
       return;
     }
+    if (effectiveBuilderStatus.publicationStatus !== "draft") {
+      const statusValidation = validateProgramStatusCombination({
+        publicationStatus: effectiveBuilderStatus.publicationStatus,
+        applicationStatus: effectiveBuilderStatus.applicationStatus,
+        lifecycleStatus: effectiveBuilderStatus.lifecycleStatus,
+        applicationOpenAt: effectiveBuilderStatus.applicationOpenAt || null,
+        applicationCloseAt: effectiveBuilderStatus.applicationCloseAt || null,
+        startDate: effectiveBuilderStatus.startDate || null,
+        endDate: effectiveBuilderStatus.endDate || null,
+        isOngoing: effectiveBuilderStatus.durationType === "ongoing",
+        billingEndBehavior: effectiveBuilderStatus.billingEndBehavior,
+      });
+      if (!statusValidation.valid) {
+        setToast({ tone: "error", message: statusValidation.errors[0].message });
+        setBuilderStep(statusValidation.errors[0].field === "endDate" ? "schedule" : "pricing");
+        return;
+      }
+    }
     if (creatorAccountType === "admin" && !selectedDirectorId) {
       setToast({ tone: "error", message: "Choose a teacher director for this class." });
       return;
@@ -5147,7 +5771,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
       return;
     }
     if (effectiveBuilderStatus.publicationStatus !== "draft" && effectiveBuilderStatus.paymentKind === "tareeqah" && !usesPerTrackPricing && savedOffersAnnualPayment && Number(annualPrice || "0") <= 0) {
-      setToast({ tone: "error", message: effectiveBuilderStatus.programType === "event" ? "Add a valid one-time price before publishing." : "Add a valid one-time annual price before publishing." });
+      setToast({ tone: "error", message: effectiveBuilderStatus.programType === "event" ? "Add a valid one-time price before publishing." : "Add a valid Pay in Full price before publishing." });
       setBuilderStep("pricing");
       return;
     }
@@ -5187,6 +5811,8 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
           programType: effectiveBuilderStatus.programType,
           publicationStatus: effectiveBuilderStatus.publicationStatus,
           applicationStatus: effectiveBuilderStatus.acceptingApplications ? effectiveBuilderStatus.applicationStatus : "not_accepting",
+          applicationOpenAt: effectiveBuilderStatus.applicationStatus === "opens_later" ? effectiveBuilderStatus.applicationOpenAt || null : null,
+          applicationCloseAt: effectiveBuilderStatus.applicationStatus === "opens_later" ? effectiveBuilderStatus.applicationCloseAt || null : null,
           lifecycleStatus: effectiveBuilderStatus.lifecycleStatus,
           applicationMode: effectiveBuilderStatus.applicationMode,
           acceptingApplications: effectiveBuilderStatus.acceptingApplications,
@@ -5196,8 +5822,8 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
           durationType: effectiveBuilderStatus.durationType,
           startNow: effectiveBuilderStatus.startNow,
           startDate: effectiveBuilderStatus.startNow ? null : effectiveBuilderStatus.startDate || null,
-          endDate: null,
-          durationMonths: effectiveBuilderStatus.durationType === "fixed_months" && effectiveBuilderStatus.durationMonths ? Number(effectiveBuilderStatus.durationMonths) : null,
+          endDate: effectiveBuilderStatus.durationType === "fixed_months" ? effectiveBuilderStatus.endDate || null : null,
+          durationMonths: effectiveBuilderStatus.durationType === "fixed_months" ? monthsBetweenDates(effectiveBuilderStatus.startDate, effectiveBuilderStatus.endDate) : null,
           schedulePattern: effectiveBuilderStatus.schedulePattern,
           registrationDeadlineAt: noRegistrationDeadline ? null : effectiveBuilderStatus.registrationDeadline || null,
           location: effectiveBuilderStatus.location.trim() || null,
@@ -5212,7 +5838,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
           financialAssistanceNote: effectiveBuilderStatus.financialAssistanceNote.trim() || null,
           receiptNote: effectiveBuilderStatus.receiptNote.trim() || null,
           contactName: effectiveBuilderStatus.contactName.trim() || null,
-          contactEmail: effectiveBuilderStatus.contactEmail.trim() || null,
+          contactEmail: contactEmailOmitted ? "" : effectiveBuilderStatus.contactEmail.trim() || null,
           contactPhone: effectiveBuilderStatus.contactPhone.trim() || null,
           coverPriceLabelEnabled: effectiveBuilderStatus.coverPriceLabelEnabled,
           coverPriceLabel: effectiveBuilderStatus.coverPriceLabel.trim() || null,
@@ -5254,6 +5880,8 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
             programType: effectiveBuilderStatus.programType,
             publicationStatus: effectiveBuilderStatus.publicationStatus,
             applicationStatus: effectiveBuilderStatus.acceptingApplications ? effectiveBuilderStatus.applicationStatus : "not_accepting",
+            applicationOpenAt: effectiveBuilderStatus.applicationStatus === "opens_later" ? effectiveBuilderStatus.applicationOpenAt || null : null,
+            applicationCloseAt: effectiveBuilderStatus.applicationStatus === "opens_later" ? effectiveBuilderStatus.applicationCloseAt || null : null,
             lifecycleStatus: effectiveBuilderStatus.lifecycleStatus,
             applicationMode: effectiveBuilderStatus.applicationMode,
             acceptingApplications: effectiveBuilderStatus.acceptingApplications,
@@ -5263,8 +5891,8 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
             durationType: effectiveBuilderStatus.durationType,
             startNow: effectiveBuilderStatus.startNow,
             startDate: effectiveBuilderStatus.startNow ? null : effectiveBuilderStatus.startDate || null,
-            endDate: null,
-            durationMonths: effectiveBuilderStatus.durationType === "fixed_months" && effectiveBuilderStatus.durationMonths ? Number(effectiveBuilderStatus.durationMonths) : null,
+            endDate: effectiveBuilderStatus.durationType === "fixed_months" ? effectiveBuilderStatus.endDate || null : null,
+            durationMonths: effectiveBuilderStatus.durationType === "fixed_months" ? monthsBetweenDates(effectiveBuilderStatus.startDate, effectiveBuilderStatus.endDate) : null,
             schedulePattern: effectiveBuilderStatus.schedulePattern,
             registrationDeadlineAt: noRegistrationDeadline ? null : effectiveBuilderStatus.registrationDeadline || null,
             location: effectiveBuilderStatus.location.trim() || null,
@@ -5279,7 +5907,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
             financialAssistanceNote: effectiveBuilderStatus.financialAssistanceNote.trim() || null,
             receiptNote: effectiveBuilderStatus.receiptNote.trim() || null,
             contactName: effectiveBuilderStatus.contactName.trim() || null,
-            contactEmail: effectiveBuilderStatus.contactEmail.trim() || null,
+            contactEmail: contactEmailOmitted ? "" : effectiveBuilderStatus.contactEmail.trim() || null,
             contactPhone: effectiveBuilderStatus.contactPhone.trim() || null,
             coverPriceLabelEnabled: effectiveBuilderStatus.coverPriceLabelEnabled,
             coverPriceLabel: effectiveBuilderStatus.coverPriceLabel.trim() || null,
@@ -5312,11 +5940,10 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
         learning_intro: learningVisible ? learningIntro.trim() || null : null,
         topics_intro: topicsIntro.trim() || null,
         requirements_text: requirementsText.trim() || null,
-        what_to_bring_text: whatToBringText.trim() || null,
         policies_text: policiesText.trim() || null,
         instructor_display_name: instructorDisplayName.trim() || null,
         instructor_credentials: instructorCredentials.trim() || null,
-        instructor_contact_phone: instructorContactPhone.trim() || null,
+        instructor_contact_phone: contactPhoneOmitted ? "" : instructorContactPhone.trim() || null,
       }, { onConflict: "program_id" });
       if (detailsError) {
         throw new Error(detailsError.message);
@@ -5339,6 +5966,20 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
         );
         if (faqsError) {
           throw new Error(faqsError.message);
+        }
+      }
+      if (contentSectionRows.length) {
+        const { error: contentSectionsError } = await supabase.from("program_content_sections").insert(
+          contentSectionRows.map((row, index) => ({
+            program_id: program.id,
+            sort_order: index + 1,
+            title: row.title.trim(),
+            description: row.description.trim() || null,
+            duration_text: row.durationText.trim() || null,
+          })),
+        );
+        if (contentSectionsError) {
+          throw new Error(contentSectionsError.message);
         }
       }
       const { data: insertedTracks, error: tracksError } = await supabase
@@ -5428,12 +6069,101 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
     );
   }
 
+  function goToPreviousStep() {
+    const index = programBuilderSteps.findIndex((step) => step.id === builderStep);
+    setBuilderStep(programBuilderSteps[Math.max(0, index - 1)]?.id ?? "basics");
+    scrollBuilderToTop();
+  }
+
+  function handleSaveDraftClick() {
+    const draftOverride = { publicationStatus: "draft", applicationStatus: "not_accepting", acceptingApplications: false } as const;
+    setBuilderStatus((current) => ({ ...current, ...draftOverride }));
+    void saveNewProgram(draftOverride);
+  }
+
+  function getMissingBuilderFields() {
+    return computeProgramBuilderMissingFields({
+      title,
+      programType: builderStatus.programType,
+      location: builderStatus.location,
+      room: builderStatus.room,
+      allAges,
+      ageStart,
+      ageEnd,
+      learningVisible,
+      learningTitle,
+      outcomeRows,
+      faqVisible,
+      faqRows,
+      contentSectionsVisible,
+      contentSectionRows,
+      contactName: builderStatus.contactName,
+      contactPhone: instructorContactPhone,
+      contactPhoneOmitted,
+      contactEmail: builderStatus.contactEmail,
+      contactEmailOmitted,
+      durationType: builderStatus.durationType,
+      endDate: builderStatus.endDate,
+      startNow: builderStatus.startNow,
+      startDate: builderStatus.startDate,
+      eventDate,
+      schedulePattern: builderStatus.schedulePattern,
+      noRegistrationDeadline,
+      registrationDeadline: builderStatus.registrationDeadline,
+      trackRows,
+      paymentKind: builderStatus.paymentKind,
+      offersMonthlyPayment,
+      price,
+      offersAnnualPayment,
+      annualPrice,
+      coverPriceLabelEnabled: builderStatus.coverPriceLabelEnabled,
+      coverPriceLabel: builderStatus.coverPriceLabel,
+    });
+  }
+
+  function advanceStepAnyway() {
+    setMissingFieldsModal(null);
+    const index = programBuilderSteps.findIndex((step) => step.id === builderStep);
+    setBuilderStep(programBuilderSteps[Math.min(programBuilderSteps.length - 1, index + 1)]?.id ?? "review");
+    scrollBuilderToTop();
+  }
+
+  function handleContinueOrPublishClick() {
+    const missing = getMissingBuilderFields();
+    if (builderStep !== "review") {
+      if (missing.length) {
+        setMissingFieldsModal({ fields: missing, allowContinue: true });
+        return;
+      }
+      const index = programBuilderSteps.findIndex((step) => step.id === builderStep);
+      setBuilderStep(programBuilderSteps[Math.min(programBuilderSteps.length - 1, index + 1)]?.id ?? "review");
+      scrollBuilderToTop();
+      return;
+    }
+    if (missing.length) {
+      setMissingFieldsModal({ fields: missing, allowContinue: false });
+      return;
+    }
+    const publishOverride = { publicationStatus: builderStatus.publicationStatus === "hidden" ? "hidden" : "published" } as const;
+    setBuilderStatus((current) => ({ ...current, ...publishOverride, applicationStatus: current.acceptingApplications ? current.applicationStatus : "not_accepting" }));
+    void saveNewProgram(publishOverride);
+  }
+
   return (
     <div className="space-y-5 bg-[var(--workspace)] p-4 pb-40">
       <EditorToast toast={toast} onClose={() => setToast(null)} />
+      {missingFieldsModal ? (
+        <MissingFieldsModal
+          missingFields={missingFieldsModal.fields}
+          allowContinue={missingFieldsModal.allowContinue}
+          onContinueAnyway={advanceStepAnyway}
+          onClose={() => setMissingFieldsModal(null)}
+        />
+      ) : null}
       <ProgramBuilderStepper activeStep={builderStep} />
+      <ProgramBuilderActionBar busy={busy} builderStep={builderStep} onBack={goToPreviousStep} onSaveDraft={handleSaveDraftClick} onContinueOrPublish={handleContinueOrPublishClick} />
 
-      <section className="rounded-[22px] border border-[#DDE7EA] bg-white p-4">
+      <section className="rounded-2xl border border-[#DDE7EA] bg-white p-4">
         <div className="flex items-start justify-between gap-3">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[#7B858C]">Program Builder</p>
@@ -5442,72 +6172,17 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
           <ProgramStatusBadge status={builderStatus.publicationStatus} />
         </div>
 
-        {builderStep === "basics" ? (
-          <div className="mt-5 grid gap-3">
-            <EditBox label="Public name" required value={title} onChange={setTitle} />
-            <label className="block">
-              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("Program type", true)}</span>
-              <select value={builderStatus.programType} onChange={(event) => setBuilderStatus((current) => ({ ...current, programType: event.target.value as ProgramBuilderStatus["programType"] }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
-                <option value="recurring">Recurring program</option>
-                <option value="event">One-time event</option>
-              </select>
-            </label>
-            <EditBox label="Short summary / tagline" value={builderStatus.summary} onChange={(value) => setBuilderStatus((current) => ({ ...current, summary: value }))} />
-            <p className="text-xs leading-5 text-[#6B747B]">Public title is what parents and students see.</p>
-          </div>
-        ) : null}
-
         {builderStep === "schedule" ? (
-          <div className="mt-5 grid gap-3 md:grid-cols-2">
-            {builderStatus.programType === "recurring" ? (
-              <label className="block">
-                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("Duration Type", true)}</span>
-                <select value={builderStatus.durationType} onChange={(event) => { const value = event.target.value as ProgramBuilderStatus["durationType"]; setBuilderStatus((current) => ({ ...current, durationType: value, billingEndBehavior: value === "ongoing" && current.billingEndBehavior === "program_end" ? "manual_cancel" : current.billingEndBehavior, billingDurationMonths: value === "fixed_months" ? current.durationMonths || current.billingDurationMonths : current.billingDurationMonths })); }} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
-                  <option value="ongoing">Ongoing until manually ended</option>
-                  <option value="fixed_months">Fixed number of months</option>
-                </select>
-              </label>
-            ) : null}
-            <label className="block">
-              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{builderStatus.programType === "event" ? "Event date" : "Start date"}</span>
-              {builderStatus.programType === "event" ? (
-                <input type="date" value={eventDate} onChange={(event) => setEventDate(event.target.value)} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]" />
-              ) : (
-                <>
-                  <input type={builderStatus.startNow ? "text" : "date"} disabled={builderStatus.startNow} value={builderStatus.startNow ? "Start Immediately" : builderStatus.startDate} onChange={(event) => setBuilderStatus((current) => ({ ...current, startDate: event.target.value }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3] disabled:bg-[#F2F6F7] disabled:text-[#52616A]" />
-                  <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs font-semibold text-[#52616A]">
-                    <input type="checkbox" checked={builderStatus.startNow} onChange={(event) => setBuilderStatus((current) => ({ ...current, startNow: event.target.checked }))} />
-                    Start now after publishing
-                  </label>
-                </>
-              )}
-            </label>
-            {builderStatus.programType === "recurring" && builderStatus.durationType === "fixed_months" ? (
-              <label className="block">
-                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Duration (number of months)</span>
-                <input value={builderStatus.durationMonths} onChange={(event) => { const value = event.target.value.replace(/\D/g, ""); setBuilderStatus((current) => ({ ...current, durationMonths: value, billingDurationMonths: current.billingEndBehavior === "fixed_months" ? value : current.billingDurationMonths })); }} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]" />
-                {estimateEndMonth(builderStatus.startDate, builderStatus.durationMonths) ? <span className="mt-1 block text-xs leading-5 text-[#6B747B]">Estimated end: {estimateEndMonth(builderStatus.startDate, builderStatus.durationMonths)}</span> : null}
-              </label>
-            ) : null}
-            {builderStatus.programType === "recurring" ? (
-              <label className="block">
-                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Schedule pattern</span>
-                <select value={builderStatus.schedulePattern} onChange={(event) => setBuilderStatus((current) => ({ ...current, schedulePattern: event.target.value as ProgramBuilderStatus["schedulePattern"] }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
-                  <option value="weekly">Weekly repeating</option>
-                  <option value="custom_dates">Custom session dates</option>
-                </select>
-              </label>
-            ) : null}
-            <label className="block">
-              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Registration deadline</span>
-              <input type={noRegistrationDeadline ? "text" : "datetime-local"} disabled={noRegistrationDeadline} value={noRegistrationDeadline ? "None" : builderStatus.registrationDeadline} onChange={(event) => setBuilderStatus((current) => ({ ...current, registrationDeadline: event.target.value }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3] disabled:bg-[#F2F6F7] disabled:text-[#52616A]" />
-              <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs font-semibold text-[#52616A]">
-                <input type="checkbox" checked={noRegistrationDeadline} onChange={(event) => { setNoRegistrationDeadline(event.target.checked); if (event.target.checked) setBuilderStatus((current) => ({ ...current, registrationDeadline: "" })); }} />
-                No registration deadline
-              </label>
-            </label>
-            {builderStatus.programType === "event" && !eventTimeVisible ? <button type="button" onClick={() => setEventTimeVisible(true)} className="block text-sm font-semibold text-[#2F8FB3]">Add start and end time</button> : null}
-          </div>
+          <ProgramTimingFields
+            builderStatus={builderStatus}
+            setBuilderStatus={setBuilderStatus}
+            eventDate={eventDate}
+            setEventDate={setEventDate}
+            eventTimeVisible={eventTimeVisible}
+            setEventTimeVisible={setEventTimeVisible}
+            noRegistrationDeadline={noRegistrationDeadline}
+            setNoRegistrationDeadline={setNoRegistrationDeadline}
+          />
         ) : null}
 
         {builderStep === "pricing" ? (
@@ -5520,21 +6195,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
                 <option value="manual">Handled outside Tareeqah</option>
               </select>
             </label>
-            <label className="block">
-              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Application mode</span>
-              <select value={builderStatus.applicationMode} onChange={(event) => setBuilderStatus((current) => ({ ...current, applicationMode: event.target.value as ProgramBuilderStatus["applicationMode"], acceptingApplications: event.target.value === "application_required" ? current.acceptingApplications : false }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
-                <option value="application_required">Application required</option>
-                <option value="open_enrollment">Open enrollment</option>
-                <option value="invite_only">Invite only</option>
-                <option value="hidden_private">Hidden/private</option>
-              </select>
-            </label>
-            {builderStatus.applicationMode === "application_required" ? (
-              <label className="flex min-h-12 items-center gap-3 rounded-[14px] border border-[#DCE7EB] bg-[#F7FBFC] px-3 text-sm font-semibold text-[#26323A] md:col-span-2">
-                <input type="checkbox" checked={builderStatus.acceptingApplications} onChange={(event) => setBuilderStatus((current) => ({ ...current, acceptingApplications: event.target.checked }))} />
-                Accepting applications now
-              </label>
-            ) : null}
+            <ProgramApplicationAvailabilityFields builderStatus={builderStatus} setBuilderStatus={setBuilderStatus} />
             {builderStatus.paymentKind === "tareeqah" && builderStatus.programType !== "event" && offersMonthlyPayment && builderStatus.billingEndBehavior === "fixed_months" ? (
               <label className="block">
                 <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Number of months in billing cycle</span>
@@ -5546,7 +6207,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
       </section>
 
       {builderStep === "basics" ? (
-        <section className="overflow-hidden rounded-[28px] bg-white shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
+        <section className="overflow-hidden rounded-2xl border border-[#E1E8EC] bg-white">
           <div className="relative">
             <ProgramHero program={{ id: "new", mosque_id: "", teacher_profile_id: null, director_profile_id: null, ...defaultProgramBuilderColumns(), title: title || "New Class", description: description || null, is_active: true, is_paid: builderStatus.paymentKind === "tareeqah", offers_monthly_payment: offersMonthlyPayment, offers_annual_payment: offersAnnualPayment, thumbnail_url: thumbnailUrl || null, price_monthly_cents: null, price_annual_cents: null, stripe_product_id: null, stripe_price_id: null, stripe_annual_price_id: null, audience_gender: audienceGender, age_range_text: allAges ? null : formatAgeRangeForSave(ageStart, ageEnd), schedule: null, schedule_timezone: null, schedule_notes: null, track_selection_mode: trackSelectionMode, track_selection_count: trackSelectionCount, tags: tagRows, created_at: "", updated_at: "" }} />
             <input ref={thumbnailInputRef} type="file" accept="image/*" className="hidden" onChange={(event) => handleThumbnailFile(event.target.files?.[0] ?? null)} />
@@ -5555,6 +6216,16 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
             </button>
           </div>
           <div className="space-y-3 p-4">
+            <EditBox label="Public name" required value={title} onChange={setTitle} />
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("Program type", true)}</span>
+              <select value={builderStatus.programType} onChange={(event) => setBuilderStatus((current) => ({ ...current, programType: event.target.value as ProgramBuilderStatus["programType"] }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
+                <option value="recurring">Recurring program</option>
+                <option value="event">One-time event</option>
+              </select>
+            </label>
+            <EditBox label="Short summary / tagline" value={builderStatus.summary} onChange={(value) => setBuilderStatus((current) => ({ ...current, summary: value }))} />
+            <p className="-mt-2 text-xs leading-5 text-[#6B747B]">Public title is what parents and students see.</p>
             <EditBox label="Description" value={description} onChange={setDescription} multiline />
             <div className="grid gap-3">
               <EditBox label="Location name" value={builderStatus.location} onChange={(value) => setBuilderStatus((current) => ({ ...current, location: value }))} />
@@ -5575,6 +6246,8 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
       ) : null}
 
       <ProgramEditorFields
+        builderStatus={builderStatus}
+        setBuilderStatus={setBuilderStatus}
         activeStep={builderStep}
         programType={builderStatus.programType}
         schedulePattern={builderStatus.schedulePattern}
@@ -5610,14 +6283,20 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
         setTopicsIntro={setTopicsIntro}
         requirementsText={requirementsText}
         setRequirementsText={setRequirementsText}
-        whatToBringText={whatToBringText}
-        setWhatToBringText={setWhatToBringText}
         policiesText={policiesText}
         setPoliciesText={setPoliciesText}
         outcomeRows={outcomeRows}
         setOutcomeRows={setOutcomeRows}
+        faqVisible={faqVisible}
+        setFaqVisible={setFaqVisible}
         faqRows={faqRows}
         setFaqRows={setFaqRows}
+        contentSectionsVisible={contentSectionsVisible}
+        setContentSectionsVisible={setContentSectionsVisible}
+        contentSectionRows={contentSectionRows}
+        setContentSectionRows={setContentSectionRows}
+        mediaVisible={mediaVisible}
+        setMediaVisible={setMediaVisible}
         mediaRows={mediaRows}
         setMediaRows={setMediaRows}
         onMediaFile={setCreateMediaFile}
@@ -5655,726 +6334,21 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
         setInstructorCredentials={setInstructorCredentials}
         instructorContactPhone={instructorContactPhone}
         setInstructorContactPhone={setInstructorContactPhone}
+        contactName={builderStatus.contactName}
+        setContactName={(value) => setBuilderStatus((current) => ({ ...current, contactName: value }))}
         contactEmail={builderStatus.contactEmail}
         setContactEmail={(value) => setBuilderStatus((current) => ({ ...current, contactEmail: value }))}
+        contactPhoneOmitted={contactPhoneOmitted}
+        setContactPhoneOmitted={setContactPhoneOmitted}
+        contactEmailOmitted={contactEmailOmitted}
+        setContactEmailOmitted={setContactEmailOmitted}
         coverPriceLabelEnabled={builderStatus.coverPriceLabelEnabled}
         setCoverPriceLabelEnabled={(value) => setBuilderStatus((current) => ({ ...current, coverPriceLabelEnabled: value }))}
         coverPriceLabel={builderStatus.coverPriceLabel}
         setCoverPriceLabel={(value) => setBuilderStatus((current) => ({ ...current, coverPriceLabel: value }))}
       />
 
-      <div className="sticky bottom-[92px] z-10 space-y-2 bg-white py-2 md:bottom-4">
-        {message ? <p className="text-sm font-medium text-[#52616A]">{message}</p> : null}
-        <div className="grid grid-cols-3 gap-2">
-          <button type="button" disabled={busy} onClick={() => { const draftOverride = { publicationStatus: "draft", applicationStatus: "not_accepting", acceptingApplications: false } as const; setBuilderStatus((current) => ({ ...current, ...draftOverride })); void saveNewProgram(draftOverride); }} className="min-h-11 rounded-[10px] bg-[#2F8FB3] px-4 text-sm font-semibold text-white shadow-[0_8px_18px_rgba(47,143,179,0.20)] disabled:opacity-60">
-            Save Draft
-          </button>
-          <button type="button" disabled={busy || builderStep === "basics"} onClick={() => { const index = programBuilderSteps.findIndex((step) => step.id === builderStep); setBuilderStep(programBuilderSteps[Math.max(0, index - 1)]?.id ?? "basics"); scrollBuilderToTop(); }} className="min-h-11 rounded-[10px] border border-[#B9C3C8] bg-white px-4 text-sm font-semibold text-[#26323A] disabled:opacity-40">
-            Back
-          </button>
-          <button type="button" disabled={busy} onClick={() => { if (builderStep !== "review") { const index = programBuilderSteps.findIndex((step) => step.id === builderStep); setBuilderStep(programBuilderSteps[Math.min(programBuilderSteps.length - 1, index + 1)]?.id ?? "review"); scrollBuilderToTop(); return; } const publishOverride = { publicationStatus: "published" } as const; setBuilderStatus((current) => ({ ...current, ...publishOverride, applicationStatus: current.acceptingApplications ? current.applicationStatus : "not_accepting" })); void saveNewProgram(publishOverride); }} className="min-h-11 rounded-[10px] bg-[#17624F] px-5 text-sm font-semibold text-white disabled:opacity-60">
-            {busy ? "Saving..." : builderStep === "review" ? "Publish" : "Continue"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-
-  return (
-    <div className="space-y-5 bg-[var(--workspace)] p-4 pb-40">
-      <EditorToast toast={toast} onClose={() => setToast(null)} />
-      <ProgramBuilderStepper activeStep={builderStep} />
-
-      <section className="rounded-[22px] border border-[#DDE7EA] bg-white p-4">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[#7B858C]">Program Builder</p>
-            <h1 className="mt-2 text-2xl font-semibold text-[#26323A]">{programBuilderSteps.find((step) => step.id === builderStep)?.label}</h1>
-          </div>
-          <ProgramStatusBadge status={builderStatus.publicationStatus} />
-        </div>
-
-        {builderStep === "basics" ? (
-          <div className="mt-5 grid gap-3">
-            <EditBox label="Public name" required value={title} onChange={setTitle} />
-            <label className="block">
-              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("Program type", true)}</span>
-              <select value={builderStatus.programType} onChange={(event) => setBuilderStatus((current) => ({ ...current, programType: event.target.value as ProgramBuilderStatus["programType"] }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
-                <option value="recurring">Recurring program</option>
-                <option value="event">One-time event</option>
-              </select>
-            </label>
-            <EditBox label="Short summary / tagline" value={builderStatus.summary} onChange={(value) => setBuilderStatus((current) => ({ ...current, summary: value }))} />
-            <p className="text-xs leading-5 text-[#6B747B]">Public title is what parents and students see.</p>
-          </div>
-        ) : null}
-
-        {builderStep === "pricing" ? (
-          <div className="mt-5 grid gap-3 md:grid-cols-2">
-            <label className="block">
-              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("How payments are handled", true)}</span>
-              <select value={builderStatus.paymentKind} onChange={(event) => { const value = event.target.value as ProgramBuilderStatus["paymentKind"]; setBuilderStatus((current) => ({ ...current, paymentKind: value })); setIsPaid(value === "tareeqah"); }} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
-                <option value="free">Free</option>
-                <option value="tareeqah">Paid through Tareeqah</option>
-                <option value="manual">Handled outside Tareeqah</option>
-              </select>
-            </label>
-            <label className="block">
-              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Application mode</span>
-              <select value={builderStatus.applicationMode} onChange={(event) => setBuilderStatus((current) => ({ ...current, applicationMode: event.target.value as ProgramBuilderStatus["applicationMode"], acceptingApplications: event.target.value === "application_required" ? current.acceptingApplications : false }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
-                <option value="application_required">Application required</option>
-                <option value="open_enrollment">Open enrollment</option>
-                <option value="invite_only">Invite only</option>
-                <option value="hidden_private">Hidden/private</option>
-              </select>
-            </label>
-            {builderStatus.applicationMode === "application_required" ? (
-              <label className="flex min-h-12 items-center gap-3 rounded-[14px] border border-[#DCE7EB] bg-[#F7FBFC] px-3 text-sm font-semibold text-[#26323A] md:col-span-2">
-                <input type="checkbox" checked={builderStatus.acceptingApplications} onChange={(event) => setBuilderStatus((current) => ({ ...current, acceptingApplications: event.target.checked }))} />
-                Accepting applications now
-              </label>
-            ) : (
-              <p className="rounded-[14px] border border-[#DCE7EB] bg-[#F7FBFC] px-3 py-3 text-sm font-semibold text-[#52616A] md:col-span-2">This join mode does not use public applications.</p>
-            )}
-            <label className="flex items-center gap-2 text-sm font-semibold text-[#26323A]">
-              <input type="checkbox" checked={builderStatus.waitlistEnabled} onChange={(event) => setBuilderStatus((current) => ({ ...current, waitlistEnabled: event.target.checked }))} />
-              Waitlist enabled
-            </label>
-            {builderStatus.paymentKind === "manual" ? (
-              <div className="md:col-span-2">
-                <EditBox label="Manual payment note" value={builderStatus.manualPaymentNote} onChange={(value) => setBuilderStatus((current) => ({ ...current, manualPaymentNote: value }))} multiline />
-                <p className="mt-1 text-xs leading-5 text-[#6B747B]">Use this only when payments are handled outside Tareeqah, such as office payment or e-transfer instructions.</p>
-              </div>
-            ) : null}
-            {builderStatus.paymentKind === "tareeqah" && builderStatus.programType !== "event" && offersMonthlyPayment ? (
-              <>
-                <label className="block">
-                  <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Billing starts</span>
-                  <select value={builderStatus.billingStartBehavior} onChange={(event) => setBuilderStatus((current) => ({ ...current, billingStartBehavior: event.target.value as ProgramBuilderStatus["billingStartBehavior"] }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
-                    <option value="on_payment">On first payment</option>
-                    <option value="program_start">On program start date</option>
-                  </select>
-                </label>
-                <label className="block">
-                  <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Billing ends</span>
-                  <select value={builderStatus.billingEndBehavior} onChange={(event) => setBuilderStatus((current) => ({ ...current, billingEndBehavior: event.target.value as ProgramBuilderStatus["billingEndBehavior"] }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
-                    <option value="fixed_months">After fixed number of months</option>
-                    {builderStatus.durationType !== "ongoing" ? <option value="program_end">On program end date</option> : null}
-                    <option value="manual_cancel">Continue until manually cancelled</option>
-                  </select>
-                </label>
-                {builderStatus.billingEndBehavior === "fixed_months" ? (
-                  <label className="block">
-                    <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Number of months in billing cycle</span>
-                    <input value={builderStatus.billingDurationMonths} onChange={(event) => setBuilderStatus((current) => ({ ...current, billingDurationMonths: event.target.value.replace(/\D/g, "") }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]" />
-                  </label>
-                ) : null}
-              </>
-            ) : null}
-          </div>
-        ) : null}
-
-        {builderStep === "schedule" ? (
-          <div className="mt-5 grid gap-3 md:grid-cols-2">
-            {builderStatus.programType === "recurring" ? (
-              <label className="block">
-                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("Duration Type", true)}</span>
-                <select value={builderStatus.durationType} onChange={(event) => { const value = event.target.value as ProgramBuilderStatus["durationType"]; setBuilderStatus((current) => ({ ...current, durationType: value, billingEndBehavior: value === "ongoing" && current.billingEndBehavior === "program_end" ? "manual_cancel" : current.billingEndBehavior, billingDurationMonths: value === "fixed_months" ? current.durationMonths || current.billingDurationMonths : current.billingDurationMonths })); }} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
-                  <option value="ongoing">Ongoing until manually ended</option>
-                  <option value="fixed_months">Fixed number of months</option>
-                </select>
-              </label>
-            ) : null}
-            <label className="block">
-              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{builderStatus.programType === "event" ? "Event date" : "Start date"}</span>
-              {builderStatus.programType === "event" ? (
-                <input type="date" value={eventDate} onChange={(event) => setEventDate(event.target.value)} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]" />
-              ) : (
-                <>
-                  <input type={builderStatus.startNow ? "text" : "date"} disabled={builderStatus.startNow} value={builderStatus.startNow ? "Start Immediately" : builderStatus.startDate} onChange={(event) => setBuilderStatus((current) => ({ ...current, startDate: event.target.value }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3] disabled:bg-[#F2F6F7] disabled:text-[#52616A]" />
-                  <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs font-semibold text-[#52616A]">
-                    <input type="checkbox" checked={builderStatus.startNow} onChange={(event) => setBuilderStatus((current) => ({ ...current, startNow: event.target.checked }))} />
-                    Start now after publishing
-                  </label>
-                </>
-              )}
-            </label>
-            {builderStatus.programType === "recurring" && builderStatus.durationType === "fixed_months" ? (
-              <label className="block">
-                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Duration (number of months)</span>
-                <input value={builderStatus.durationMonths} onChange={(event) => { const value = event.target.value.replace(/\D/g, ""); setBuilderStatus((current) => ({ ...current, durationMonths: value, billingDurationMonths: current.billingEndBehavior === "fixed_months" ? value : current.billingDurationMonths })); }} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]" />
-                {estimateEndMonth(builderStatus.startDate, builderStatus.durationMonths) ? <span className="mt-1 block text-xs leading-5 text-[#6B747B]">Estimated end: {estimateEndMonth(builderStatus.startDate, builderStatus.durationMonths)}</span> : null}
-              </label>
-            ) : null}
-            {builderStatus.programType === "recurring" ? (
-              <label className="block">
-                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Schedule pattern</span>
-                <select value={builderStatus.schedulePattern} onChange={(event) => setBuilderStatus((current) => ({ ...current, schedulePattern: event.target.value as ProgramBuilderStatus["schedulePattern"] }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
-                  <option value="weekly">Weekly repeating</option>
-                  <option value="custom_dates">Custom session dates</option>
-                </select>
-              </label>
-            ) : null}
-            <label className="block">
-              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Registration deadline</span>
-              <input type={noRegistrationDeadline ? "text" : "datetime-local"} disabled={noRegistrationDeadline} value={noRegistrationDeadline ? "None" : builderStatus.registrationDeadline} onChange={(event) => setBuilderStatus((current) => ({ ...current, registrationDeadline: event.target.value }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3] disabled:bg-[#F2F6F7] disabled:text-[#52616A]" />
-              <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs font-semibold text-[#52616A]">
-                <input type="checkbox" checked={noRegistrationDeadline} onChange={(event) => { setNoRegistrationDeadline(event.target.checked); if (event.target.checked) setBuilderStatus((current) => ({ ...current, registrationDeadline: "" })); }} />
-                No registration deadline
-              </label>
-            </label>
-            {builderStatus.programType === "event" && !eventTimeVisible ? <button type="button" onClick={() => setEventTimeVisible(true)} className="block text-sm font-semibold text-[#2F8FB3]">Add start and end time</button> : null}
-          </div>
-        ) : null}
-      </section>
-
-      {builderStep === "basics" ? (
-        <section className="overflow-hidden rounded-[28px] bg-white shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
-          <div className="relative">
-            <ProgramHero program={{ id: "new", mosque_id: "", teacher_profile_id: null, director_profile_id: null, ...defaultProgramBuilderColumns(), title: title || "New Class", description: description || null, is_active: true, is_paid: builderStatus.paymentKind === "tareeqah", offers_monthly_payment: offersMonthlyPayment, offers_annual_payment: offersAnnualPayment, thumbnail_url: thumbnailUrl || null, price_monthly_cents: null, price_annual_cents: null, stripe_product_id: null, stripe_price_id: null, stripe_annual_price_id: null, audience_gender: audienceGender, age_range_text: allAges ? null : formatAgeRangeForSave(ageStart, ageEnd), schedule: null, schedule_timezone: null, schedule_notes: null, track_selection_mode: trackSelectionMode, track_selection_count: trackSelectionCount, tags: tagRows, created_at: "", updated_at: "" }} />
-            <input ref={thumbnailInputRef} type="file" accept="image/*" className="hidden" onChange={(event) => handleThumbnailFile(event.target.files?.[0] ?? null)} />
-            <div className="absolute right-3 top-3 flex gap-2">
-              <button type="button" onClick={() => thumbnailInputRef.current?.click()} className="flex h-10 w-10 items-center justify-center rounded-full bg-white text-[#26323A] shadow-lg" aria-label="Replace thumbnail">
-                <PhotoIcon />
-              </button>
-              {thumbnailUrl ? (
-                <button type="button" onClick={() => setThumbnailUrl("")} className="flex h-10 w-10 items-center justify-center rounded-full bg-white text-[#C83F31] shadow-lg" aria-label="Remove thumbnail">x</button>
-              ) : null}
-            </div>
-          </div>
-          <div className="space-y-3 p-4">
-            <EditBox label="Description" value={description} onChange={setDescription} multiline />
-            <div className="grid gap-3">
-              <EditBox label="Location name" value={builderStatus.location} onChange={(value) => setBuilderStatus((current) => ({ ...current, location: value }))} />
-              <EditBox label="Location address" value={builderStatus.room} onChange={(value) => setBuilderStatus((current) => ({ ...current, room: value }))} />
-            </div>
-          </div>
-        </section>
-      ) : null}
-
-      {builderStep === "basics" && creatorAccountType === "admin" ? (
-        <section className="space-y-2 bg-white px-4 py-3">
-          <label className="block text-xs font-semibold uppercase tracking-wide text-[#6B747B]" htmlFor="program-director">
-            Class Director
-          </label>
-          <select id="program-director" value={selectedDirectorId} onChange={(event) => setSelectedDirectorId(event.target.value)} className="h-12 w-full rounded-[10px] border border-[#B9C3C8] bg-white px-3 text-sm font-semibold text-[#26323A] outline-none focus:border-[#2F8FB3]">
-            <option value="">Choose director</option>
-            {directorOptions.map((teacher) => (
-              <option key={teacher.id} value={teacher.id}>
-                {teacher.full_name || teacher.email || "Unnamed teacher"}
-              </option>
-            ))}
-          </select>
-        </section>
-      ) : null}
-
-      <ProgramEditorFields
-        activeStep={builderStep}
-        programType={builderStatus.programType}
-        schedulePattern={builderStatus.schedulePattern}
-        previewProgram={buildProgramPreview({
-          id: "new",
-          title: title || "New Class",
-          description,
-          thumbnailUrl,
-          audienceGender,
-          ageRangeText: allAges ? null : formatAgeRangeForSave(ageStart, ageEnd),
-          isPaid: builderStatus.paymentKind === "tareeqah",
-          offersMonthlyPayment: builderStatus.programType === "event" ? false : offersMonthlyPayment,
-          offersAnnualPayment: builderStatus.programType === "event" ? true : offersAnnualPayment,
-          priceMonthlyCents: builderStatus.paymentKind === "tareeqah" && builderStatus.programType !== "event" ? Math.max(0, Math.round(Number(price || "0") * 100)) : null,
-          priceAnnualCents: builderStatus.paymentKind === "tareeqah" ? Math.max(0, Math.round(Number(annualPrice || "0") * 100)) : null,
-          schedule: trackRows[0]?.sessions as unknown as Json,
-          trackSelectionMode,
-          trackSelectionCount,
-        })}
-        eventDate={eventDate}
-        setEventDate={setEventDate}
-        eventTimeVisible={eventTimeVisible}
-        setEventTimeVisible={setEventTimeVisible}
-        learningVisible={learningVisible}
-        setLearningVisible={setLearningVisible}
-        learningTitle={learningTitle}
-        setLearningTitle={setLearningTitle}
-        learningIntro={learningIntro}
-        setLearningIntro={setLearningIntro}
-        learningDescriptionVisible={learningDescriptionVisible}
-        setLearningDescriptionVisible={setLearningDescriptionVisible}
-        topicsIntro={topicsIntro}
-        setTopicsIntro={setTopicsIntro}
-        requirementsText={requirementsText}
-        setRequirementsText={setRequirementsText}
-        whatToBringText={whatToBringText}
-        setWhatToBringText={setWhatToBringText}
-        policiesText={policiesText}
-        setPoliciesText={setPoliciesText}
-        outcomeRows={outcomeRows}
-        setOutcomeRows={setOutcomeRows}
-        faqRows={faqRows}
-        setFaqRows={setFaqRows}
-        mediaRows={mediaRows}
-        setMediaRows={setMediaRows}
-        onMediaFile={setCreateMediaFile}
-        addMedia={addMedia}
-        trackRows={trackRows}
-        setTrackRows={setTrackRows}
-        addTrack={addTrack}
-        trackSelectionMode={trackSelectionMode}
-        setTrackSelectionMode={setTrackSelectionMode}
-        trackSelectionCount={trackSelectionCount}
-        setTrackSelectionCount={setTrackSelectionCount}
-        allAges={allAges}
-        setAllAges={setAllAges}
-        ageStart={ageStart}
-        setAgeStart={setAgeStart}
-        ageEnd={ageEnd}
-        setAgeEnd={setAgeEnd}
-        audienceGender={audienceGender}
-        setAudienceGender={setAudienceGender}
-        paymentKind={builderStatus.paymentKind}
-        durationMonthsForPricing={pricingDurationMonths}
-        isPaid={builderStatus.paymentKind === "tareeqah"}
-        setIsPaid={setIsPaid}
-        offersMonthlyPayment={offersMonthlyPayment}
-        setOffersMonthlyPayment={setOffersMonthlyPayment}
-        offersAnnualPayment={offersAnnualPayment}
-        setOffersAnnualPayment={setOffersAnnualPayment}
-        price={price}
-        setPrice={setPrice}
-        annualPrice={annualPrice}
-        setAnnualPrice={setAnnualPrice}
-        instructorDisplayName={instructorDisplayName}
-        setInstructorDisplayName={setInstructorDisplayName}
-        instructorCredentials={instructorCredentials}
-        setInstructorCredentials={setInstructorCredentials}
-        instructorContactPhone={instructorContactPhone}
-        setInstructorContactPhone={setInstructorContactPhone}
-        contactEmail={builderStatus.contactEmail}
-        setContactEmail={(value) => setBuilderStatus((current) => ({ ...current, contactEmail: value }))}
-        coverPriceLabelEnabled={builderStatus.coverPriceLabelEnabled}
-        setCoverPriceLabelEnabled={(value) => setBuilderStatus((current) => ({ ...current, coverPriceLabelEnabled: value }))}
-        coverPriceLabel={builderStatus.coverPriceLabel}
-        setCoverPriceLabel={(value) => setBuilderStatus((current) => ({ ...current, coverPriceLabel: value }))}
-      />
-
-      <div className="sticky bottom-[92px] z-10 space-y-2 bg-white py-2 md:bottom-4">
-        {message ? <p className="text-sm font-medium text-[#52616A]">{message}</p> : null}
-        <div className="grid grid-cols-3 gap-2">
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => {
-              const draftOverride = { publicationStatus: "draft", applicationStatus: "not_accepting", acceptingApplications: false } as const;
-              setBuilderStatus((current) => ({ ...current, ...draftOverride }));
-              void saveNewProgram(draftOverride);
-            }}
-            className="min-h-11 rounded-[10px] bg-[#2F8FB3] px-4 text-sm font-semibold text-white shadow-[0_8px_18px_rgba(47,143,179,0.20)] disabled:opacity-60"
-          >
-            Save Draft
-          </button>
-          <button
-            type="button"
-            disabled={busy || builderStep === "basics"}
-            onClick={() => {
-              const index = programBuilderSteps.findIndex((step) => step.id === builderStep);
-              setBuilderStep(programBuilderSteps[Math.max(0, index - 1)]?.id ?? "basics");
-              scrollBuilderToTop();
-            }}
-            className="min-h-11 rounded-[10px] border border-[#B9C3C8] bg-white px-4 text-sm font-semibold text-[#26323A] disabled:opacity-40"
-          >
-            Back
-          </button>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => {
-              if (builderStep !== "review") {
-                const index = programBuilderSteps.findIndex((step) => step.id === builderStep);
-                setBuilderStep(programBuilderSteps[Math.min(programBuilderSteps.length - 1, index + 1)]?.id ?? "review");
-                scrollBuilderToTop();
-                return;
-              }
-              const publishOverride = { publicationStatus: "published" } as const;
-              setBuilderStatus((current) => ({ ...current, ...publishOverride, applicationStatus: current.acceptingApplications ? current.applicationStatus : "not_accepting" }));
-              void saveNewProgram(publishOverride);
-            }}
-            className="min-h-11 rounded-[10px] bg-[#17624F] px-5 text-sm font-semibold text-white disabled:opacity-60"
-          >
-            {busy ? "Saving..." : builderStep === "review" ? "Publish" : "Continue"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-
-  return (
-    <div className="space-y-5 bg-[var(--workspace)] p-4 pb-40">
-      <EditorToast toast={toast} onClose={() => setToast(null)} />
-      <ProgramBuilderStepper activeStep={builderStep} />
-      <section className="rounded-[22px] border border-[#DDE7EA] bg-white p-4">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[#7B858C]">Program Builder</p>
-            <h1 className="mt-2 text-2xl font-semibold text-[#26323A]">{programBuilderSteps.find((step) => step.id === builderStep)?.label}</h1>
-          </div>
-          <ProgramStatusBadge status={builderStatus.publicationStatus} />
-        </div>
-        {builderStep === "basics" ? (
-          <div className="mt-5 grid gap-3 md:grid-cols-2">
-            <EditBox label="Public name" required value={title} onChange={setTitle} />
-            <label className="block">
-              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("Program type", true)}</span>
-              <select value={builderStatus.programType} onChange={(event) => setBuilderStatus((current) => ({ ...current, programType: event.target.value as ProgramBuilderStatus["programType"] }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
-                <option value="recurring">Recurring program</option>
-                <option value="event">One-time event</option>
-              </select>
-            </label>
-            <div className="md:col-span-2">
-              <EditBox label="Short summary / tagline" value={builderStatus.summary} onChange={(value) => setBuilderStatus((current) => ({ ...current, summary: value }))} />
-              <p className="mt-2 text-xs leading-5 text-[#6B747B]">Public title is what parents and students see.</p>
-            </div>
-            <div className="md:col-span-2">
-              <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Tags</p>
-              <div className="flex gap-2">
-                <input
-                  value={tagDraft}
-                  onChange={(event) => setTagDraft(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      addTag();
-                    }
-                  }}
-                  className="h-10 min-w-0 flex-1 rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]"
-                  placeholder="Fiqh, Aqidah, Hifz, Seerah"
-                />
-                <button type="button" onClick={addTag} className="h-10 rounded-[8px] bg-[#E9F4F8] px-4 text-sm font-semibold text-[#2F6077]">Add</button>
-              </div>
-              {tagRows.length ? (
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {tagRows.map((tag) => (
-                    <button key={tag} type="button" onClick={() => setTagRows((current) => current.filter((item) => item !== tag))} className="rounded-full bg-[#EFF5F2] px-3 py-1 text-xs font-semibold text-[#17624F]">
-                      {tag} x
-                    </button>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-          </div>
-        ) : null}
-        {builderStep === "pricing" ? (
-          <div className="mt-5 grid gap-3 md:grid-cols-2">
-            <label className="block">
-              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("How payments are handled", true)}</span>
-              <select value={builderStatus.paymentKind} onChange={(event) => { const value = event.target.value as ProgramBuilderStatus["paymentKind"]; setBuilderStatus((current) => ({ ...current, paymentKind: value })); setIsPaid(value === "tareeqah"); }} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
-                <option value="free">Free</option>
-                <option value="tareeqah">Paid through Tareeqah</option>
-                <option value="manual">Handled outside Tareeqah</option>
-              </select>
-            </label>
-            <label className="block">
-              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Application mode</span>
-              <select value={builderStatus.applicationMode} onChange={(event) => setBuilderStatus((current) => ({ ...current, applicationMode: event.target.value as ProgramBuilderStatus["applicationMode"], acceptingApplications: event.target.value === "application_required" ? current.acceptingApplications : false }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
-                <option value="application_required">Application required</option>
-                <option value="open_enrollment">Open enrollment</option>
-                <option value="invite_only">Invite only</option>
-                <option value="hidden_private">Hidden/private</option>
-              </select>
-            </label>
-            {builderStatus.applicationMode === "application_required" ? <label className="flex min-h-12 items-center gap-3 rounded-[14px] border border-[#DCE7EB] bg-[#F7FBFC] px-3 text-sm font-semibold text-[#26323A] md:col-span-2">
-              <input type="checkbox" checked={builderStatus.acceptingApplications} onChange={(event) => setBuilderStatus((current) => ({ ...current, acceptingApplications: event.target.checked }))} />
-              Accepting applications now
-            </label> : (
-              <p className="rounded-[14px] border border-[#DCE7EB] bg-[#F7FBFC] px-3 py-3 text-sm font-semibold text-[#52616A] md:col-span-2">This join mode does not use public applications.</p>
-            )}
-            {builderStatus.applicationMode === "invite_only" ? (
-              <p className="rounded-[12px] bg-[#F2F7F8] px-3 py-2 text-xs font-semibold leading-5 text-[#52616A]">
-                Invite-only classes will use a class invite code after creation.
-              </p>
-            ) : null}
-            <label className="flex items-center gap-2 text-sm font-semibold text-[#26323A]">
-              <input type="checkbox" checked={builderStatus.waitlistEnabled} onChange={(event) => setBuilderStatus((current) => ({ ...current, waitlistEnabled: event.target.checked }))} />
-              Waitlist enabled
-            </label>
-            {builderStatus.paymentKind === "manual" ? <div className="md:col-span-2">
-              <EditBox label="Manual payment note" value={builderStatus.manualPaymentNote} onChange={(value) => setBuilderStatus((current) => ({ ...current, manualPaymentNote: value }))} multiline />
-              <p className="mt-1 text-xs leading-5 text-[#6B747B]">Use this only when payments are handled outside Tareeqah, such as office payment or e-transfer instructions.</p>
-            </div> : null}
-            {builderStatus.paymentKind === "tareeqah" && builderStatus.programType !== "event" && offersMonthlyPayment ? (
-              <>
-                <label className="block">
-                  <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Billing starts</span>
-                  <select value={builderStatus.billingStartBehavior} onChange={(event) => setBuilderStatus((current) => ({ ...current, billingStartBehavior: event.target.value as ProgramBuilderStatus["billingStartBehavior"] }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
-                    <option value="on_payment">On first payment</option>
-                    <option value="program_start">On program start date</option>
-                  </select>
-                </label>
-                <label className="block">
-                  <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Billing ends</span>
-                  <select value={builderStatus.billingEndBehavior} onChange={(event) => setBuilderStatus((current) => ({ ...current, billingEndBehavior: event.target.value as ProgramBuilderStatus["billingEndBehavior"] }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
-                    <option value="fixed_months">After fixed number of months</option>
-                    {builderStatus.durationType !== "ongoing" ? <option value="program_end">On program end date</option> : null}
-                    <option value="manual_cancel">Continue until manually cancelled</option>
-                  </select>
-                </label>
-                {builderStatus.billingEndBehavior === "fixed_months" ? (
-                  <label className="block">
-                    <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Number of months in billing cycle</span>
-                    <input value={builderStatus.billingDurationMonths} onChange={(event) => setBuilderStatus((current) => ({ ...current, billingDurationMonths: event.target.value.replace(/\D/g, "") }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]" />
-                  </label>
-                ) : null}
-              </>
-            ) : null}
-          </div>
-        ) : null}
-        {builderStep === "schedule" ? (
-          <div className="mt-5 grid gap-3 md:grid-cols-2">
-            {builderStatus.programType === "recurring" ? (
-              <label className="block">
-                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("Duration Type", true)}</span>
-                <select
-                  value={builderStatus.durationType}
-                  onChange={(event) => {
-                    const value = event.target.value as ProgramBuilderStatus["durationType"];
-                    setBuilderStatus((current) => ({
-                      ...current,
-                      durationType: value,
-                      billingEndBehavior: value === "ongoing" && current.billingEndBehavior === "program_end" ? "manual_cancel" : current.billingEndBehavior,
-                      billingDurationMonths: value === "fixed_months" ? current.durationMonths || current.billingDurationMonths : current.billingDurationMonths,
-                    }));
-                  }}
-                  className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]"
-                >
-                  <option value="ongoing">Ongoing until manually ended</option>
-                  <option value="fixed_months">Fixed number of months</option>
-                </select>
-              </label>
-            ) : null}
-            <label className="block">
-              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{builderStatus.programType === "event" ? "Event date" : "Start date"}</span>
-              {builderStatus.programType === "event" ? (
-                <input type="date" value={eventDate} onChange={(event) => setEventDate(event.target.value)} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]" />
-              ) : (
-                <>
-                  <input type={builderStatus.startNow ? "text" : "date"} disabled={builderStatus.startNow} value={builderStatus.startNow ? "Start Immediately" : builderStatus.startDate} onChange={(event) => setBuilderStatus((current) => ({ ...current, startDate: event.target.value }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3] disabled:bg-[#F2F6F7] disabled:text-[#52616A]" />
-                  <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs font-semibold text-[#52616A]">
-                    <input type="checkbox" checked={builderStatus.startNow} onChange={(event) => setBuilderStatus((current) => ({ ...current, startNow: event.target.checked }))} />
-                    Start now after publishing
-                  </label>
-                </>
-              )}
-            </label>
-            {builderStatus.programType === "recurring" && builderStatus.durationType === "fixed_months" ? (
-              <label className="block">
-                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Duration (number of months)</span>
-                <input value={builderStatus.durationMonths} onChange={(event) => { const value = event.target.value.replace(/\D/g, ""); setBuilderStatus((current) => ({ ...current, durationMonths: value, billingDurationMonths: current.billingEndBehavior === "fixed_months" ? value : current.billingDurationMonths })); }} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]" />
-                {estimateEndMonth(builderStatus.startDate, builderStatus.durationMonths) ? <span className="mt-1 block text-xs leading-5 text-[#6B747B]">Estimated end: {estimateEndMonth(builderStatus.startDate, builderStatus.durationMonths)}</span> : null}
-              </label>
-            ) : null}
-            {builderStatus.programType === "recurring" ? (
-              <label className="block">
-                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Schedule pattern</span>
-                <select value={builderStatus.schedulePattern} onChange={(event) => setBuilderStatus((current) => ({ ...current, schedulePattern: event.target.value as ProgramBuilderStatus["schedulePattern"] }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
-                  <option value="weekly">Weekly repeating</option>
-                  <option value="custom_dates">Custom session dates</option>
-                </select>
-              </label>
-            ) : null}
-            <label className="block">
-              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Registration deadline</span>
-              <input type={noRegistrationDeadline ? "text" : "datetime-local"} disabled={noRegistrationDeadline} value={noRegistrationDeadline ? "None" : builderStatus.registrationDeadline} onChange={(event) => setBuilderStatus((current) => ({ ...current, registrationDeadline: event.target.value }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3] disabled:bg-[#F2F6F7] disabled:text-[#52616A]" />
-              <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs font-semibold text-[#52616A]">
-                <input type="checkbox" checked={noRegistrationDeadline} onChange={(event) => { setNoRegistrationDeadline(event.target.checked); if (event.target.checked) setBuilderStatus((current) => ({ ...current, registrationDeadline: "" })); }} />
-                No registration deadline
-              </label>
-            </label>
-            {builderStatus.programType === "event" && !eventTimeVisible ? (
-              <button type="button" onClick={() => setEventTimeVisible(true)} className="block text-sm font-semibold text-[#2F8FB3]">
-                Add start and end time
-              </button>
-            ) : null}
-          </div>
-        ) : null}
-      </section>
-      {builderStep === "basics" ? (
-      <section className="overflow-hidden rounded-[28px] bg-white shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
-        <div className="relative">
-          <ProgramHero program={{ id: "new", mosque_id: "", teacher_profile_id: null, director_profile_id: null, ...defaultProgramBuilderColumns(), title: title || "New Class", description: description || null, is_active: true, is_paid: builderStatus.paymentKind === "tareeqah", offers_monthly_payment: offersMonthlyPayment, offers_annual_payment: offersAnnualPayment, thumbnail_url: thumbnailUrl || null, price_monthly_cents: null, price_annual_cents: null, stripe_product_id: null, stripe_price_id: null, stripe_annual_price_id: null, audience_gender: audienceGender, age_range_text: allAges ? null : formatAgeRangeForSave(ageStart, ageEnd), schedule: null, schedule_timezone: null, schedule_notes: null, track_selection_mode: trackSelectionMode, track_selection_count: trackSelectionCount, tags: tagRows, created_at: "", updated_at: "" }} />
-          <input ref={thumbnailInputRef} type="file" accept="image/*" className="hidden" onChange={(event) => handleThumbnailFile(event.target.files?.[0] ?? null)} />
-          <button type="button" onClick={() => thumbnailInputRef.current?.click()} className="absolute right-3 top-3 flex h-10 w-10 items-center justify-center rounded-full bg-white text-[#26323A] shadow-lg" aria-label="Upload thumbnail">
-            <PhotoIcon />
-          </button>
-        </div>
-        <div className="space-y-3 p-4">
-          <EditBox label="Description" value={description} onChange={setDescription} multiline />
-          <div className="grid gap-3">
-            <EditBox label="Location name" value={builderStatus.location} onChange={(value) => setBuilderStatus((current) => ({ ...current, location: value }))} />
-            <EditBox label="Location address" value={builderStatus.room} onChange={(value) => setBuilderStatus((current) => ({ ...current, room: value }))} />
-          </div>
-        </div>
-      </section>
-      ) : null}
-
-      {builderStep === "basics" && creatorAccountType === "admin" ? (
-        <section className="space-y-2 bg-white px-4 py-3">
-          <label className="block text-xs font-semibold uppercase tracking-wide text-[#6B747B]" htmlFor="program-director">
-            Class Director
-          </label>
-          <select
-            id="program-director"
-            value={selectedDirectorId}
-            onChange={(event) => setSelectedDirectorId(event.target.value)}
-            className="h-12 w-full rounded-[10px] border border-[#B9C3C8] bg-white px-3 text-sm font-semibold text-[#26323A] outline-none focus:border-[#2F8FB3]"
-          >
-            {directorOptions.length ? (
-              directorOptions.map((teacher) => (
-                <option key={teacher.id} value={teacher.id}>
-                  {teacher.full_name || teacher.email || "Unnamed teacher"}
-                </option>
-              ))
-            ) : (
-              <option value="">No active teachers found</option>
-            )}
-          </select>
-        </section>
-      ) : null}
-
-      <ProgramEditorFields
-        activeStep={builderStep}
-        programType={builderStatus.programType}
-        schedulePattern={builderStatus.schedulePattern}
-        previewProgram={buildProgramPreview({
-          id: "new",
-          title: title || "New Class",
-          description,
-          thumbnailUrl,
-          audienceGender,
-          ageRangeText: allAges ? null : formatAgeRangeForSave(ageStart, ageEnd),
-          isPaid: builderStatus.paymentKind === "tareeqah",
-          offersMonthlyPayment: builderStatus.programType === "event" ? false : offersMonthlyPayment,
-          offersAnnualPayment: builderStatus.programType === "event" ? true : offersAnnualPayment,
-          priceMonthlyCents: builderStatus.paymentKind === "tareeqah" && builderStatus.programType !== "event" ? Math.max(0, Math.round(Number(price || "0") * 100)) : null,
-          priceAnnualCents: builderStatus.paymentKind === "tareeqah" ? Math.max(0, Math.round(Number(annualPrice || "0") * 100)) : null,
-          schedule: trackRows[0]?.sessions as unknown as Json,
-          trackSelectionMode,
-          trackSelectionCount,
-        })}
-        eventDate={eventDate}
-        setEventDate={setEventDate}
-        eventTimeVisible={eventTimeVisible}
-        setEventTimeVisible={setEventTimeVisible}
-        learningVisible={learningVisible}
-        setLearningVisible={setLearningVisible}
-        learningTitle={learningTitle}
-        setLearningTitle={setLearningTitle}
-        learningIntro={learningIntro}
-        setLearningIntro={setLearningIntro}
-        learningDescriptionVisible={learningDescriptionVisible}
-        setLearningDescriptionVisible={setLearningDescriptionVisible}
-        topicsIntro={topicsIntro}
-        setTopicsIntro={setTopicsIntro}
-        requirementsText={requirementsText}
-        setRequirementsText={setRequirementsText}
-        whatToBringText={whatToBringText}
-        setWhatToBringText={setWhatToBringText}
-        policiesText={policiesText}
-        setPoliciesText={setPoliciesText}
-        outcomeRows={outcomeRows}
-        setOutcomeRows={setOutcomeRows}
-        faqRows={faqRows}
-        setFaqRows={setFaqRows}
-        mediaRows={mediaRows}
-        setMediaRows={setMediaRows}
-        onMediaFile={setCreateMediaFile}
-        addMedia={addMedia}
-        trackRows={trackRows}
-        setTrackRows={setTrackRows}
-        addTrack={addTrack}
-        trackSelectionMode={trackSelectionMode}
-        setTrackSelectionMode={setTrackSelectionMode}
-        trackSelectionCount={trackSelectionCount}
-        setTrackSelectionCount={setTrackSelectionCount}
-        allAges={allAges}
-        setAllAges={setAllAges}
-        ageStart={ageStart}
-        setAgeStart={setAgeStart}
-        ageEnd={ageEnd}
-        setAgeEnd={setAgeEnd}
-        audienceGender={audienceGender}
-        setAudienceGender={setAudienceGender}
-        paymentKind={builderStatus.paymentKind}
-        durationMonthsForPricing={pricingDurationMonths}
-        isPaid={builderStatus.paymentKind === "tareeqah"}
-        setIsPaid={setIsPaid}
-        offersMonthlyPayment={offersMonthlyPayment}
-        setOffersMonthlyPayment={setOffersMonthlyPayment}
-        offersAnnualPayment={offersAnnualPayment}
-        setOffersAnnualPayment={setOffersAnnualPayment}
-        price={price}
-        setPrice={setPrice}
-        annualPrice={annualPrice}
-        setAnnualPrice={setAnnualPrice}
-        instructorDisplayName={instructorDisplayName}
-        setInstructorDisplayName={setInstructorDisplayName}
-        instructorCredentials={instructorCredentials}
-        setInstructorCredentials={setInstructorCredentials}
-        instructorContactPhone={instructorContactPhone}
-        setInstructorContactPhone={setInstructorContactPhone}
-        contactEmail={builderStatus.contactEmail}
-        setContactEmail={(value) => setBuilderStatus((current) => ({ ...current, contactEmail: value }))}
-        coverPriceLabelEnabled={builderStatus.coverPriceLabelEnabled}
-        setCoverPriceLabelEnabled={(value) => setBuilderStatus((current) => ({ ...current, coverPriceLabelEnabled: value }))}
-        coverPriceLabel={builderStatus.coverPriceLabel}
-        setCoverPriceLabel={(value) => setBuilderStatus((current) => ({ ...current, coverPriceLabel: value }))}
-      />
-
-      <div className="sticky bottom-[92px] z-10 space-y-2 bg-white py-2 md:bottom-4">
-        {message ? <p className="text-sm font-medium text-[#52616A]">{message}</p> : null}
-        <div className="grid grid-cols-3 gap-2">
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => {
-              const draftOverride = { publicationStatus: "draft", applicationStatus: "not_accepting", acceptingApplications: false } as const;
-              setBuilderStatus((current) => ({ ...current, ...draftOverride }));
-              void saveNewProgram(draftOverride);
-            }}
-            className="min-h-11 rounded-[10px] bg-[#2F8FB3] px-4 text-sm font-semibold text-white shadow-[0_8px_18px_rgba(47,143,179,0.20)] disabled:opacity-60"
-          >
-            Save Draft
-          </button>
-          <button
-            type="button"
-            disabled={busy || builderStep === "basics"}
-            onClick={() => {
-              const index = programBuilderSteps.findIndex((step) => step.id === builderStep);
-              setBuilderStep(programBuilderSteps[Math.max(0, index - 1)]?.id ?? "basics");
-              scrollBuilderToTop();
-            }}
-            className="min-h-11 rounded-[10px] border border-[#B9C3C8] bg-white px-4 text-sm font-semibold text-[#26323A] disabled:opacity-40"
-          >
-            Back
-          </button>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => {
-              if (builderStep !== "review") {
-                const index = programBuilderSteps.findIndex((step) => step.id === builderStep);
-                setBuilderStep(programBuilderSteps[Math.min(programBuilderSteps.length - 1, index + 1)]?.id ?? "review");
-                scrollBuilderToTop();
-                return;
-              }
-              const publishOverride = { publicationStatus: "published" } as const;
-              setBuilderStatus((current) => ({ ...current, ...publishOverride, applicationStatus: current.acceptingApplications ? current.applicationStatus : "not_accepting" }));
-              void saveNewProgram(publishOverride);
-            }}
-            className="min-h-11 rounded-[10px] bg-[#17624F] px-5 text-sm font-semibold text-white disabled:opacity-60"
-          >
-            {busy ? "Saving..." : builderStep === "review" ? "Publish" : "Continue"}
-          </button>
-        </div>
-      </div>
+      <ProgramBuilderActionBar busy={busy} builderStep={builderStep} onBack={goToPreviousStep} onSaveDraft={handleSaveDraftClick} onContinueOrPublish={handleContinueOrPublishClick} sticky message={message} />
     </div>
   );
 }
@@ -6411,10 +6385,13 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
   const [learningDescriptionVisible, setLearningDescriptionVisible] = useState(false);
   const [topicsIntro, setTopicsIntro] = useState("");
   const [requirementsText, setRequirementsText] = useState("");
-  const [whatToBringText, setWhatToBringText] = useState("");
   const [policiesText, setPoliciesText] = useState("");
   const [outcomeRows, setOutcomeRows] = useState<Array<{ id: string; text: string }>>([]);
-  const [faqRows, setFaqRows] = useState<ProgramEditorFaqRow[]>(defaultProgramFaqRows);
+  const [faqVisible, setFaqVisible] = useState(false);
+  const [faqRows, setFaqRows] = useState<ProgramEditorFaqRow[]>([]);
+  const [contentSectionsVisible, setContentSectionsVisible] = useState(false);
+  const [contentSectionRows, setContentSectionRows] = useState<ProgramEditorContentSectionRow[]>([]);
+  const [mediaVisible, setMediaVisible] = useState(false);
   const [mediaRows, setMediaRows] = useState<ProgramEditorMediaRow[]>([]);
   const [trackRows, setTrackRows] = useState<ProgramEditorTrackRow[]>([]);
   const [trackSelectionMode, setTrackSelectionMode] = useState<TrackSelectionMode>("exact");
@@ -6422,13 +6399,16 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
   const [instructorDisplayName, setInstructorDisplayName] = useState("");
   const [instructorCredentials, setInstructorCredentials] = useState("");
   const [instructorContactPhone, setInstructorContactPhone] = useState("");
+  const [contactPhoneOmitted, setContactPhoneOmitted] = useState(false);
+  const [contactEmailOmitted, setContactEmailOmitted] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [toast, setToast] = useState<EditorToastState | null>(null);
+  const [missingFieldsModal, setMissingFieldsModal] = useState<{ fields: ProgramBuilderMissingField[]; allowContinue: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const thumbnailInputRef = useRef<HTMLInputElement | null>(null);
   const loadedDirectorRef = useRef<string | null>(null);
-  const pricingDurationMonths = builderStatus.durationType === "fixed_months" ? builderStatus.durationMonths : builderStatus.billingDurationMonths;
+  const pricingDurationMonths = builderStatus.durationType === "fixed_months" ? String(monthsBetweenDates(builderStatus.startDate, builderStatus.endDate) ?? builderStatus.durationMonths) : builderStatus.billingDurationMonths;
 
   useEffect(() => {
     const supabase = createSupabaseBrowserClient();
@@ -6444,11 +6424,12 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         return;
       }
 
-      const [{ data: programRow, error: programError }, { data: directorAllowed }, detailResult, outcomeResult, faqResult, mediaResult, trackResult, sessionResult] = await Promise.all([
+      const [{ data: programRow, error: programError }, { data: directorAllowed }, detailResult, outcomeResult, contentSectionResult, faqResult, mediaResult, trackResult, sessionResult] = await Promise.all([
         supabase.from("programs").select("*").eq("id", programId).eq("mosque_id", mosque.id).maybeSingle(),
         supabase.rpc("is_program_director", { check_program_id: programId }),
         supabase.from("program_details").select("*").eq("program_id", programId).maybeSingle(),
         supabase.from("program_outcomes").select("*").eq("program_id", programId).order("sort_order", { ascending: true }),
+        supabase.from("program_content_sections").select("*").eq("program_id", programId).order("sort_order", { ascending: true }),
         supabase.from("program_faqs").select("*").eq("program_id", programId).order("sort_order", { ascending: true }),
         supabase.from("program_media").select("*").eq("program_id", programId).order("sort_order", { ascending: true }),
         supabase.from("program_tracks").select("*").eq("program_id", programId).order("sort_order", { ascending: true }),
@@ -6521,7 +6502,6 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         setLearningDescriptionVisible(Boolean(nextLearningIntro.trim()));
         setTopicsIntro(detailResult.data?.topics_intro ?? "");
         setRequirementsText(detailResult.data?.requirements_text ?? "");
-        setWhatToBringText(detailResult.data?.what_to_bring_text ?? "");
         setPoliciesText(detailResult.data?.policies_text ?? "");
         const nextInstructorDisplayName = detailResult.data?.instructor_display_name ?? directorProfile?.full_name ?? "";
         const nextInstructorCredentials = detailResult.data?.instructor_credentials ?? "";
@@ -6536,8 +6516,8 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
           category: programRow.category ?? "",
           programType: programRow.program_type === "event" ? "event" : "recurring",
           publicationStatus: ["draft", "published", "hidden", "archived"].includes(programRow.publication_status) ? programRow.publication_status as ProgramBuilderStatus["publicationStatus"] : "published",
-          applicationStatus: ["accepting", "not_accepting", "waitlist_only", "closed", "invite_only"].includes(programRow.application_status) ? programRow.application_status as ProgramBuilderStatus["applicationStatus"] : "accepting",
-          lifecycleStatus: ["upcoming", "active", "completed", "cancelled", "archived"].includes(programRow.lifecycle_status) ? programRow.lifecycle_status as ProgramBuilderStatus["lifecycleStatus"] : "upcoming",
+          applicationStatus: ["accepting", "not_accepting", "opens_later", "waitlist_only", "closed", "invite_only"].includes(programRow.application_status) ? programRow.application_status as ProgramBuilderStatus["applicationStatus"] : "accepting",
+          lifecycleStatus: ["upcoming", "active", "paused", "completed", "cancelled", "archived"].includes(programRow.lifecycle_status) ? programRow.lifecycle_status as ProgramBuilderStatus["lifecycleStatus"] : "upcoming",
           applicationMode: ["application_required", "open_enrollment", "invite_only", "hidden_private"].includes(programRow.application_mode) ? programRow.application_mode as ProgramBuilderStatus["applicationMode"] : "application_required",
           acceptingApplications: programRow.accepting_applications !== false,
           waitlistEnabled: programRow.waitlist_enabled !== false,
@@ -6550,6 +6530,8 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
           durationMonths: programRow.duration_months ? String(programRow.duration_months) : "10",
           schedulePattern: ["weekly", "custom_dates"].includes(programRow.schedule_pattern) ? programRow.schedule_pattern as ProgramBuilderStatus["schedulePattern"] : "weekly",
           registrationDeadline: programRow.registration_deadline_at ? programRow.registration_deadline_at.slice(0, 16) : "",
+          applicationOpenAt: programRow.application_open_at ? programRow.application_open_at.slice(0, 16) : "",
+          applicationCloseAt: programRow.application_close_at ? programRow.application_close_at.slice(0, 16) : "",
           location: programRow.location ?? "",
           room: programRow.room ?? "",
           paymentKind: ["free", "tareeqah", "manual"].includes(programRow.payment_kind) ? programRow.payment_kind as ProgramBuilderStatus["paymentKind"] : (programRow.is_paid ? "tareeqah" : "free"),
@@ -6568,9 +6550,8 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
           coverPriceLabel: programRow.cover_price_label ?? "",
         });
         const nextOutcomeRows = (outcomeResult.data ?? []).map((row) => ({ id: row.id, text: row.text }));
-        const nextFaqRows = (faqResult.data ?? []).length
-          ? (faqResult.data ?? []).map((row) => ({ id: row.id, question: row.question, answer: row.answer }))
-          : defaultProgramFaqRows;
+        const nextFaqRows = (faqResult.data ?? []).map((row) => ({ id: row.id, question: row.question, answer: row.answer }));
+        const nextContentSectionRows = (contentSectionResult.data ?? []).map((row) => ({ id: row.id, title: row.title, description: row.description ?? "", durationText: row.duration_text ?? "" }));
         const nextMediaRows = (mediaResult.data ?? []).map((row) => ({ id: row.id, url: row.url, title: row.title ?? "", mediaType: row.media_type }));
         const storedSessions: ProgramScheduleRow[] = (sessionResult.data ?? []).map(scheduleRowFromProgramSession);
         const defaultSession: ProgramScheduleRow = firstRow ?? { day: "Monday", start: "18:00", end: "20:00" };
@@ -6610,7 +6591,11 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         setTrackSelectionCount(1);
         setOutcomeRows(nextOutcomeRows);
         setFaqRows(nextFaqRows);
+        setFaqVisible(nextFaqRows.length > 0);
+        setContentSectionRows(nextContentSectionRows);
+        setContentSectionsVisible(nextContentSectionRows.length > 0);
         setMediaRows(nextMediaRows);
+        setMediaVisible(nextMediaRows.length > 0);
         setTrackRows(nextTrackRows);
       }
       setLoading(false);
@@ -6757,6 +6742,24 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
       setBuilderStep("schedule");
       return;
     }
+    if (effectiveBuilderStatus.publicationStatus !== "draft") {
+      const statusValidation = validateProgramStatusCombination({
+        publicationStatus: effectiveBuilderStatus.publicationStatus,
+        applicationStatus: effectiveBuilderStatus.applicationStatus,
+        lifecycleStatus: effectiveBuilderStatus.lifecycleStatus,
+        applicationOpenAt: effectiveBuilderStatus.applicationOpenAt || null,
+        applicationCloseAt: effectiveBuilderStatus.applicationCloseAt || null,
+        startDate: effectiveBuilderStatus.startDate || null,
+        endDate: effectiveBuilderStatus.endDate || null,
+        isOngoing: effectiveBuilderStatus.durationType === "ongoing",
+        billingEndBehavior: effectiveBuilderStatus.billingEndBehavior,
+      });
+      if (!statusValidation.valid) {
+        setToast({ tone: "error", message: statusValidation.errors[0].message });
+        setBuilderStep(statusValidation.errors[0].field === "endDate" ? "schedule" : "pricing");
+        return;
+      }
+    }
     if (effectiveBuilderStatus.publicationStatus !== "draft" && effectiveBuilderStatus.paymentKind === "tareeqah" && !savedOffersMonthlyPayment && !savedOffersAnnualPayment) {
       setToast({ tone: "error", message: "Choose at least one payment option before publishing." });
       setBuilderStep("pricing");
@@ -6768,7 +6771,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
       return;
     }
     if (effectiveBuilderStatus.publicationStatus !== "draft" && effectiveBuilderStatus.paymentKind === "tareeqah" && !usesPerTrackPricing && savedOffersAnnualPayment && Number(annualPrice || "0") <= 0) {
-      setToast({ tone: "error", message: "Add a valid one-time annual price before publishing." });
+      setToast({ tone: "error", message: "Add a valid Pay in Full price before publishing." });
       setBuilderStep("pricing");
       return;
     }
@@ -6813,6 +6816,8 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         programType: effectiveBuilderStatus.programType,
         publicationStatus: effectiveBuilderStatus.publicationStatus,
         applicationStatus: effectiveBuilderStatus.acceptingApplications ? effectiveBuilderStatus.applicationStatus : "not_accepting",
+        applicationOpenAt: effectiveBuilderStatus.applicationStatus === "opens_later" ? effectiveBuilderStatus.applicationOpenAt || null : null,
+        applicationCloseAt: effectiveBuilderStatus.applicationStatus === "opens_later" ? effectiveBuilderStatus.applicationCloseAt || null : null,
         lifecycleStatus: effectiveBuilderStatus.lifecycleStatus,
         applicationMode: effectiveBuilderStatus.applicationMode,
         acceptingApplications: effectiveBuilderStatus.acceptingApplications,
@@ -6822,8 +6827,8 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         durationType: effectiveBuilderStatus.programType === "event" ? "ongoing" : effectiveBuilderStatus.durationType,
         startNow: effectiveBuilderStatus.programType === "recurring" && effectiveBuilderStatus.startNow,
         startDate: effectiveBuilderStatus.programType === "event" ? eventDate || null : effectiveBuilderStatus.startNow ? null : effectiveBuilderStatus.startDate || null,
-        endDate: null,
-        durationMonths: effectiveBuilderStatus.programType === "recurring" && effectiveBuilderStatus.durationType === "fixed_months" && effectiveBuilderStatus.durationMonths ? Number(effectiveBuilderStatus.durationMonths) : null,
+        endDate: effectiveBuilderStatus.programType === "recurring" && effectiveBuilderStatus.durationType === "fixed_months" ? effectiveBuilderStatus.endDate || null : null,
+        durationMonths: effectiveBuilderStatus.programType === "recurring" && effectiveBuilderStatus.durationType === "fixed_months" ? monthsBetweenDates(effectiveBuilderStatus.startDate, effectiveBuilderStatus.endDate) : null,
         schedulePattern: effectiveBuilderStatus.programType === "event" ? "custom_dates" : effectiveBuilderStatus.schedulePattern,
         registrationDeadlineAt: noRegistrationDeadline ? null : effectiveBuilderStatus.registrationDeadline || null,
         location: effectiveBuilderStatus.location.trim() || null,
@@ -6838,7 +6843,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         financialAssistanceNote: effectiveBuilderStatus.financialAssistanceNote.trim() || null,
         receiptNote: effectiveBuilderStatus.receiptNote.trim() || null,
         contactName: effectiveBuilderStatus.contactName.trim() || null,
-        contactEmail: effectiveBuilderStatus.contactEmail.trim() || null,
+        contactEmail: contactEmailOmitted ? "" : effectiveBuilderStatus.contactEmail.trim() || null,
         contactPhone: effectiveBuilderStatus.contactPhone.trim() || null,
         coverPriceLabelEnabled: effectiveBuilderStatus.coverPriceLabelEnabled,
         coverPriceLabel: effectiveBuilderStatus.coverPriceLabel.trim() || null,
@@ -6874,11 +6879,10 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
       learning_intro: learningVisible ? learningIntro.trim() || null : null,
       topics_intro: topicsIntro.trim() || null,
       requirements_text: requirementsText.trim() || null,
-      what_to_bring_text: whatToBringText.trim() || null,
       policies_text: policiesText.trim() || null,
       instructor_display_name: instructorDisplayName.trim() || null,
       instructor_credentials: instructorCredentials.trim() || null,
-      instructor_contact_phone: instructorContactPhone.trim() || null,
+      instructor_contact_phone: contactPhoneOmitted ? "" : instructorContactPhone.trim() || null,
       updated_at: new Date().toISOString(),
     };
     const { error: detailsError } = await supabase.from("program_details").upsert(detailsPayload, { onConflict: "program_id" });
@@ -6916,6 +6920,24 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
       );
       if (faqsError) {
         setToast({ tone: "error", message: faqsError.message });
+        setBusy(false);
+        return;
+      }
+    }
+
+    await supabase.from("program_content_sections").delete().eq("program_id", program.id);
+    if (contentSectionRows.length) {
+      const { error: contentSectionsError } = await supabase.from("program_content_sections").insert(
+        contentSectionRows.map((row, index) => ({
+          program_id: program.id,
+          sort_order: index + 1,
+          title: row.title.trim(),
+          description: row.description.trim() || null,
+          duration_text: row.durationText.trim() || null,
+        })),
+      );
+      if (contentSectionsError) {
+        setToast({ tone: "error", message: contentSectionsError.message });
         setBusy(false);
         return;
       }
@@ -7008,10 +7030,91 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
 
   const startDateLocked = programAlreadyStarted(program);
 
+  function goToPreviousStep() {
+    const index = programBuilderSteps.findIndex((step) => step.id === builderStep);
+    setBuilderStep(programBuilderSteps[Math.max(0, index - 1)]?.id ?? "basics");
+    scrollBuilderToTop();
+  }
+
+  function handleSaveDraftClick() {
+    const draftOverride = { publicationStatus: "draft", applicationStatus: "not_accepting", acceptingApplications: false } as const;
+    setBuilderStatus((current) => ({ ...current, ...draftOverride }));
+    void saveProgram(draftOverride);
+  }
+
+  function getMissingBuilderFields() {
+    return computeProgramBuilderMissingFields({
+      title,
+      programType: builderStatus.programType,
+      location: builderStatus.location,
+      room: builderStatus.room,
+      allAges,
+      ageStart,
+      ageEnd,
+      learningVisible,
+      learningTitle,
+      outcomeRows,
+      faqVisible,
+      faqRows,
+      contentSectionsVisible,
+      contentSectionRows,
+      contactName: builderStatus.contactName,
+      contactPhone: instructorContactPhone,
+      contactPhoneOmitted,
+      contactEmail: builderStatus.contactEmail,
+      contactEmailOmitted,
+      durationType: builderStatus.durationType,
+      endDate: builderStatus.endDate,
+      startNow: builderStatus.startNow,
+      startDate: builderStatus.startDate,
+      eventDate,
+      schedulePattern: builderStatus.schedulePattern,
+      noRegistrationDeadline,
+      registrationDeadline: builderStatus.registrationDeadline,
+      trackRows,
+      paymentKind: builderStatus.paymentKind,
+      offersMonthlyPayment,
+      price,
+      offersAnnualPayment,
+      annualPrice,
+      coverPriceLabelEnabled: builderStatus.coverPriceLabelEnabled,
+      coverPriceLabel: builderStatus.coverPriceLabel,
+    });
+  }
+
+  function advanceStepAnyway() {
+    setMissingFieldsModal(null);
+    const index = programBuilderSteps.findIndex((step) => step.id === builderStep);
+    setBuilderStep(programBuilderSteps[Math.min(programBuilderSteps.length - 1, index + 1)]?.id ?? "review");
+    scrollBuilderToTop();
+  }
+
+  function handleContinueOrPublishClick() {
+    const missing = getMissingBuilderFields();
+    if (builderStep !== "review") {
+      if (missing.length) {
+        setMissingFieldsModal({ fields: missing, allowContinue: true });
+        return;
+      }
+      const index = programBuilderSteps.findIndex((step) => step.id === builderStep);
+      setBuilderStep(programBuilderSteps[Math.min(programBuilderSteps.length - 1, index + 1)]?.id ?? "review");
+      scrollBuilderToTop();
+      return;
+    }
+    if (missing.length) {
+      setMissingFieldsModal({ fields: missing, allowContinue: false });
+      return;
+    }
+    const publishOverride = { publicationStatus: builderStatus.publicationStatus === "hidden" ? "hidden" : "published" } as const;
+    setBuilderStatus((current) => ({ ...current, ...publishOverride, applicationStatus: current.acceptingApplications ? current.applicationStatus : "not_accepting" }));
+    void saveProgram(publishOverride);
+  }
+
   const editWizardContent = (
     <>
       <ProgramBuilderStepper activeStep={builderStep} />
-      <section className="rounded-[22px] border border-[#DDE7EA] bg-white p-4">
+      <ProgramBuilderActionBar busy={busy} builderStep={builderStep} onBack={goToPreviousStep} onSaveDraft={handleSaveDraftClick} onContinueOrPublish={handleContinueOrPublishClick} />
+      <section className="rounded-2xl border border-[#DDE7EA] bg-white p-4">
         <div className="flex items-start justify-between gap-3">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[#7B858C]">Program Builder</p>
@@ -7020,40 +7123,18 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
           <ProgramStatusBadge status={builderStatus.publicationStatus} />
         </div>
 
-        {builderStep === "basics" ? (
-          <div className="mt-5 grid gap-3">
-            <EditBox label="Public name" required value={title} onChange={setTitle} />
-            <label className="block">
-              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("Program type", true)}</span>
-              <select value={builderStatus.programType} onChange={(event) => setBuilderStatus((current) => ({ ...current, programType: event.target.value as ProgramBuilderStatus["programType"] }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
-                <option value="recurring">Recurring program</option>
-                <option value="event">One-time event</option>
-              </select>
-            </label>
-            <EditBox label="Short summary / tagline" value={builderStatus.summary} onChange={(value) => setBuilderStatus((current) => ({ ...current, summary: value }))} />
-          </div>
-        ) : null}
-
         {builderStep === "schedule" ? (
-          <div className="mt-5 grid gap-3 md:grid-cols-2">
-            {builderStatus.programType === "recurring" ? (
-              <label className="block">
-                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Duration Type</span>
-                <select value={builderStatus.durationType} onChange={(event) => { const value = event.target.value as ProgramBuilderStatus["durationType"]; setBuilderStatus((current) => ({ ...current, durationType: value, billingEndBehavior: value === "ongoing" && current.billingEndBehavior === "program_end" ? "manual_cancel" : current.billingEndBehavior })); }} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
-                  <option value="ongoing">Ongoing until manually ended</option>
-                  <option value="fixed_months">Fixed number of months</option>
-                </select>
-              </label>
-            ) : null}
-            <label className="block">
-              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{builderStatus.programType === "event" ? "Event date" : "Start date"}</span>
-              {builderStatus.programType === "event" ? (
-                <input type="date" value={eventDate} onChange={(event) => setEventDate(event.target.value)} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]" />
-              ) : (
-                <input type={startDateLocked || builderStatus.startNow ? "text" : "date"} disabled={startDateLocked || builderStatus.startNow} value={startDateLocked ? "Already Started" : builderStatus.startNow ? "Start Immediately" : builderStatus.startDate} onChange={(event) => setBuilderStatus((current) => ({ ...current, startDate: event.target.value }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3] disabled:bg-[#F2F6F7]" />
-              )}
-            </label>
-          </div>
+          <ProgramTimingFields
+            builderStatus={builderStatus}
+            setBuilderStatus={setBuilderStatus}
+            eventDate={eventDate}
+            setEventDate={setEventDate}
+            eventTimeVisible={eventTimeVisible}
+            setEventTimeVisible={setEventTimeVisible}
+            noRegistrationDeadline={noRegistrationDeadline}
+            setNoRegistrationDeadline={setNoRegistrationDeadline}
+            startDateLocked={startDateLocked}
+          />
         ) : null}
 
         {builderStep === "pricing" ? (
@@ -7066,23 +7147,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
                 <option value="manual">Handled outside Tareeqah</option>
               </select>
             </label>
-            <label className="block">
-              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Application mode</span>
-              <select value={builderStatus.applicationMode} onChange={(event) => setBuilderStatus((current) => ({ ...current, applicationMode: event.target.value as ProgramBuilderStatus["applicationMode"], acceptingApplications: event.target.value === "application_required" ? current.acceptingApplications : false }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
-                <option value="application_required">Application required</option>
-                <option value="open_enrollment">Open enrollment</option>
-                <option value="invite_only">Invite only</option>
-                <option value="hidden_private">Hidden/private</option>
-              </select>
-            </label>
-            {builderStatus.applicationMode === "application_required" ? (
-              <label className="flex min-h-12 items-center gap-3 rounded-[14px] border border-[#DCE7EB] bg-[#F7FBFC] px-3 text-sm font-semibold text-[#26323A] md:col-span-2">
-                <input type="checkbox" checked={builderStatus.acceptingApplications} onChange={(event) => setBuilderStatus((current) => ({ ...current, acceptingApplications: event.target.checked }))} />
-                Accepting applications now
-              </label>
-            ) : (
-              <p className="rounded-[14px] border border-[#DCE7EB] bg-[#F7FBFC] px-3 py-3 text-sm font-semibold text-[#52616A] md:col-span-2">This join mode does not use public applications.</p>
-            )}
+            <ProgramApplicationAvailabilityFields builderStatus={builderStatus} setBuilderStatus={setBuilderStatus} />
           </div>
         ) : null}
       </section>
@@ -7092,10 +7157,18 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
   return (
     <div className="space-y-5 bg-[var(--workspace)] p-4 pb-40">
       <EditorToast toast={toast} onClose={() => setToast(null)} />
+      {missingFieldsModal ? (
+        <MissingFieldsModal
+          missingFields={missingFieldsModal.fields}
+          allowContinue={missingFieldsModal.allowContinue}
+          onContinueAnyway={advanceStepAnyway}
+          onClose={() => setMissingFieldsModal(null)}
+        />
+      ) : null}
       {editWizardContent}
 
       {builderStep === "basics" ? (
-        <section className="overflow-hidden rounded-[28px] bg-white shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
+        <section className="overflow-hidden rounded-2xl border border-[#E1E8EC] bg-white">
           <div className="relative">
             <ProgramHero program={{ ...program, title, thumbnail_url: thumbnailUrl || null }} />
             <input ref={thumbnailInputRef} type="file" accept="image/*" className="hidden" onChange={(event) => handleThumbnailFile(event.target.files?.[0] ?? null)} />
@@ -7104,6 +7177,15 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
             </button>
           </div>
           <div className="space-y-3 p-4">
+            <EditBox label="Public name" required value={title} onChange={setTitle} />
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("Program type", true)}</span>
+              <select value={builderStatus.programType} onChange={(event) => setBuilderStatus((current) => ({ ...current, programType: event.target.value as ProgramBuilderStatus["programType"] }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
+                <option value="recurring">Recurring program</option>
+                <option value="event">One-time event</option>
+              </select>
+            </label>
+            <EditBox label="Short summary / tagline" value={builderStatus.summary} onChange={(value) => setBuilderStatus((current) => ({ ...current, summary: value }))} />
             <EditBox label="Description" value={description} onChange={setDescription} multiline />
             <div className="grid gap-3">
               <EditBox label="Location name" value={builderStatus.location} onChange={(value) => setBuilderStatus((current) => ({ ...current, location: value }))} />
@@ -7130,6 +7212,9 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
       ) : null}
 
       <ProgramEditorFields
+        builderStatus={builderStatus}
+        setBuilderStatus={setBuilderStatus}
+        isEditMode
         activeStep={builderStep}
         programType={builderStatus.programType}
         schedulePattern={builderStatus.schedulePattern}
@@ -7166,14 +7251,20 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         setTopicsIntro={setTopicsIntro}
         requirementsText={requirementsText}
         setRequirementsText={setRequirementsText}
-        whatToBringText={whatToBringText}
-        setWhatToBringText={setWhatToBringText}
         policiesText={policiesText}
         setPoliciesText={setPoliciesText}
         outcomeRows={outcomeRows}
         setOutcomeRows={setOutcomeRows}
+        faqVisible={faqVisible}
+        setFaqVisible={setFaqVisible}
         faqRows={faqRows}
         setFaqRows={setFaqRows}
+        contentSectionsVisible={contentSectionsVisible}
+        setContentSectionsVisible={setContentSectionsVisible}
+        contentSectionRows={contentSectionRows}
+        setContentSectionRows={setContentSectionRows}
+        mediaVisible={mediaVisible}
+        setMediaVisible={setMediaVisible}
         mediaRows={mediaRows}
         setMediaRows={setMediaRows}
         onMediaFile={uploadProgramMedia}
@@ -7211,61 +7302,21 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         setInstructorCredentials={setInstructorCredentials}
         instructorContactPhone={instructorContactPhone}
         setInstructorContactPhone={setInstructorContactPhone}
+        contactName={builderStatus.contactName}
+        setContactName={(value) => setBuilderStatus((current) => ({ ...current, contactName: value }))}
         contactEmail={builderStatus.contactEmail}
         setContactEmail={(value) => setBuilderStatus((current) => ({ ...current, contactEmail: value }))}
+        contactPhoneOmitted={contactPhoneOmitted}
+        setContactPhoneOmitted={setContactPhoneOmitted}
+        contactEmailOmitted={contactEmailOmitted}
+        setContactEmailOmitted={setContactEmailOmitted}
         coverPriceLabelEnabled={builderStatus.coverPriceLabelEnabled}
         setCoverPriceLabelEnabled={(value) => setBuilderStatus((current) => ({ ...current, coverPriceLabelEnabled: value }))}
         coverPriceLabel={builderStatus.coverPriceLabel}
         setCoverPriceLabel={(value) => setBuilderStatus((current) => ({ ...current, coverPriceLabel: value }))}
       />
 
-      <div className="sticky bottom-[92px] z-10 space-y-2 bg-white py-2 md:bottom-4">
-        {message ? <p className="text-sm font-medium text-[#52616A]">{message}</p> : null}
-        <div className="grid grid-cols-3 gap-2">
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => {
-              const draftOverride = { publicationStatus: "draft", applicationStatus: "not_accepting", acceptingApplications: false } as const;
-              setBuilderStatus((current) => ({ ...current, ...draftOverride }));
-              void saveProgram(draftOverride);
-            }}
-            className="min-h-11 rounded-[10px] bg-[#2F8FB3] px-4 text-sm font-semibold text-white shadow-[0_8px_18px_rgba(47,143,179,0.20)] disabled:opacity-60"
-          >
-            Save Draft
-          </button>
-          <button
-            type="button"
-            disabled={busy || builderStep === "basics"}
-            onClick={() => {
-              const index = programBuilderSteps.findIndex((step) => step.id === builderStep);
-              setBuilderStep(programBuilderSteps[Math.max(0, index - 1)]?.id ?? "basics");
-              scrollBuilderToTop();
-            }}
-            className="min-h-11 rounded-[10px] border border-[#B9C3C8] bg-white px-4 text-sm font-semibold text-[#26323A] disabled:opacity-40"
-          >
-            Back
-          </button>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => {
-              if (builderStep !== "review") {
-                const index = programBuilderSteps.findIndex((step) => step.id === builderStep);
-                setBuilderStep(programBuilderSteps[Math.min(programBuilderSteps.length - 1, index + 1)]?.id ?? "review");
-                scrollBuilderToTop();
-                return;
-              }
-              const publishOverride = { publicationStatus: "published" } as const;
-              setBuilderStatus((current) => ({ ...current, ...publishOverride, applicationStatus: current.acceptingApplications ? current.applicationStatus : "not_accepting" }));
-              void saveProgram(publishOverride);
-            }}
-            className="min-h-11 rounded-[10px] bg-[#17624F] px-5 text-sm font-semibold text-white disabled:opacity-60"
-          >
-            {busy ? "Saving..." : builderStep === "review" ? "Publish" : "Continue"}
-          </button>
-        </div>
-      </div>
+      <ProgramBuilderActionBar busy={busy} builderStep={builderStep} onBack={goToPreviousStep} onSaveDraft={handleSaveDraftClick} onContinueOrPublish={handleContinueOrPublishClick} sticky message={message} />
     </div>
   );
 }
@@ -7499,18 +7550,397 @@ function ProgramEditorPreview({
   );
 }
 
+type ProgramBuilderMissingField = { label: string; step: ProgramBuilderStep };
+
+function computeProgramBuilderMissingFields(input: {
+  title: string;
+  programType: ProgramBuilderStatus["programType"];
+  location: string;
+  room: string;
+  allAges: boolean;
+  ageStart: string;
+  ageEnd: string;
+  learningVisible: boolean;
+  learningTitle: string;
+  outcomeRows: Array<{ text: string }>;
+  faqVisible: boolean;
+  faqRows: ProgramEditorFaqRow[];
+  contentSectionsVisible: boolean;
+  contentSectionRows: ProgramEditorContentSectionRow[];
+  contactName: string;
+  contactPhone: string;
+  contactPhoneOmitted: boolean;
+  contactEmail: string;
+  contactEmailOmitted: boolean;
+  durationType: ProgramBuilderStatus["durationType"];
+  endDate: string;
+  startNow: boolean;
+  startDate: string;
+  eventDate: string;
+  schedulePattern: ProgramBuilderStatus["schedulePattern"];
+  noRegistrationDeadline: boolean;
+  registrationDeadline: string;
+  trackRows: ProgramEditorTrackRow[];
+  paymentKind: ProgramBuilderStatus["paymentKind"];
+  offersMonthlyPayment: boolean;
+  price: string;
+  offersAnnualPayment: boolean;
+  annualPrice: string;
+  coverPriceLabelEnabled: boolean;
+  coverPriceLabel: string;
+}): ProgramBuilderMissingField[] {
+  const missing: ProgramBuilderMissingField[] = [];
+
+  if (!input.title.trim()) missing.push({ label: "Public name", step: "basics" });
+  if (!input.location.trim()) missing.push({ label: "Location name", step: "basics" });
+  if (!input.room.trim()) missing.push({ label: "Location address", step: "basics" });
+  if (!input.allAges && (!input.ageStart.trim() || !Number.isFinite(Number(input.ageStart)) || !input.ageEnd.trim() || !Number.isFinite(Number(input.ageEnd)))) {
+    missing.push({ label: "Age range (or choose All ages)", step: "basics" });
+  }
+
+  if (input.learningVisible) {
+    if (!input.learningTitle.trim()) missing.push({ label: "Learning Outcomes section title", step: "public" });
+    if (input.outcomeRows.length === 0 || input.outcomeRows.some((row) => !row.text.trim())) missing.push({ label: "Learning Outcomes: fill in every outcome point", step: "public" });
+  }
+  if (input.faqVisible && (input.faqRows.length === 0 || input.faqRows.some((row) => !row.question.trim() || !row.answer.trim()))) {
+    missing.push({ label: "FAQ: fill in every question and answer", step: "public" });
+  }
+  if (input.contentSectionsVisible && (input.contentSectionRows.length === 0 || input.contentSectionRows.some((row) => !row.title.trim()))) {
+    missing.push({ label: "Class Content: fill in every item title", step: "public" });
+  }
+  if (!input.contactName.trim()) missing.push({ label: "Contact name", step: "public" });
+  if (!input.contactPhoneOmitted && !input.contactPhone.trim()) missing.push({ label: "Contact phone (or mark Do not include)", step: "public" });
+  if (!input.contactEmailOmitted && !input.contactEmail.trim()) missing.push({ label: "Contact email (or mark Do not include)", step: "public" });
+
+  if (input.programType === "event") {
+    if (!input.eventDate.trim()) missing.push({ label: "Event date", step: "schedule" });
+  } else {
+    if (input.durationType === "fixed_months" && !input.endDate.trim()) missing.push({ label: "End date", step: "schedule" });
+    if (!input.startNow && !input.startDate.trim()) missing.push({ label: "Start date (or choose Start now)", step: "schedule" });
+    if (input.schedulePattern === "weekly") {
+      const weeklySessionCount = uniqueScheduleRows(input.trackRows.flatMap((track) => track.sessions)).length;
+      if (weeklySessionCount === 0) missing.push({ label: "At least one weekly session", step: "schedule" });
+      if (input.trackRows.length === 0 || input.trackRows.some((track) => track.sessions.length === 0)) {
+        missing.push({ label: "Every track needs at least one session (no empty tracks)", step: "schedule" });
+      }
+    }
+  }
+  if (!input.noRegistrationDeadline && !input.registrationDeadline.trim()) {
+    missing.push({ label: "Registration deadline (or choose No registration deadline)", step: "schedule" });
+  }
+
+  if (input.paymentKind === "tareeqah") {
+    if (input.offersMonthlyPayment && !(Number(input.price) > 0)) missing.push({ label: "Monthly price", step: "pricing" });
+    if (input.offersAnnualPayment && !(Number(input.annualPrice) > 0)) missing.push({ label: "Pay in Full price", step: "pricing" });
+  }
+  if (input.coverPriceLabelEnabled && !input.coverPriceLabel.trim()) missing.push({ label: "Price tag label", step: "pricing" });
+
+  return missing;
+}
+
+function MissingFieldsModal({
+  missingFields,
+  allowContinue,
+  onContinueAnyway,
+  onClose,
+}: {
+  missingFields: ProgramBuilderMissingField[];
+  allowContinue: boolean;
+  onContinueAnyway?: () => void;
+  onClose: () => void;
+}) {
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#26323A]/35 px-5 backdrop-blur-sm">
+      <div className="max-h-[80vh] w-full max-w-md overflow-y-auto rounded-[24px] bg-white p-5 text-[#26323A] shadow-[0_24px_60px_rgba(38,50,58,0.22)]">
+        <h2 className="text-lg font-semibold">Required fields missing</h2>
+        <p className="mt-1 text-sm leading-6 text-[#6B747B]">
+          {allowContinue
+            ? "You can still move on, but these need to be filled in before this class can be published."
+            : "These need to be filled in before you can publish."}
+        </p>
+        <ul className="mt-4 space-y-2">
+          {missingFields.map((field) => (
+            <li key={field.label} className="flex items-start gap-2 text-sm text-[#26323A]">
+              <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-[#C83F31]" aria-hidden />
+              {field.label}
+            </li>
+          ))}
+        </ul>
+        <div className="mt-5 flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="min-h-10 rounded-[10px] border border-[#C9D3D8] bg-white px-4 text-sm font-semibold text-[#26323A]">
+            {allowContinue ? "Review Fields" : "Close"}
+          </button>
+          {allowContinue ? (
+            <button type="button" onClick={onContinueAnyway} className="min-h-10 rounded-[10px] bg-[#17624F] px-4 text-sm font-semibold text-white">
+              Continue Anyway
+            </button>
+          ) : null}
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+function ProgramBuilderActionBar({
+  busy,
+  builderStep,
+  onBack,
+  onSaveDraft,
+  onContinueOrPublish,
+  sticky = false,
+  message,
+}: {
+  busy: boolean;
+  builderStep: ProgramBuilderStep;
+  onBack: () => void;
+  onSaveDraft: () => void;
+  onContinueOrPublish: () => void;
+  sticky?: boolean;
+  message?: string | null;
+}) {
+  return (
+    <div className={cn("z-10 space-y-2 bg-white py-2", sticky ? "sticky bottom-[92px] md:bottom-4" : "")}>
+      {message ? <p className="text-sm font-medium text-[#52616A]">{message}</p> : null}
+      <div className="flex items-center gap-2">
+        <button type="button" disabled={busy || builderStep === "basics"} onClick={onBack} className="min-h-11 shrink-0 rounded-[10px] border border-[#C9D3D8] bg-white px-4 text-sm font-semibold text-[#26323A] disabled:opacity-40">
+          Back
+        </button>
+        <button type="button" disabled={busy} onClick={onSaveDraft} className="min-h-11 flex-1 rounded-[10px] bg-[#2F8FB3] px-4 text-sm font-semibold text-white disabled:opacity-60">
+          Save Draft
+        </button>
+        <button type="button" disabled={busy} onClick={onContinueOrPublish} className="min-h-11 flex-[1.4] rounded-[10px] bg-[#17624F] px-5 text-sm font-semibold text-white disabled:opacity-60">
+          {busy ? "Saving..." : builderStep === "review" ? "Publish" : "Continue"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ProgramTimingFields({
+  builderStatus,
+  setBuilderStatus,
+  eventDate,
+  setEventDate,
+  eventTimeVisible,
+  setEventTimeVisible,
+  noRegistrationDeadline,
+  setNoRegistrationDeadline,
+  startDateLocked = false,
+}: {
+  builderStatus: ProgramBuilderStatus;
+  setBuilderStatus: Dispatch<SetStateAction<ProgramBuilderStatus>>;
+  eventDate: string;
+  setEventDate: (value: string) => void;
+  eventTimeVisible: boolean;
+  setEventTimeVisible: (value: boolean) => void;
+  noRegistrationDeadline: boolean;
+  setNoRegistrationDeadline: (value: boolean) => void;
+  startDateLocked?: boolean;
+}) {
+  const endDateInvalid = Boolean(
+    builderStatus.durationType === "fixed_months" &&
+      builderStatus.startDate &&
+      builderStatus.endDate &&
+      new Date(`${builderStatus.endDate}T00:00:00`).getTime() <= new Date(`${builderStatus.startDate}T00:00:00`).getTime(),
+  );
+
+  return (
+    <div className="mt-5 grid gap-3 md:grid-cols-2">
+      {builderStatus.programType === "recurring" ? (
+        <label className="block">
+          <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("When does it end?", true)}</span>
+          <select
+            value={builderStatus.durationType}
+            onChange={(event) => {
+              const value = event.target.value as ProgramBuilderStatus["durationType"];
+              setBuilderStatus((current) => ({
+                ...current,
+                durationType: value,
+                billingEndBehavior: value === "ongoing" && current.billingEndBehavior === "program_end" ? "manual_cancel" : current.billingEndBehavior,
+                endDate: value === "ongoing" ? "" : current.endDate,
+              }));
+            }}
+            className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]"
+          >
+            <option value="ongoing">Ongoing until manually ended</option>
+            <option value="fixed_months">Ends on a specific date</option>
+          </select>
+        </label>
+      ) : null}
+      <label className="block">
+        <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{builderStatus.programType === "event" ? "Event date" : "Start date"}</span>
+        {builderStatus.programType === "event" ? (
+          <input type="date" value={eventDate} onChange={(event) => setEventDate(event.target.value)} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]" />
+        ) : (
+          <>
+            <input
+              type={startDateLocked || builderStatus.startNow ? "text" : "date"}
+              disabled={startDateLocked || builderStatus.startNow}
+              value={startDateLocked ? "Already Started" : builderStatus.startNow ? "Start Immediately" : builderStatus.startDate}
+              onChange={(event) => setBuilderStatus((current) => ({ ...current, startDate: event.target.value }))}
+              className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3] disabled:bg-[#F2F6F7] disabled:text-[#52616A]"
+            />
+            {!startDateLocked ? (
+              <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs font-semibold text-[#52616A]">
+                <input type="checkbox" checked={builderStatus.startNow} onChange={(event) => setBuilderStatus((current) => ({ ...current, startNow: event.target.checked }))} />
+                Start now after publishing
+              </label>
+            ) : null}
+          </>
+        )}
+      </label>
+      {builderStatus.programType === "recurring" && builderStatus.durationType === "fixed_months" ? (
+        <label className="block">
+          <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("End date", true)}</span>
+          <input
+            type="date"
+            value={builderStatus.endDate}
+            onChange={(event) => setBuilderStatus((current) => ({ ...current, endDate: event.target.value }))}
+            className={cn("h-10 w-full rounded-[8px] border bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]", endDateInvalid ? "border-[#C83F31]" : "border-[#B9C3C8]")}
+          />
+          {endDateInvalid ? (
+            <span className="mt-1 block text-xs leading-5 text-[#C83F31]">End date must be after the start date.</span>
+          ) : null}
+        </label>
+      ) : null}
+      {builderStatus.programType === "recurring" ? (
+        <label className="block">
+          <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Schedule pattern</span>
+          <select value={builderStatus.schedulePattern} onChange={(event) => setBuilderStatus((current) => ({ ...current, schedulePattern: event.target.value as ProgramBuilderStatus["schedulePattern"] }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
+            <option value="weekly">Weekly repeating</option>
+            <option value="custom_dates">Custom session dates</option>
+          </select>
+        </label>
+      ) : null}
+      <label className="block">
+        <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Registration deadline</span>
+        <input type={noRegistrationDeadline ? "text" : "datetime-local"} disabled={noRegistrationDeadline} value={noRegistrationDeadline ? "None" : builderStatus.registrationDeadline} onChange={(event) => setBuilderStatus((current) => ({ ...current, registrationDeadline: event.target.value }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3] disabled:bg-[#F2F6F7] disabled:text-[#52616A]" />
+        <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs font-semibold text-[#52616A]">
+          <input type="checkbox" checked={noRegistrationDeadline} onChange={(event) => { setNoRegistrationDeadline(event.target.checked); if (event.target.checked) setBuilderStatus((current) => ({ ...current, registrationDeadline: "" })); }} />
+          No registration deadline
+        </label>
+      </label>
+      {builderStatus.programType === "event" && !eventTimeVisible ? <button type="button" onClick={() => setEventTimeVisible(true)} className="block text-sm font-semibold text-[#2F8FB3]">Add start and end time</button> : null}
+    </div>
+  );
+}
+
+type ApplicationAvailabilityChoice = "not_yet" | "now" | "later" | "invite" | "waitlist";
+
+function applicationAvailabilityChoiceFromStatus(status: ProgramApplicationStatus): ApplicationAvailabilityChoice {
+  switch (status) {
+    case "accepting":
+      return "now";
+    case "opens_later":
+      return "later";
+    case "invite_only":
+      return "invite";
+    case "waitlist_only":
+      return "waitlist";
+    default:
+      return "not_yet";
+  }
+}
+
+function ProgramApplicationAvailabilityFields({
+  builderStatus,
+  setBuilderStatus,
+}: {
+  builderStatus: ProgramBuilderStatus;
+  setBuilderStatus: Dispatch<SetStateAction<ProgramBuilderStatus>>;
+}) {
+  const choice = applicationAvailabilityChoiceFromStatus(builderStatus.applicationStatus);
+  const openBeforeClose =
+    !builderStatus.applicationOpenAt ||
+    !builderStatus.applicationCloseAt ||
+    new Date(builderStatus.applicationCloseAt).getTime() > new Date(builderStatus.applicationOpenAt).getTime();
+
+  return (
+    <>
+      <label className="block md:col-span-2">
+        <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("Can students apply?", true)}</span>
+        <select
+          value={choice}
+          onChange={(event) => {
+            const nextChoice = event.target.value as ApplicationAvailabilityChoice;
+            setBuilderStatus((current) => {
+              const applicationStatus: ProgramApplicationStatus =
+                nextChoice === "now"
+                  ? "accepting"
+                  : nextChoice === "later"
+                    ? "opens_later"
+                    : nextChoice === "invite"
+                      ? "invite_only"
+                      : nextChoice === "waitlist"
+                        ? "waitlist_only"
+                        : "not_accepting";
+              return {
+                ...current,
+                applicationStatus,
+                acceptingApplications: applicationStatus === "accepting",
+                applicationMode: applicationStatus === "invite_only" ? "invite_only" : "application_required",
+                applicationOpenAt: applicationStatus === "opens_later" ? current.applicationOpenAt : "",
+                applicationCloseAt: applicationStatus === "opens_later" ? current.applicationCloseAt : "",
+              };
+            });
+          }}
+          className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]"
+        >
+          <option value="not_yet">No, not yet</option>
+          <option value="now">Yes, start now</option>
+          <option value="later">Yes, starting later</option>
+          <option value="waitlist">Waitlist only</option>
+          <option value="invite">Invite only</option>
+        </select>
+      </label>
+      {choice === "later" ? (
+        <>
+          <label className="block">
+            <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("Applications open", true)}</span>
+            <input
+              type="datetime-local"
+              value={builderStatus.applicationOpenAt}
+              onChange={(event) => setBuilderStatus((current) => ({ ...current, applicationOpenAt: event.target.value }))}
+              className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]"
+            />
+          </label>
+          <label className="block">
+            <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Applications close (optional)</span>
+            <input
+              type="datetime-local"
+              value={builderStatus.applicationCloseAt}
+              onChange={(event) => setBuilderStatus((current) => ({ ...current, applicationCloseAt: event.target.value }))}
+              className={cn("h-10 w-full rounded-[8px] border bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]", openBeforeClose ? "border-[#B9C3C8]" : "border-[#C83F31]")}
+            />
+            {!openBeforeClose ? <span className="mt-1 block text-xs leading-5 text-[#C83F31]">Close date must be after the open date.</span> : null}
+          </label>
+        </>
+      ) : null}
+      {choice === "waitlist" ? (
+        <p className="rounded-[10px] border border-[#DCE7EB] bg-[#F7FBFC] px-3 py-3 text-sm font-semibold text-[#52616A] md:col-span-2">Families will see a &quot;Join Waitlist&quot; button instead of Apply.</p>
+      ) : null}
+      {choice === "invite" ? (
+        <p className="rounded-[10px] border border-[#DCE7EB] bg-[#F7FBFC] px-3 py-3 text-sm font-semibold text-[#52616A] md:col-span-2">Families will see &quot;Invite required&quot; instead of Apply. An invite-code flow isn&apos;t built yet — this only controls the public messaging for now.</p>
+      ) : null}
+    </>
+  );
+}
+
 function EditBox({
   label,
   value,
   onChange,
   required = false,
   multiline = false,
+  disabled = false,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   required?: boolean;
   multiline?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <label className="block">
@@ -7521,13 +7951,15 @@ function EditBox({
         <textarea
           value={value}
           onChange={(event) => onChange(event.target.value)}
-          className="min-h-24 w-full resize-y rounded-[8px] border border-[#B9C3C8] bg-white px-3 py-2 text-sm leading-6 text-[#26323A] outline-none focus:border-[#2F8FB3]"
+          disabled={disabled}
+          className="min-h-24 w-full resize-y rounded-[8px] border border-[#B9C3C8] bg-white px-3 py-2 text-sm leading-6 text-[#26323A] outline-none focus:border-[#2F8FB3] disabled:bg-[#F2F6F7] disabled:text-[#9AA4AA]"
         />
       ) : (
         <input
           value={value}
           onChange={(event) => onChange(event.target.value)}
-          className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]"
+          disabled={disabled}
+          className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3] disabled:bg-[#F2F6F7] disabled:text-[#9AA4AA]"
         />
       )}
     </label>
@@ -7541,7 +7973,7 @@ function ProgramBuilderStepper({
 }) {
   const activeIndex = programBuilderSteps.findIndex((step) => step.id === activeStep);
   return (
-    <nav className="rounded-[22px] border border-[#DDE7EA] bg-white px-2 py-3 sm:px-4" aria-label="Program builder steps">
+    <nav className="rounded-2xl border border-[#DDE7EA] bg-white px-2 py-3 sm:px-4" aria-label="Program builder steps">
       <ol className="grid grid-cols-5 items-center gap-1 sm:gap-2">
         {programBuilderSteps.map((step, index) => {
           const active = step.id === activeStep;
@@ -7607,14 +8039,20 @@ type ProgramEditorFieldsProps = {
   setTopicsIntro?: (value: string) => void;
   requirementsText?: string;
   setRequirementsText?: (value: string) => void;
-  whatToBringText?: string;
-  setWhatToBringText?: (value: string) => void;
   policiesText?: string;
   setPoliciesText?: (value: string) => void;
   outcomeRows: Array<{ id: string; text: string }>;
   setOutcomeRows: Dispatch<SetStateAction<Array<{ id: string; text: string }>>>;
+  faqVisible: boolean;
+  setFaqVisible: (value: boolean) => void;
   faqRows: ProgramEditorFaqRow[];
   setFaqRows: Dispatch<SetStateAction<ProgramEditorFaqRow[]>>;
+  contentSectionsVisible: boolean;
+  setContentSectionsVisible: (value: boolean) => void;
+  contentSectionRows: ProgramEditorContentSectionRow[];
+  setContentSectionRows: Dispatch<SetStateAction<ProgramEditorContentSectionRow[]>>;
+  mediaVisible: boolean;
+  setMediaVisible: (value: boolean) => void;
   mediaRows: ProgramEditorMediaRow[];
   setMediaRows: Dispatch<SetStateAction<ProgramEditorMediaRow[]>>;
   onMediaFile: (rowId: string, file: File | null) => void;
@@ -7652,31 +8090,73 @@ type ProgramEditorFieldsProps = {
   setInstructorCredentials: (value: string) => void;
   instructorContactPhone: string;
   setInstructorContactPhone: (value: string) => void;
+  contactName?: string;
+  setContactName?: (value: string) => void;
   contactEmail?: string;
   setContactEmail?: (value: string) => void;
+  contactPhoneOmitted?: boolean;
+  setContactPhoneOmitted?: (value: boolean) => void;
+  contactEmailOmitted?: boolean;
+  setContactEmailOmitted?: (value: boolean) => void;
   coverPriceLabelEnabled?: boolean;
   setCoverPriceLabelEnabled?: (value: boolean) => void;
   coverPriceLabel?: string;
   setCoverPriceLabel?: (value: string) => void;
+  builderStatus?: ProgramBuilderStatus;
+  setBuilderStatus?: Dispatch<SetStateAction<ProgramBuilderStatus>>;
+  isEditMode?: boolean;
 };
+
+function programStatusBadgeToneClass(tone: "neutral" | "positive" | "warning" | "danger") {
+  switch (tone) {
+    case "positive":
+      return "bg-[#E3F5EE] text-[#228763]";
+    case "warning":
+      return "bg-[#FFF7E6] text-[#8A5A00]";
+    case "danger":
+      return "bg-[#FDEDEA] text-[#C83F31]";
+    default:
+      return "bg-[#EEF3F5] text-[#52616A]";
+  }
+}
+
+function EditorFieldSection({ title, action, children }: { title: string; action?: ReactNode; children: ReactNode }) {
+  return (
+    <section className="py-5 first:pt-0 last:pb-0">
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">{title}</h2>
+        {action}
+      </div>
+      <div className="mt-3">{children}</div>
+    </section>
+  );
+}
+
+function RowIconButton({ tone = "neutral", ...props }: React.ComponentPropsWithoutRef<"button"> & { tone?: "neutral" | "danger" | "accent" }) {
+  return (
+    <button
+      type="button"
+      {...props}
+      className={cn(
+        "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors",
+        tone === "danger" ? "text-[#C83F31] hover:bg-[#FDEDEA]" : tone === "accent" ? "text-[#2F8FB3] hover:bg-[#E9F4F8]" : "text-[#6B747B] hover:bg-[#F1F4F5]",
+        props.className,
+      )}
+    />
+  );
+}
 
 function ProgramFaqEditor({ faqRows, onChange }: { faqRows: ProgramEditorFaqRow[]; onChange: Dispatch<SetStateAction<ProgramEditorFaqRow[]>> }) {
   return (
-    <DetailSection title="FAQs">
-      <div className="space-y-3">
-       
+    <EditorFieldSection title="FAQs">
+      <div className="divide-y divide-[#E6ECEF]">
         {faqRows.map((row, index) => (
-          <div key={row.id} className="space-y-2 border-t border-[#E6ECEF] pt-3 first:border-t-0 first:pt-0">
+          <div key={row.id} className="space-y-2 py-3 first:pt-0 last:pb-0">
             <div className="flex items-center justify-between gap-2">
               <p className="text-xs font-semibold uppercase tracking-wide text-[#7B858C]">Question {index + 1}</p>
-              <button
-                type="button"
-                onClick={() => onChange((current) => current.filter((item) => item.id !== row.id))}
-                className="flex h-8 w-8 items-center justify-center rounded-[8px] text-[#C83F31] hover:bg-[#FDEDEA]"
-                aria-label="Remove FAQ"
-              >
+              <RowIconButton tone="danger" onClick={() => onChange((current) => current.filter((item) => item.id !== row.id))} aria-label="Remove FAQ">
                 <TrashIcon />
-              </button>
+              </RowIconButton>
             </div>
             <input
               value={row.question}
@@ -7695,12 +8175,12 @@ function ProgramFaqEditor({ faqRows, onChange }: { faqRows: ProgramEditorFaqRow[
         <button
           type="button"
           onClick={() => onChange((current) => [...current, { id: crypto.randomUUID(), question: "New question", answer: "Add the answer families should see." }])}
-          className="min-h-10 rounded-[8px] border border-[#D6DCE0] px-4 text-sm font-semibold text-[#26323A]"
+          className="mt-3 min-h-10 rounded-[8px] border border-[#D6DCE0] px-4 text-sm font-semibold text-[#26323A]"
         >
           Add FAQ
         </button>
       </div>
-    </DetailSection>
+    </EditorFieldSection>
   );
 }
 
@@ -7725,14 +8205,20 @@ function ProgramEditorFields({
   setTopicsIntro,
   requirementsText = "",
   setRequirementsText,
-  whatToBringText = "",
-  setWhatToBringText,
   policiesText = "",
   setPoliciesText,
   outcomeRows,
   setOutcomeRows,
+  faqVisible,
+  setFaqVisible,
   faqRows,
   setFaqRows,
+  contentSectionsVisible,
+  setContentSectionsVisible,
+  contentSectionRows,
+  setContentSectionRows,
+  mediaVisible,
+  setMediaVisible,
   mediaRows,
   setMediaRows,
   onMediaFile,
@@ -7770,12 +8256,21 @@ function ProgramEditorFields({
   setInstructorCredentials,
   instructorContactPhone,
   setInstructorContactPhone,
+  contactName = "",
+  setContactName,
   contactEmail = "",
   setContactEmail,
+  contactPhoneOmitted = false,
+  setContactPhoneOmitted,
+  contactEmailOmitted = false,
+  setContactEmailOmitted,
   coverPriceLabelEnabled = true,
   setCoverPriceLabelEnabled,
   coverPriceLabel = "",
   setCoverPriceLabel,
+  builderStatus,
+  setBuilderStatus,
+  isEditMode = false,
 }: ProgramEditorFieldsProps) {
   const showAll = !activeStep;
   const showBasics = showAll || activeStep === "basics";
@@ -7786,6 +8281,17 @@ function ProgramEditorFields({
   const canUsePerTrackPricing = paymentKind === "tareeqah" && programType === "recurring" && schedulePattern === "weekly" && trackRows.length > 0;
   const perTrackPricingEnabled = canUsePerTrackPricing && trackRows.some((track) => track.pricingOverrideEnabled);
   const weeklySessionLibrary = useMemo(() => uniqueScheduleRows(trackRows.flatMap((track) => track.sessions)), [trackRows]);
+  const isOngoingDuration = builderStatus?.durationType === "ongoing";
+
+  useEffect(() => {
+    if (!isOngoingDuration || !offersAnnualPayment) {
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      setOffersAnnualPayment(false);
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, [isOngoingDuration, offersAnnualPayment, setOffersAnnualPayment]);
 
   function setPerTrackPricingEnabled(enabled: boolean) {
     setTrackRows((current) =>
@@ -7854,11 +8360,9 @@ function ProgramEditorFields({
 
   const [topicsVisible, setTopicsVisible] = useState(false);
   const [requirementsVisible, setRequirementsVisible] = useState(false);
-  const [whatToBringVisible, setWhatToBringVisible] = useState(false);
   const [policiesVisible, setPoliciesVisible] = useState(false);
   const showTopicsField = topicsVisible || Boolean(topicsIntro.trim());
   const showRequirementsField = requirementsVisible || Boolean(requirementsText.trim());
-  const showWhatToBringField = whatToBringVisible || Boolean(whatToBringText.trim());
   const showPoliciesField = policiesVisible || Boolean(policiesText.trim());
 
   if (showReview) {
@@ -7882,7 +8386,98 @@ function ProgramEditorFields({
       updated_at: "",
     }));
     const visibleMediaRows = mediaRows.filter((row) => row.previewUrl || row.url);
+    const statusFields: ProgramStatusFields | null = builderStatus
+      ? {
+          publicationStatus: builderStatus.publicationStatus,
+          applicationStatus: builderStatus.applicationStatus,
+          lifecycleStatus: deriveLifecycleStatus({
+            lifecycleStatus: builderStatus.lifecycleStatus,
+            startNow: builderStatus.startNow,
+            startDate: builderStatus.startDate || null,
+            endDate: builderStatus.endDate || null,
+            isOngoing: builderStatus.durationType === "ongoing",
+          }),
+          applicationOpenAt: builderStatus.applicationOpenAt || null,
+          applicationCloseAt: builderStatus.applicationCloseAt || null,
+          startDate: builderStatus.startDate || null,
+          endDate: builderStatus.endDate || null,
+          isOngoing: builderStatus.durationType === "ongoing",
+          billingEndBehavior: builderStatus.billingEndBehavior,
+        }
+      : null;
     return (
+      <div className="space-y-5">
+        {statusFields && builderStatus && setBuilderStatus ? (
+          <section className="divide-y divide-[#E1E8EC] rounded-2xl border border-[#E1E8EC] bg-white p-4 md:p-6">
+            <div className="pb-5 first:pt-0">
+              <h2 className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">Where should this program appear?</h2>
+              <div className="mt-3 space-y-2">
+                <label className="flex items-start gap-3 rounded-[10px] border border-[#E1E8EC] p-3 text-sm font-semibold text-[#26323A]">
+                  <input
+                    type="radio"
+                    name="program-visibility"
+                    className="mt-1"
+                    checked={builderStatus.publicationStatus !== "hidden"}
+                    onChange={() => setBuilderStatus((current) => ({ ...current, publicationStatus: current.publicationStatus === "draft" ? "draft" : "published" }))}
+                  />
+                  <span>
+                    Show on student class list
+                    <span className="mt-1 block text-xs font-medium leading-5 text-[#6B747B]">Appears on the public masjid classes page.</span>
+                  </span>
+                </label>
+                <label className="flex items-start gap-3 rounded-[10px] border border-[#E1E8EC] p-3 text-sm font-semibold text-[#26323A]">
+                  <input
+                    type="radio"
+                    name="program-visibility"
+                    className="mt-1"
+                    checked={builderStatus.publicationStatus === "hidden"}
+                    onChange={() => setBuilderStatus((current) => ({ ...current, publicationStatus: "hidden" }))}
+                  />
+                  <span>
+                    Hide from list, private entry only
+                    <span className="mt-1 block text-xs font-medium leading-5 text-[#6B747B]">Reachable by a direct or private link only.</span>
+                  </span>
+                </label>
+              </div>
+            </div>
+
+            <div className={cn("py-5", !isEditMode && "last:pb-0")}>
+              <h2 className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">Status summary</h2>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {getProgramStatusBadges(statusFields).map((badge) => (
+                  <span key={badge.label} className={cn("rounded-full px-3 py-1 text-xs font-semibold", programStatusBadgeToneClass(badge.tone))}>
+                    {badge.label}
+                  </span>
+                ))}
+              </div>
+              <p className="mt-3 text-sm leading-6 text-[#52616A]">{getApplicationButtonState(statusFields).label}</p>
+            </div>
+
+            {isEditMode ? (
+              <div className="pt-5 last:pb-0">
+                <label className="block">
+                  <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Program status</span>
+                  <select
+                    value={statusFields.lifecycleStatus}
+                    onChange={(event) => setBuilderStatus((current) => ({ ...current, lifecycleStatus: event.target.value as ProgramLifecycleStatus }))}
+                    className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]"
+                  >
+                    <option value="upcoming">Upcoming</option>
+                    <option value="active">Active</option>
+                    <option value="paused">Paused</option>
+                    <option value="completed">Completed</option>
+                    <option value="cancelled">Cancelled</option>
+                    <option value="archived">Archived</option>
+                  </select>
+                  <span className="mt-1 block text-xs leading-5 text-[#6B747B]">
+                    Upcoming, Active, and Completed are set automatically from the start and end dates. Choose Paused, Cancelled, or Archived to override manually.
+                  </span>
+                </label>
+              </div>
+            ) : null}
+          </section>
+        ) : null}
+
       <div className="mx-auto max-w-[520px] space-y-5">
         {program ? (
           <section className="overflow-hidden rounded-[28px] bg-white shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
@@ -7926,10 +8521,27 @@ function ProgramEditorFields({
           </DetailSection>
         ) : null}
 
-        {[{ title: "Topics Covered", body: topicsIntro }, { title: "Requirements", body: requirementsText }, { title: "What To Bring", body: whatToBringText }, { title: "Policies", body: policiesText }].some((row) => row.body.trim()) ? (
+        {contentSectionRows.some((row) => row.title.trim()) ? (
+          <DetailSection title="Class Content">
+            <div className="divide-y divide-[#E6ECEF]">
+              {contentSectionRows.filter((row) => row.title.trim()).map((row, index) => (
+                <div key={row.id} className="flex min-h-14 items-center gap-3 py-3">
+                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#F0F8FB] text-xs font-medium text-[#2F8FB3]">{index + 1}</span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium text-[#26323A]">{row.title}</p>
+                    {row.description.trim() ? <p className="text-xs text-[#6B747B]">{row.description}</p> : null}
+                  </div>
+                  {row.durationText.trim() ? <span className="rounded-full bg-[#EAF7F1] px-2 py-1 text-xs text-[#228763]">{row.durationText}</span> : null}
+                </div>
+              ))}
+            </div>
+          </DetailSection>
+        ) : null}
+
+        {[{ title: "Topics Covered", body: topicsIntro }, { title: "Requirements", body: requirementsText }, { title: "Policies", body: policiesText }].some((row) => row.body.trim()) ? (
           <DetailSection title="Program Details">
             <div className="divide-y divide-[#E6ECEF]">
-              {[{ title: "Topics Covered", body: topicsIntro }, { title: "Requirements", body: requirementsText }, { title: "What To Bring", body: whatToBringText }, { title: "Policies", body: policiesText }]
+              {[{ title: "Topics Covered", body: topicsIntro }, { title: "Requirements", body: requirementsText }, { title: "Policies", body: policiesText }]
                 .filter((row) => row.body.trim())
                 .map((row) => (
                   <div key={row.title} className="py-3 first:pt-0 last:pb-0">
@@ -7966,16 +8578,16 @@ function ProgramEditorFields({
           />
         ) : null}
       </div>
+      </div>
     );
   }
 
   void _setIsPaid;
 
   return (
-    <div className="space-y-5">
-      <div className="space-y-5">
+    <div className="divide-y divide-[#E1E8EC] rounded-2xl border border-[#E1E8EC] bg-white p-4 md:p-6">
         {showPublic ? (learningVisible ? (
-          <DetailSection title="Learning Outcomes">
+          <EditorFieldSection title="Learning Outcomes">
             <div className="space-y-4">
               <EditBox label="Section title" required value={learningTitle} onChange={setLearningTitle} />
               {learningDescriptionVisible || learningIntro.trim() ? (
@@ -7988,175 +8600,264 @@ function ProgramEditorFields({
               <div className="space-y-2">
                 <div className="flex items-center justify-between gap-2">
                   <p className="text-sm font-semibold text-[#26323A]">Outcome points</p>
-                  <button type="button" onClick={() => setOutcomeRows((current) => [...current, { id: crypto.randomUUID(), text: `Learning outcome #${current.length + 1}` }])} className="flex h-9 w-9 items-center justify-center rounded-full border border-[#A8D4E2] text-2xl font-light leading-none text-[#2F8FB3] hover:bg-[#E9F4F8]" aria-label="Add outcome point">
+                  <RowIconButton tone="accent" className="border border-[#A8D4E2] text-lg" onClick={() => setOutcomeRows((current) => [...current, { id: crypto.randomUUID(), text: `Learning outcome #${current.length + 1}` }])} aria-label="Add outcome point">
                     +
-                  </button>
+                  </RowIconButton>
                 </div>
                 {outcomeRows.map((row, index) => (
-                  <div key={row.id} className="grid grid-cols-[34px_minmax(0,1fr)_40px] items-start gap-2 rounded-[14px] border border-[#E1E8EC] bg-[#F8FAFA] p-2">
-                    <span className="mt-1 flex h-8 w-8 items-center justify-center rounded-full bg-[#26323A] text-xs font-semibold text-white">{String(index + 1).padStart(2, "0")}</span>
+                  <div key={row.id} className="grid grid-cols-[28px_minmax(0,1fr)_32px] items-start gap-2 border-t border-[#E6ECEF] py-2 first:border-t-0 first:pt-0">
+                    <span className="mt-2 flex h-6 w-6 items-center justify-center rounded-full bg-[#26323A] text-[10px] font-semibold text-white">{String(index + 1).padStart(2, "0")}</span>
                     <textarea
                       value={row.text}
                       onChange={(event) => setOutcomeRows((current) => current.map((item) => item.id === row.id ? { ...item, text: event.target.value } : item))}
-                      className="min-h-14 min-w-0 resize-y rounded-[10px] border border-[#D6E1E6] bg-white px-3 py-2 text-sm leading-6 outline-none focus:border-[#2F8FB3]"
+                      className="min-h-14 min-w-0 resize-y rounded-[8px] border border-[#D6E1E6] bg-white px-3 py-2 text-sm leading-6 outline-none focus:border-[#2F8FB3]"
                       aria-label={`Checklist point ${index + 1}`}
                     />
-                    <button
-                      type="button"
-                      onClick={() => setOutcomeRows((current) => current.filter((item) => item.id !== row.id))}
-                      className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[8px] text-[#C83F31] hover:bg-[#FDEDEA]"
-                      aria-label="Delete checklist point"
-                    >
+                    <RowIconButton tone="danger" className="mt-1" onClick={() => setOutcomeRows((current) => current.filter((item) => item.id !== row.id))} aria-label="Delete checklist point">
                       <TrashIcon />
-                    </button>
+                    </RowIconButton>
                   </div>
                 ))}
               </div>
               <div className="grid gap-3">
                 {setTopicsIntro ? (showTopicsField ? <EditBox label="Topics covered" value={topicsIntro} onChange={setTopicsIntro} multiline /> : <button type="button" onClick={() => setTopicsVisible(true)} className="w-fit text-left text-sm font-semibold text-[#2F8FB3]">Add Topics Covered</button>) : null}
                 {setRequirementsText ? (showRequirementsField ? <EditBox label="Prerequisites" value={requirementsText} onChange={setRequirementsText} multiline /> : <button type="button" onClick={() => setRequirementsVisible(true)} className="w-fit text-left text-sm font-semibold text-[#2F8FB3]">Add Prerequisites</button>) : null}
-                {setWhatToBringText ? (showWhatToBringField ? <EditBox label="What to bring" value={whatToBringText} onChange={setWhatToBringText} multiline /> : <button type="button" onClick={() => setWhatToBringVisible(true)} className="w-fit text-left text-sm font-semibold text-[#2F8FB3]">Add What To Bring</button>) : null}
-                {setPoliciesText ? (showPoliciesField ? <EditBox label="Policies" value={policiesText} onChange={setPoliciesText} multiline /> : <button type="button" onClick={() => setPoliciesVisible(true)} className="w-fit text-left text-sm font-semibold text-[#2F8FB3]">Add Policies</button>) : null}
+                {setPoliciesText ?(showPoliciesField ? <EditBox label="Policies" value={policiesText} onChange={setPoliciesText} multiline /> : <button type="button" onClick={() => setPoliciesVisible(true)} className="w-fit text-left text-sm font-semibold text-[#2F8FB3]">Add Policies</button>) : null}
               </div>
             </div>
-          </DetailSection>
+          </EditorFieldSection>
         ) : (
-          <button type="button" onClick={addLearningSection} className="min-h-28 w-full rounded-[22px] border border-dashed border-[#9EB4BD] bg-white text-sm font-semibold text-[#2F6077]">
+          <button type="button" onClick={addLearningSection} className="min-h-20 w-full rounded-[10px] border border-dashed border-[#9EB4BD] bg-white text-sm font-semibold text-[#2F6077]">
             Add checklist section
           </button>
         )) : null}
 
-        {showPublic ? <ProgramFaqEditor faqRows={faqRows} onChange={setFaqRows} /> : null}
+        {showPublic ? (faqVisible ? (
+          <ProgramFaqEditor faqRows={faqRows} onChange={setFaqRows} />
+        ) : (
+          <button
+            type="button"
+            onClick={() => {
+              setFaqVisible(true);
+              setFaqRows([{ id: crypto.randomUUID(), question: "", answer: "" }]);
+            }}
+            className="min-h-20 w-full rounded-[10px] border border-dashed border-[#9EB4BD] bg-white text-sm font-semibold text-[#2F6077]"
+          >
+            Add FAQ section
+          </button>
+        )) : null}
 
-        {showPublic ? <DetailSection title="Program Media">
-          <div className="divide-y divide-[#E6ECEF]">
-            {mediaRows.map((row) => {
-              const previewUrl = row.previewUrl || row.url;
-              return (
-                <div key={row.id} className="grid gap-2 py-3 first:pt-0">
-                  {previewUrl ? (
-                    <div className="relative h-32 overflow-hidden rounded-[14px] bg-[#E7EEF2]">
-                      <Image src={previewUrl} alt="" fill className="object-cover" sizes="320px" />
-                    </div>
-                  ) : null}
-                  <label className="inline-flex min-h-10 cursor-pointer items-center justify-center rounded-[8px] border border-[#D6DCE0] bg-white px-3 text-sm font-semibold text-[#26323A]">
-                    {previewUrl ? "Replace photo" : "Upload photo"}
-                    <input type="file" accept="image/*" className="hidden" onChange={(event) => onMediaFile(row.id, event.target.files?.[0] ?? null)} />
-                  </label>
-                  <input value={row.title} onChange={(event) => setMediaRows((current) => current.map((item) => item.id === row.id ? { ...item, title: event.target.value } : item))} placeholder="Optional title" className="h-10 rounded-[8px] border border-[#B9C3C8] px-3 text-sm" />
-                  <button type="button" onClick={() => setMediaRows((current) => current.filter((item) => item.id !== row.id))} className="justify-self-start text-sm font-semibold text-[#C83F31]">Remove</button>
+        {showPublic ? (contentSectionsVisible ? (
+          <EditorFieldSection
+            title="Class Content"
+            action={
+              <RowIconButton
+                tone="accent"
+                className="border border-[#A8D4E2] text-lg"
+                onClick={() => setContentSectionRows((current) => [...current, { id: crypto.randomUUID(), title: "", description: "", durationText: "" }])}
+                aria-label="Add content item"
+              >
+                +
+              </RowIconButton>
+            }
+          >
+            <div className="divide-y divide-[#E6ECEF]">
+              {contentSectionRows.map((row, index) => (
+                <div key={row.id} className="space-y-2 py-3 first:pt-0 last:pb-0">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-[#7B858C]">Item {index + 1}</p>
+                    <RowIconButton tone="danger" onClick={() => setContentSectionRows((current) => current.filter((item) => item.id !== row.id))} aria-label="Remove content item">
+                      <TrashIcon />
+                    </RowIconButton>
+                  </div>
+                  <input
+                    value={row.title}
+                    onChange={(event) => setContentSectionRows((current) => current.map((item) => item.id === row.id ? { ...item, title: event.target.value } : item))}
+                    placeholder="Title"
+                    className="h-11 w-full rounded-[8px] border border-[#B9C3C8] px-3 text-sm font-semibold outline-none focus:border-[#2F8FB3]"
+                  />
+                  <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_140px]">
+                    <input
+                      value={row.description}
+                      onChange={(event) => setContentSectionRows((current) => current.map((item) => item.id === row.id ? { ...item, description: event.target.value } : item))}
+                      placeholder="Description (optional)"
+                      className="h-10 w-full rounded-[8px] border border-[#B9C3C8] px-3 text-sm outline-none focus:border-[#2F8FB3]"
+                    />
+                    <input
+                      value={row.durationText}
+                      onChange={(event) => setContentSectionRows((current) => current.map((item) => item.id === row.id ? { ...item, durationText: event.target.value } : item))}
+                      placeholder="Duration (optional)"
+                      className="h-10 w-full rounded-[8px] border border-[#B9C3C8] px-3 text-sm outline-none focus:border-[#2F8FB3]"
+                    />
+                  </div>
                 </div>
-              );
-            })}
-            <button type="button" onClick={addMedia} className="min-h-10 rounded-[8px] border border-[#D6DCE0] px-4 text-sm font-semibold text-[#26323A]">
-              Add media
-            </button>
-          </div>
-        </DetailSection> : null}
+              ))}
+            </div>
+          </EditorFieldSection>
+        ) : (
+          <button
+            type="button"
+            onClick={() => {
+              setContentSectionsVisible(true);
+              setContentSectionRows([{ id: crypto.randomUUID(), title: "", description: "", durationText: "" }]);
+            }}
+            className="min-h-20 w-full rounded-[10px] border border-dashed border-[#9EB4BD] bg-white text-sm font-semibold text-[#2F6077]"
+          >
+            Add class content section
+          </button>
+        )) : null}
+
+        {showPublic ? (mediaVisible ? (
+          <EditorFieldSection title="Program Media">
+            <div className="divide-y divide-[#E6ECEF]">
+              {mediaRows.map((row) => {
+                const previewUrl = row.previewUrl || row.url;
+                return (
+                  <div key={row.id} className="grid gap-2 py-3 first:pt-0">
+                    {previewUrl ? (
+                      <div className="relative h-32 overflow-hidden rounded-[8px] bg-[#E7EEF2]">
+                        <Image src={previewUrl} alt="" fill className="object-cover" sizes="320px" />
+                      </div>
+                    ) : null}
+                    <label className="inline-flex min-h-10 cursor-pointer items-center justify-center rounded-[8px] border border-[#D6DCE0] bg-white px-3 text-sm font-semibold text-[#26323A]">
+                      {previewUrl ? "Replace photo" : "Upload photo"}
+                      <input type="file" accept="image/*" className="hidden" onChange={(event) => onMediaFile(row.id, event.target.files?.[0] ?? null)} />
+                    </label>
+                    <input value={row.title} onChange={(event) => setMediaRows((current) => current.map((item) => item.id === row.id ? { ...item, title: event.target.value } : item))} placeholder="Optional title" className="h-10 rounded-[8px] border border-[#B9C3C8] px-3 text-sm" />
+                    <button type="button" onClick={() => setMediaRows((current) => current.filter((item) => item.id !== row.id))} className="justify-self-start text-sm font-semibold text-[#C83F31]">Remove</button>
+                  </div>
+                );
+              })}
+              <button type="button" onClick={addMedia} className="min-h-10 rounded-[8px] border border-[#D6DCE0] px-4 text-sm font-semibold text-[#26323A]">
+                Add media
+              </button>
+            </div>
+          </EditorFieldSection>
+        ) : (
+          <button
+            type="button"
+            onClick={() => {
+              setMediaVisible(true);
+              addMedia();
+            }}
+            className="min-h-20 w-full rounded-[10px] border border-dashed border-[#9EB4BD] bg-white text-sm font-semibold text-[#2F6077]"
+          >
+            Add media section
+          </button>
+        )) : null}
 
         {showSchedule && programType === "event" && eventTimeVisible ? (
-          <DetailSection title="Event Time">
-            <div className="grid grid-cols-[minmax(0,1fr)_96px_96px] items-end gap-2">
+          <EditorFieldSection title="Event Time">
+            <div className="flex flex-wrap items-end gap-2">
               <span className="text-sm font-semibold text-[#52616A]">One-time event</span>
               <select
                 value={trackRows[0]?.sessions[0]?.start ?? "18:00"}
                 onChange={(event) => setTrackRows((current) => current.map((track, trackIndex) => trackIndex === 0 ? { ...track, sessions: [{ ...(track.sessions[0] ?? { day: "Monday", end: "20:00" }), start: event.target.value }] } : track))}
-                className="h-10 min-w-0 rounded-[8px] border border-[#B9C3C8] px-2 text-xs"
+                className="h-10 min-w-[104px] flex-1 rounded-[8px] border border-[#B9C3C8] px-2 text-sm"
               >
                 {scheduleTimeOptions.map((time) => <option key={time} value={time}>{formatClockLabel(time)}</option>)}
               </select>
+              <span className="text-xs font-semibold text-[#6B747B]">to</span>
               <select
                 value={trackRows[0]?.sessions[0]?.end ?? "20:00"}
                 onChange={(event) => setTrackRows((current) => current.map((track, trackIndex) => trackIndex === 0 ? { ...track, sessions: [{ ...(track.sessions[0] ?? { day: "Monday", start: "18:00" }), end: event.target.value }] } : track))}
-                className="h-10 min-w-0 rounded-[8px] border border-[#B9C3C8] px-2 text-xs"
+                className="h-10 min-w-[104px] flex-1 rounded-[8px] border border-[#B9C3C8] px-2 text-sm"
               >
                 {scheduleTimeOptions.map((time) => <option key={time} value={time}>{formatClockLabel(time)}</option>)}
               </select>
             </div>
-          </DetailSection>
+          </EditorFieldSection>
         ) : null}
 
         {showSchedule && programType === "recurring" && schedulePattern === "custom_dates" ? (
-          <DetailSection title="Sessions">
-            <div className="space-y-3">
+          <EditorFieldSection title="Sessions">
+            <div className="divide-y divide-[#E6ECEF]">
               {(trackRows[0]?.sessions ?? []).map((session, sessionIndex) => (
-                <div key={`session-${sessionIndex}`} className="grid grid-cols-[minmax(0,1fr)_88px_88px_32px] items-center gap-2">
+                <div key={`session-${sessionIndex}`} className="grid grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)_auto_minmax(0,1fr)_32px] items-center gap-2 py-2 first:pt-0">
                   <input
                     type="date"
                     value={session.date ?? ""}
                     onChange={(event) => setTrackRows((current) => current.map((track, trackIndex) => trackIndex === 0 ? { ...track, sessions: track.sessions.map((row, index) => index === sessionIndex ? { ...row, date: event.target.value } : row) } : track))}
-                    className="h-10 rounded-[8px] border border-[#B9C3C8] px-2 text-xs"
+                    className="h-10 min-w-0 rounded-[8px] border border-[#B9C3C8] px-2 text-sm"
                   />
                   <select
                     value={session.start}
                     onChange={(event) => setTrackRows((current) => current.map((track, trackIndex) => trackIndex === 0 ? { ...track, sessions: track.sessions.map((row, index) => index === sessionIndex ? { ...row, start: event.target.value } : row) } : track))}
-                    className="h-10 min-w-0 rounded-[8px] border border-[#B9C3C8] px-2 text-xs"
+                    className="h-10 min-w-0 rounded-[8px] border border-[#B9C3C8] px-2 text-sm"
                   >
                     {scheduleTimeOptions.map((time) => <option key={time} value={time}>{formatClockLabel(time)}</option>)}
                   </select>
+                  <span className="text-xs font-semibold text-[#6B747B]">to</span>
                   <select
                     value={session.end}
                     onChange={(event) => setTrackRows((current) => current.map((track, trackIndex) => trackIndex === 0 ? { ...track, sessions: track.sessions.map((row, index) => index === sessionIndex ? { ...row, end: event.target.value } : row) } : track))}
-                    className="h-10 min-w-0 rounded-[8px] border border-[#B9C3C8] px-2 text-xs"
+                    className="h-10 min-w-0 rounded-[8px] border border-[#B9C3C8] px-2 text-sm"
                   >
                     {scheduleTimeOptions.map((time) => <option key={time} value={time}>{formatClockLabel(time)}</option>)}
                   </select>
                   {trackRows[0]?.sessions.length > 1 ? (
-                    <button type="button" onClick={() => setTrackRows((current) => current.map((track, trackIndex) => trackIndex === 0 ? { ...track, sessions: track.sessions.filter((_row, index) => index !== sessionIndex) } : track))} className="flex h-8 w-8 items-center justify-center rounded-[7px] text-[#C83F31] hover:bg-[#FDEDEA]" aria-label="Remove session">
+                    <RowIconButton tone="danger" onClick={() => setTrackRows((current) => current.map((track, trackIndex) => trackIndex === 0 ? { ...track, sessions: track.sessions.filter((_row, index) => index !== sessionIndex) } : track))} aria-label="Remove session">
                       <TrashIcon />
-                    </button>
+                    </RowIconButton>
                   ) : <span aria-hidden />}
                 </div>
               ))}
-              <button type="button" onClick={() => setTrackRows((current) => current.map((track, trackIndex) => trackIndex === 0 ? { ...track, sessions: [...track.sessions, { day: "Monday", date: "", start: "18:00", end: "20:00" }] } : track))} className="min-h-9 rounded-[8px] border border-[#D6DCE0] px-3 text-sm font-semibold text-[#26323A]">
+              <button type="button" onClick={() => setTrackRows((current) => current.map((track, trackIndex) => trackIndex === 0 ? { ...track, sessions: [...track.sessions, { day: "Monday", date: "", start: "18:00", end: "20:00" }] } : track))} className="mt-3 min-h-9 rounded-[8px] border border-[#D6DCE0] px-3 text-sm font-semibold text-[#26323A]">
                 Add session
               </button>
             </div>
-          </DetailSection>
+          </EditorFieldSection>
         ) : null}
 
-        {showSchedule && programType === "recurring" && schedulePattern === "weekly" ? <DetailSection title="Schedule Tracks">
-          <div className="divide-y divide-[#E6ECEF]">
-            <div className="space-y-3 pb-4">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">Sessions</p>
-                  <p className="text-sm text-[#52616A]">Create each real class meeting once, then choose which tracks include it.</p>
-                </div>
-                <button type="button" onClick={addSharedWeeklySession} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[#A8D4E2] text-xl font-light leading-none text-[#2F8FB3] hover:bg-[#E9F4F8]" aria-label="Add weekly session">
-                  +
-                </button>
+        {showSchedule && programType === "recurring" && schedulePattern === "weekly" ? (
+          <EditorFieldSection
+            title="Weekly Sessions"
+            action={
+              <RowIconButton tone="accent" className="border border-[#A8D4E2] text-lg" onClick={addSharedWeeklySession} aria-label="Add weekly session">
+                +
+              </RowIconButton>
+            }
+          >
+            <p className="-mt-1 mb-3 text-xs leading-5 text-[#6B747B]">Create each real class meeting once, then choose which tracks include it.</p>
+            <div className="overflow-hidden rounded-xl border border-[#E1E8EC] bg-[#FAFCFC]">
+              <div className="grid grid-cols-[28px_1fr_auto] gap-2 border-b border-[#E1E8EC] bg-[#F3F7F8] px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-[#7B858C]">
+                <span />
+                <span>Day &amp; Time</span>
+                <span />
               </div>
-              <div className="space-y-2">
-                {weeklySessionLibrary.map((session) => (
-                  <div key={scheduleRowKey(session)} className="rounded-[14px] border border-[#E0E8EC] bg-[#F8FAFA] p-3">
-                    <div className="grid grid-cols-[minmax(0,1fr)_32px] items-center gap-2">
+              <div className="divide-y divide-[#E6ECEF]">
+                {weeklySessionLibrary.map((session, sessionIndex) => (
+                  <div key={scheduleRowKey(session)} className="space-y-2 p-2.5">
+                    <div className="flex items-center gap-2">
+                      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#17624F] text-[10px] font-bold tabular-nums text-white">
+                        {String(sessionIndex + 1).padStart(2, "0")}
+                      </span>
                       <select
                         value={session.day}
                         onChange={(event) => updateSharedWeeklySession(session, { ...session, day: event.target.value as (typeof scheduleDayOptions)[number] })}
-                        className="h-10 min-w-0 rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-semibold"
+                        className="h-10 flex-1 rounded-lg border border-[#CBE3EA] bg-white px-2 text-xs font-bold uppercase tracking-wide text-[#17624F] outline-none focus:border-[#2F8FB3] sm:max-w-[160px]"
                       >
                         {scheduleDayOptions.map((day) => <option key={day} value={day}>{day}</option>)}
                       </select>
                       {weeklySessionLibrary.length > 1 ? (
-                        <button type="button" onClick={() => removeSharedWeeklySession(session)} className="flex h-8 w-8 items-center justify-center rounded-[7px] text-[#C83F31] hover:bg-[#FDEDEA]" aria-label="Remove weekly session">
+                        <RowIconButton tone="danger" onClick={() => removeSharedWeeklySession(session)} aria-label="Remove weekly session">
                           <TrashIcon />
-                        </button>
-                      ) : <span aria-hidden />}
+                        </RowIconButton>
+                      ) : <span className="h-8 w-8 shrink-0" aria-hidden />}
                     </div>
-                    <div className="mt-2 grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2">
+                    <div className="flex items-center gap-2 pl-9">
                       <select
                         value={session.start}
                         onChange={(event) => updateSharedWeeklySession(session, { ...session, start: event.target.value })}
-                        className="h-10 min-w-0 rounded-[8px] border border-[#B9C3C8] bg-white px-2 text-xs font-semibold"
+                        className="h-10 min-w-0 flex-1 rounded-lg border border-[#B9C3C8] bg-white px-2 text-sm font-semibold tabular-nums outline-none focus:border-[#2F8FB3]"
                       >
                         {scheduleTimeOptions.map((time) => <option key={time} value={time}>{formatClockLabel(time)}</option>)}
                       </select>
-                      <span className="text-xs font-semibold text-[#6B747B]">to</span>
+                      <span className="shrink-0 text-xs font-semibold text-[#6B747B]">to</span>
                       <select
                         value={session.end}
                         onChange={(event) => updateSharedWeeklySession(session, { ...session, end: event.target.value })}
-                        className="h-10 min-w-0 rounded-[8px] border border-[#B9C3C8] bg-white px-2 text-xs font-semibold"
+                        className="h-10 min-w-0 flex-1 rounded-lg border border-[#B9C3C8] bg-white px-2 text-sm font-semibold tabular-nums outline-none focus:border-[#2F8FB3]"
                       >
                         {scheduleTimeOptions.map((time) => <option key={time} value={time}>{formatClockLabel(time)}</option>)}
                       </select>
@@ -8165,64 +8866,91 @@ function ProgramEditorFields({
                 ))}
               </div>
             </div>
-            {trackRows.map((track, trackIndex) => (
-              <div key={track.id} className="my-4 space-y-4 rounded-[18px] border border-[#DCE7EB] bg-[#FAFCFC] p-4 first:mt-0">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#6B747B]">Track {String(trackIndex + 1).padStart(2, "0")}</p>
-                    <p className="text-sm font-semibold text-[#26323A]">{track.name || "Untitled track"}</p>
-                  </div>
-                  {trackRows.length > 1 ? (
-                    <button type="button" onClick={() => setTrackRows((current) => current.filter((item) => item.id !== track.id))} className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-[#C83F31] shadow-sm" aria-label="Remove track">
-                      <TrashIcon />
-                    </button>
-                  ) : null}
-                </div>
-                <div className="grid grid-cols-[minmax(0,1fr)_36px] items-end gap-2">
-                  <EditBox label="Track name" required value={track.name} onChange={(value) => setTrackRows((current) => current.map((item) => item.id === track.id ? { ...item, name: value } : item))} />
-                  <span aria-hidden />
-                </div>
-                <label className="block">
-                  <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Capacity</span>
-                  <span className="flex items-center gap-2">
-                    <input
-                      value={track.capacity ?? ""}
-                      onChange={(event) => setTrackRows((current) => current.map((item) => item.id === track.id ? { ...item, capacity: event.target.value.replace(/\D/g, "") } : item))}
-                      className="h-10 w-24 rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]"
-                    />
-                    <span className="text-sm font-semibold text-[#52616A]">students</span>
-                  </span>
-                </label>
-                <div className="space-y-2">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">Included Sessions</p>
-                  <div className="grid gap-2">
-                    {weeklySessionLibrary.map((session) => {
-                      const checked = track.sessions.some((row) => scheduleRowKey(row) === scheduleRowKey(session));
-                      return (
-                        <label key={`${track.id}-${scheduleRowKey(session)}`} className="flex min-h-11 items-center justify-between gap-3 rounded-[12px] border border-[#E2EAEE] bg-white px-3 text-sm font-semibold text-[#26323A]">
-                          <span>{formatDayAbbreviation(session.day)} • {formatScheduleRange(session.start, session.end)}</span>
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={(event) => toggleTrackWeeklySession(track.id, session, event.target.checked)}
-                            className="h-5 w-5"
-                          />
-                        </label>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
-            ))}
-            <button type="button" onClick={addTrack} className="mt-3 min-h-10 rounded-[8px] border border-[#D6DCE0] px-4 text-sm font-semibold text-[#26323A]">
-              Add track
-            </button>
-          </div>
-        </DetailSection> : null}
-      </div>
+          </EditorFieldSection>
+        ) : null}
 
-      <div className="space-y-5">
-        {showBasics ? <DetailSection title="Target Audience">
+        {showSchedule && programType === "recurring" && schedulePattern === "weekly" ? (
+          <EditorFieldSection
+            title="Tracks"
+            action={
+              <RowIconButton tone="accent" className="border border-[#A8D4E2] text-lg" onClick={addTrack} aria-label="Add track">
+                +
+              </RowIconButton>
+            }
+          >
+            <div className="space-y-3">
+              {trackRows.map((track, trackIndex) => (
+                <div key={track.id} className="rounded-xl border border-[#DCE7EB] bg-[#FAFCFC] p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#26323A] text-[10px] font-bold tabular-nums text-white">
+                      {String(trackIndex + 1).padStart(2, "0")}
+                    </span>
+                    {trackRows.length > 1 ? (
+                      <RowIconButton tone="danger" onClick={() => setTrackRows((current) => current.filter((item) => item.id !== track.id))} aria-label="Remove track">
+                        <TrashIcon />
+                      </RowIconButton>
+                    ) : null}
+                  </div>
+                  <div className="mt-3 grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
+                    <EditBox label="Track name" required value={track.name} onChange={(value) => setTrackRows((current) => current.map((item) => item.id === track.id ? { ...item, name: value } : item))} />
+                    <label className="block">
+                      <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Capacity</span>
+                      <div className="flex items-center gap-2">
+                        <div className="flex h-10 items-center overflow-hidden rounded-lg border border-[#B9C3C8] bg-white">
+                          <button
+                            type="button"
+                            onClick={() => setTrackRows((current) => current.map((item) => item.id === track.id ? { ...item, capacity: String(Math.max(0, (Number(item.capacity) || 0) - 1)) } : item))}
+                            className="flex h-full w-9 shrink-0 items-center justify-center text-base font-semibold text-[#26323A] hover:bg-[#F1F4F5]"
+                            aria-label="Decrease capacity"
+                          >
+                            −
+                          </button>
+                          <input
+                            value={track.capacity ?? ""}
+                            onChange={(event) => setTrackRows((current) => current.map((item) => item.id === track.id ? { ...item, capacity: event.target.value.replace(/\D/g, "") } : item))}
+                            className="h-full w-14 shrink-0 border-x border-[#EEF1F2] bg-transparent text-center text-sm font-semibold tabular-nums text-[#26323A] outline-none"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setTrackRows((current) => current.map((item) => item.id === track.id ? { ...item, capacity: String((Number(item.capacity) || 0) + 1) } : item))}
+                            className="flex h-full w-9 shrink-0 items-center justify-center text-base font-semibold text-[#26323A] hover:bg-[#F1F4F5]"
+                            aria-label="Increase capacity"
+                          >
+                            +
+                          </button>
+                        </div>
+                        <span className="shrink-0 text-sm font-semibold text-[#52616A]">students</span>
+                      </div>
+                    </label>
+                  </div>
+                  <div className="mt-3">
+                    <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Sessions in this track</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {weeklySessionLibrary.map((session, sessionIndex) => {
+                        const checked = track.sessions.some((row) => scheduleRowKey(row) === scheduleRowKey(session));
+                        return (
+                          <button
+                            key={`${track.id}-${scheduleRowKey(session)}`}
+                            type="button"
+                            onClick={() => toggleTrackWeeklySession(track.id, session, !checked)}
+                            className={cn(
+                              "rounded-full border px-3 py-1.5 text-xs font-semibold tabular-nums transition-colors",
+                              checked ? "border-[#17624F] bg-[#17624F] text-white" : "border-[#D6E1E6] bg-white text-[#52616A] hover:border-[#9EB4BD]",
+                            )}
+                          >
+                            {String(sessionIndex + 1).padStart(2, "0")} · {formatDayAbbreviation(session.day)} {formatScheduleRange(session.start, session.end)}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </EditorFieldSection>
+        ) : null}
+
+        {showBasics ? <EditorFieldSection title="Target Audience">
           <label className="flex items-center gap-2 text-sm font-medium text-[#26323A]">
             <input type="checkbox" checked={allAges} onChange={(event) => setAllAges(event.target.checked)} />
             All ages
@@ -8241,9 +8969,9 @@ function ProgramEditorFields({
               <option value="sisters">Sisters only</option>
             </select>
           </label>
-        </DetailSection> : null}
+        </EditorFieldSection> : null}
 
-        {showPricing && paymentKind === "tareeqah" ? <DetailSection title="Price">
+        {showPricing && paymentKind === "tareeqah" ? <EditorFieldSection title="Price">
             {programType === "event" ? (
               <div>
                 <EditBox label="One-time price amount" required value={annualPrice} onChange={setAnnualPrice} />
@@ -8284,20 +9012,26 @@ function ProgramEditorFields({
                   {formatMonthlyCycle(price, durationMonthsForPricing) ? <p className="mt-1 text-xs leading-5 text-[#6B747B]">{formatMonthlyCycle(price, durationMonthsForPricing)}</p> : null}
                 </div>
               ) : null}
-              <label className="flex items-center gap-2 text-sm font-medium text-[#26323A]">
-                <input type="checkbox" checked={offersAnnualPayment} onChange={(event) => setOffersAnnualPayment(event.target.checked)} />
-                Offer one-time payment
-              </label>
-              {offersAnnualPayment && !perTrackPricingEnabled ? (
-                <div className="space-y-2">
-                  <EditBox label="One-time annual price" required value={annualPrice} onChange={setAnnualPrice} />
-                  {formatAnnualSavings(price, annualPrice, durationMonthsForPricing) ? <p className="inline-flex rounded-full bg-[#E9F4F8] px-3 py-1 text-xs font-semibold text-[#2F6077]">{formatAnnualSavings(price, annualPrice, durationMonthsForPricing)}</p> : null}
-                </div>
-              ) : null}
+              {!isOngoingDuration ? (
+                <>
+                  <label className="flex items-center gap-2 text-sm font-medium text-[#26323A]">
+                    <input type="checkbox" checked={offersAnnualPayment} onChange={(event) => setOffersAnnualPayment(event.target.checked)} />
+                    Offer Pay in Full
+                  </label>
+                  {offersAnnualPayment && !perTrackPricingEnabled ? (
+                    <div className="space-y-2">
+                      <EditBox label="Pay in Full price" required value={annualPrice} onChange={setAnnualPrice} />
+                      {formatAnnualSavings(price, annualPrice, durationMonthsForPricing) ? <p className="inline-flex rounded-full bg-[#E9F4F8] px-3 py-1 text-xs font-semibold text-[#2F6077]">{formatAnnualSavings(price, annualPrice, durationMonthsForPricing)}</p> : null}
+                    </div>
+                  ) : null}
+                </>
+              ) : (
+                <p className="text-xs leading-5 text-[#6B747B]">Ongoing programs can only offer monthly subscriptions — Pay in Full isn&apos;t available while &quot;Ongoing until manually ended&quot; is selected.</p>
+              )}
               {perTrackPricingEnabled ? (
-                <div className="space-y-3">
+                <div className="divide-y divide-[#E6ECEF] rounded-[8px] border border-[#E1E8EC]">
                   {trackRows.map((track) => (
-                    <div key={track.id} className="rounded-[16px] border border-[#E1E8EC] bg-white p-3">
+                    <div key={track.id} className="p-3">
                       <p className="truncate text-sm font-semibold text-[#26323A]">{track.name || "Untitled track"}</p>
                       <div className="mt-3 grid gap-3 sm:grid-cols-2">
                         {offersMonthlyPayment ? (
@@ -8311,10 +9045,10 @@ function ProgramEditorFields({
                             {formatMonthlyCycle(track.priceMonthly ?? "", durationMonthsForPricing) ? <p className="mt-1 text-xs leading-5 text-[#6B747B]">{formatMonthlyCycle(track.priceMonthly ?? "", durationMonthsForPricing)}</p> : null}
                           </div>
                         ) : null}
-                        {offersAnnualPayment ? (
+                        {offersAnnualPayment && !isOngoingDuration ? (
                           <div className="space-y-2">
                             <EditBox
-                              label="One-time annual price"
+                              label="Pay in Full price"
                               required
                               value={track.priceAnnual ?? ""}
                               onChange={(value) => setTrackRows((current) => current.map((item) => item.id === track.id ? { ...item, priceAnnual: value, pricingOverrideEnabled: true } : item))}
@@ -8329,11 +9063,11 @@ function ProgramEditorFields({
               ) : null}
             </div>
             )}
-        </DetailSection> : null}
+        </EditorFieldSection> : null}
 
-        {showPricing ? <DetailSection title="Cover Price Tag">
+        {showPricing ? <EditorFieldSection title="Cover Price Tag">
           <div className="space-y-3">
-            <label className="flex items-start gap-3 rounded-[14px] border border-[#E1E8EC] bg-[#FAFCFC] p-3 text-sm font-semibold text-[#26323A]">
+            <label className="flex items-start gap-3 rounded-[8px] border border-[#E1E8EC] bg-[#FAFCFC] p-3 text-sm font-semibold text-[#26323A]">
               <input
                 type="checkbox"
                 checked={coverPriceLabelEnabled}
@@ -8349,17 +9083,35 @@ function ProgramEditorFields({
               <EditBox label="Price tag label" value={coverPriceLabel} onChange={(value) => setCoverPriceLabel?.(value)} />
             ) : null}
           </div>
-        </DetailSection> : null}
+        </EditorFieldSection> : null}
 
-        {showPublic ? <DetailSection title="Instructor Display">
+        {showPublic ? <EditorFieldSection title="Instructor Display">
           <div className="space-y-3">
             <EditBox label="Display name" value={instructorDisplayName} onChange={setInstructorDisplayName} />
             <EditBox label="Credentials" value={instructorCredentials} onChange={setInstructorCredentials} />
-            <EditBox label="Contact phone" value={instructorContactPhone} onChange={setInstructorContactPhone} />
-            {setContactEmail ? <EditBox label="Contact email" value={contactEmail} onChange={setContactEmail} /> : null}
+            {setContactName ? <EditBox label="Contact name" required value={contactName} onChange={setContactName} /> : null}
+            <div>
+              <EditBox label="Contact phone" required={!contactPhoneOmitted} disabled={contactPhoneOmitted} value={contactPhoneOmitted ? "" : instructorContactPhone} onChange={setInstructorContactPhone} />
+              {setContactPhoneOmitted ? (
+                <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs font-semibold text-[#52616A]">
+                  <input type="checkbox" checked={contactPhoneOmitted} onChange={(event) => setContactPhoneOmitted(event.target.checked)} />
+                  Do not include phone number
+                </label>
+              ) : null}
+            </div>
+            {setContactEmail ? (
+              <div>
+                <EditBox label="Contact email" required={!contactEmailOmitted} disabled={contactEmailOmitted} value={contactEmailOmitted ? "" : contactEmail} onChange={setContactEmail} />
+                {setContactEmailOmitted ? (
+                  <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs font-semibold text-[#52616A]">
+                    <input type="checkbox" checked={contactEmailOmitted} onChange={(event) => setContactEmailOmitted(event.target.checked)} />
+                    Do not include email
+                  </label>
+                ) : null}
+              </div>
+            ) : null}
           </div>
-        </DetailSection> : null}
-      </div>
+        </EditorFieldSection> : null}
     </div>
   );
 }
@@ -9171,50 +9923,21 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
       return;
     }
 
-    const approvalPaymentType = options.paymentType ?? (request.payment_type === "annual" ? "annual" : "monthly");
-    const approvalPrice = approvalPaymentType === "annual" ? options.priceAnnualCents : options.priceMonthlyCents;
-    if (status === "approved" && program.is_paid && !options.paymentBypassed && (approvalPrice ?? 0) < 50) {
-      setError(`Paid approvals need a ${approvalPaymentType === "annual" ? "one-time annual" : "monthly"} price of at least $0.50, or choose bypass payment.`);
-      return;
-    }
-
     setReviewBusy(true);
     setError(null);
-    const supabase = createSupabaseBrowserClient();
-    const now = new Date().toISOString();
-    const { error: reviewError } = await supabase
-      .from("enrollment_requests")
-      .update({
-        status,
-        reviewed_by: currentUserId,
-        reviewed_at: now,
-        review_note: options.note?.trim() || null,
-        decision_note: options.note?.trim() || null,
-        payment_type: status === "approved" ? approvalPaymentType : request.payment_type,
-        approved_price_monthly_cents: status === "approved" ? (options.paymentBypassed ? 0 : approvalPaymentType === "monthly" ? options.priceMonthlyCents ?? program.price_monthly_cents ?? null : null) : null,
-        approved_price_annual_cents: status === "approved" ? (options.paymentBypassed ? 0 : approvalPaymentType === "annual" ? options.priceAnnualCents ?? program.price_annual_cents ?? null : null) : null,
-        payment_bypassed: status === "approved" ? Boolean(options.paymentBypassed) : false,
-        admission_completed_at: status === "approved" && (!program.is_paid || options.paymentBypassed) ? now : null,
-        teacher_dismissed_at: null,
-      })
-      .eq("id", request.id);
+    const endpoint = status === "approved" ? "approve" : "reject";
+    const result = await callApplicationAction(request.program_id, request.id, endpoint, {
+      paymentType: options.paymentType,
+      priceMonthlyCents: options.priceMonthlyCents,
+      priceAnnualCents: options.priceAnnualCents,
+      paymentBypassed: options.paymentBypassed,
+      note: options.note,
+    });
 
-    if (reviewError) {
+    if (!result.ok) {
       setReviewBusy(false);
-      setError(reviewError.message);
+      setError(result.error);
       return;
-    }
-
-    if (status === "approved" && (!program.is_paid || options.paymentBypassed)) {
-      await supabase.from("enrollments").upsert(
-        {
-          program_id: request.program_id,
-          student_profile_id: request.student_profile_id,
-          program_track_id: request.program_track_id,
-          status: "active",
-        },
-        { onConflict: "program_id,student_profile_id" },
-      );
     }
 
     queueEnrollmentRequestReviewedEmail(request.id);
@@ -9694,10 +10417,47 @@ type FinanceEnrollmentRow = {
   subscription: ProgramSubscription | null;
 };
 
-type FinanceAction = "waive" | "change_price" | "end_subscription" | "student_info" | "payment_history";
+type FinanceAction = "waive" | "change_price" | "end_subscription";
+type FinanceRowMenuAction = FinanceAction | "view_details" | "add_note";
+
+type FinanceChargeRow = {
+  id: string;
+  amountCents: number;
+  currency: string;
+  status: string;
+  refunded: boolean;
+  createdAt: string;
+  receiptUrl: string | null;
+  description: string | null;
+};
+
+type FinanceActionEndpoint = "waive" | "change-price" | "end-subscription" | "payment-history";
+
+async function callFinanceAction<T = Record<string, unknown>>(
+  programId: string,
+  endpoint: FinanceActionEndpoint,
+  payload: Record<string, unknown>,
+): Promise<{ ok: true; data: T } | { ok: false; error: string }> {
+  const supabase = createSupabaseBrowserClient();
+  const { data: sessionData } = await supabase.auth.getSession();
+  const token = sessionData.session?.access_token;
+  if (!token) {
+    return { ok: false, error: "Please sign in again to continue." };
+  }
+
+  const response = await fetch(`/api/programs/${programId}/finance/${endpoint}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  });
+  const result = (await response.json().catch(() => ({}))) as T & { error?: string };
+  if (!response.ok) {
+    return { ok: false, error: result.error ?? "Something went wrong." };
+  }
+  return { ok: true, data: result };
+}
 
 export function ProgramFinancesData({ slug, programId, mode = "teacher" }: { slug: string; programId: string; mode?: "teacher" | "admin" }) {
-  const router = useRouter();
   const [program, setProgram] = useState<Program | null>(null);
   const [rows, setRows] = useState<FinanceEnrollmentRow[]>([]);
   const [auditEvents, setAuditEvents] = useState<ProgramFinanceAuditEvent[]>([]);
@@ -9706,7 +10466,11 @@ export function ProgramFinancesData({ slug, programId, mode = "teacher" }: { slu
   const [paymentFilter, setPaymentFilter] = useState("all");
   const [typeFilter, setTypeFilter] = useState("all");
   const [genderFilter, setGenderFilter] = useState("all");
+  const [payStatusFilter, setPayStatusFilter] = useState("all");
+  const [subStatusFilter, setSubStatusFilter] = useState("all");
   const [actionTarget, setActionTarget] = useState<{ row: FinanceEnrollmentRow; action: FinanceAction } | null>(null);
+  const [detailsTarget, setDetailsTarget] = useState<FinanceEnrollmentRow | null>(null);
+  const [noteTarget, setNoteTarget] = useState<FinanceEnrollmentRow | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -9830,6 +10594,8 @@ export function ProgramFinancesData({ slug, programId, mode = "teacher" }: { slu
       const payment = financePaymentType(row, program);
       const studentType = financeStudentType(row);
       const gender = normalizeGender(row.student?.gender ?? null);
+      const payStatus = financePaymentStatus(row, program);
+      const subStatus = financeSubscriptionStatus(row);
       if (statusFilter !== "all" && status.toLowerCase() !== statusFilter) {
         return false;
       }
@@ -9842,16 +10608,22 @@ export function ProgramFinancesData({ slug, programId, mode = "teacher" }: { slu
       if (genderFilter !== "all" && gender !== genderFilter) {
         return false;
       }
+      if (payStatusFilter !== "all" && payStatus.toLowerCase() !== payStatusFilter) {
+        return false;
+      }
+      if (subStatusFilter !== "all" && subStatus.toLowerCase() !== subStatusFilter) {
+        return false;
+      }
       if (!query) {
         return true;
       }
-      return [row.student?.full_name, row.parent?.full_name, row.student?.email, row.parent?.email, payment, status]
+      return [row.student?.full_name, row.parent?.full_name, row.student?.email, row.parent?.email, payment, status, payStatus, subStatus]
         .filter(Boolean)
         .join(" ")
         .toLowerCase()
         .includes(query);
     });
-  }, [genderFilter, paymentFilter, program, rows, search, statusFilter, typeFilter]);
+  }, [genderFilter, payStatusFilter, paymentFilter, program, rows, search, statusFilter, subStatusFilter, typeFilter]);
 
   const activeRows = rows.filter((row) => financeStatus(row) === "Active");
   const monthlySumCents = activeRows.reduce((sum, row) => sum + financeMonthlyAmountCents(row, program), 0);
@@ -9888,13 +10660,20 @@ export function ProgramFinancesData({ slug, programId, mode = "teacher" }: { slu
         </div>
       </div>
 
-      <div className="grid gap-3 md:grid-cols-[minmax(220px,1fr)_auto_auto_auto_auto]">
-        <label className="flex min-h-11 items-center gap-2 rounded-[14px] border border-[#D6DCE0] bg-[#F8FAFB] px-3 text-[#6B747B]">
+      <div className="flex flex-wrap gap-3">
+        <label className="flex min-h-11 min-w-[220px] flex-1 items-center gap-2 rounded-[14px] border border-[#D6DCE0] bg-[#F8FAFB] px-3 text-[#6B747B]">
           <SearchIcon />
           <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search students, parents, status" className="min-w-0 flex-1 bg-transparent text-sm font-semibold text-[#26323A] outline-none placeholder:text-[#9AA4AA]" />
         </label>
-        <FinanceSelect label="Status" value={statusFilter} options={["active", "kicked", "withdrawn"]} onChange={setStatusFilter} />
-        <FinanceSelect label="Payment" value={paymentFilter} options={["waived", "monthly", "annual"]} onChange={setPaymentFilter} />
+        <FinanceSelect label="Enrollment" value={statusFilter} options={["active", "kicked", "withdrawn"]} onChange={setStatusFilter} />
+        <FinanceSelect
+          label="Payment status"
+          value={payStatusFilter}
+          options={["paid", "awaiting payment", "no payment required", "waived", "past due", "payment failed", "checkout sent", "needs billing decision"]}
+          onChange={setPayStatusFilter}
+        />
+        <FinanceSelect label="Subscription" value={subStatusFilter} options={["n/a", "active", "paused", "ending", "past due", "ended"]} labels={{ "n/a": "N/A" }} onChange={setSubStatusFilter} />
+        <FinanceSelect label="Payment type" value={paymentFilter} options={["waived", "monthly", "pay in full"]} labels={{ "pay in full": "Pay in Full" }} onChange={setPaymentFilter} />
         <FinanceSelect label="Type" value={typeFilter} options={["adult", "child"]} labels={{ adult: "Adult student", child: "Child student" }} onChange={setTypeFilter} />
         <FinanceSelect label="Gender" value={genderFilter} options={["male", "female"]} labels={{ male: "Brothers", female: "Sisters" }} onChange={setGenderFilter} />
       </div>
@@ -9908,7 +10687,7 @@ export function ProgramFinancesData({ slug, programId, mode = "teacher" }: { slu
           <table className="min-w-[1340px] w-full text-left text-sm">
             <thead className="bg-[#F7FAFB] text-[11px] font-semibold uppercase tracking-wide text-[#7B858C]">
               <tr>
-                {["Student", "Parent", "Payment Type", "Price", "Enrollment Status", "Subscription Status", "Last Payment", "Times Paid", "Next Billing", "Date Joined", "Approved By", "Actions"].map((column) => (
+                {["Student", "Parent", "Payment Type", "Price", "Enrollment Status", "Payment Status", "Subscription Status", "Current Period", "Next Billing / Ends On", "Date Joined", "Approved By", "Actions"].map((column) => (
                   <th key={column} className="px-4 py-3">{column}</th>
                 ))}
               </tr>
@@ -9927,27 +10706,34 @@ export function ProgramFinancesData({ slug, programId, mode = "teacher" }: { slu
                   <td className="px-4 py-4 font-semibold text-[#52616A]">{financePaymentType(row, program)}</td>
                   <td className="px-4 py-4 font-semibold text-[#26323A]">{financePrice(row, program)}</td>
                   <td className="px-4 py-4">
-                    <span className={cn("rounded-full px-2.5 py-1 text-xs font-semibold", financeStatus(row).toLowerCase() === "active" ? "bg-[#EAF8EF] text-[#258A43]" : "bg-[#F3F6F8] text-[#52616A]")}>
+                    <span className={cn("rounded-full px-2.5 py-1 text-xs font-semibold", programStatusBadgeToneClass(financeBadgeTone(financeStatus(row))))}>
                       {financeStatus(row)}
                     </span>
                   </td>
                   <td className="px-4 py-4">
-                    <span className={cn("rounded-full px-2.5 py-1 text-xs font-semibold", financeSubscriptionStatus(row).toLowerCase() === "active" ? "bg-[#EAF8EF] text-[#258A43]" : "bg-[#F3F6F8] text-[#52616A]")}>
+                    <span className={cn("rounded-full px-2.5 py-1 text-xs font-semibold", programStatusBadgeToneClass(financeBadgeTone(financePaymentStatus(row, program))))}>
+                      {financePaymentStatus(row, program)}
+                    </span>
+                  </td>
+                  <td className="px-4 py-4">
+                    <span className={cn("rounded-full px-2.5 py-1 text-xs font-semibold", programStatusBadgeToneClass(financeBadgeTone(financeSubscriptionStatus(row))))}>
                       {financeSubscriptionStatus(row)}
                     </span>
                   </td>
-                  <td className="px-4 py-4 text-[#52616A]">{formatFinanceDate(row.subscription?.current_period_start)}</td>
-                  <td className="px-4 py-4 font-semibold text-[#26323A]">{financeTimesPaid(row)}</td>
-                  <td className="px-4 py-4 text-[#52616A]">{formatFinanceDate(row.subscription?.current_period_end)}</td>
+                  <td className="px-4 py-4 text-[#52616A]">{financeCurrentPeriodLabel(row)}</td>
+                  <td className="px-4 py-4 text-[#52616A]">{financeNextBillingLabel(row)}</td>
                   <td className="px-4 py-4 text-[#52616A]">{formatFinanceDate(row.enrollment.created_at)}</td>
                   <td className="px-4 py-4 text-[#52616A]">{row.approver?.full_name ?? row.approver?.email ?? "---"}</td>
                   <td className="px-4 py-4">
                     <FinanceRowActionMenu
                       row={row}
                       onSelect={(action) => {
-                        if (action === "student_info") {
-                          const basePath = mode === "admin" ? `/m/${slug}/admin/programs` : `/m/${slug}/teacher/classes`;
-                          router.push(`${basePath}/${programId}/students?from=finances&studentId=${row.enrollment.student_profile_id}`);
+                        if (action === "view_details") {
+                          setDetailsTarget(row);
+                          return;
+                        }
+                        if (action === "add_note") {
+                          setNoteTarget(row);
                           return;
                         }
                         setActionTarget({ row, action });
@@ -9975,7 +10761,12 @@ export function ProgramFinancesData({ slug, programId, mode = "teacher" }: { slu
           {auditEvents.length
             ? auditEvents.map((event) => (
                 <div key={event.id} className="py-3">
-                  <p className="text-sm font-semibold text-[#26323A]">{event.summary}</p>
+                  <div className="flex items-center gap-2">
+                    {event.event_type === "manual_note" ? (
+                      <span className={cn("rounded-full px-2 py-0.5 text-[10px] font-semibold", programStatusBadgeToneClass("neutral"))}>Note</span>
+                    ) : null}
+                    <p className="text-sm font-semibold text-[#26323A]">{event.summary}</p>
+                  </div>
                   <p className="mt-0.5 text-xs text-[#7B858C]">{formatFinanceDate(event.created_at)} - {event.event_type.replace(/_/g, " ")}</p>
                 </div>
               ))
@@ -9988,23 +10779,50 @@ export function ProgramFinancesData({ slug, programId, mode = "teacher" }: { slu
         </div>
       </section>
 
-      {actionTarget ? <FinanceActionModal row={actionTarget.row} action={actionTarget.action} program={program} onClose={() => setActionTarget(null)} /> : null}
+      {actionTarget ? (
+        <FinanceActionModal
+          row={actionTarget.row}
+          action={actionTarget.action}
+          program={program}
+          onClose={() => setActionTarget(null)}
+          onSuccess={() => void loadFinanceRows()}
+        />
+      ) : null}
+
+      {detailsTarget ? (
+        <FinanceDetailsDrawer
+          row={detailsTarget}
+          program={program}
+          slug={slug}
+          mode={mode}
+          onClose={() => setDetailsTarget(null)}
+        />
+      ) : null}
+
+      {noteTarget ? (
+        <FinanceAddNoteModal
+          row={noteTarget}
+          program={program}
+          onClose={() => setNoteTarget(null)}
+          onSuccess={() => void loadFinanceRows()}
+        />
+      ) : null}
     </section>
   );
 }
 
-function FinanceRowActionMenu({ row, onSelect }: { row: FinanceEnrollmentRow; onSelect: (action: FinanceAction) => void }) {
+function FinanceRowActionMenu({ row, onSelect }: { row: FinanceEnrollmentRow; onSelect: (action: FinanceRowMenuAction) => void }) {
   const [open, setOpen] = useState(false);
   const [menuPosition, setMenuPosition] = useState<{ top: number; left: number } | null>(null);
   const buttonRef = useRef<HTMLButtonElement | null>(null);
   const studentName = row.student?.full_name || "student";
   const menuItems = [
-    { action: "student_info" as const, label: "Student information" },
-    { action: "payment_history" as const, label: "View payment history" },
-    { action: "waive" as const, label: "Waive tuition" },
-    { action: "change_price" as const, label: "Change price" },
+    { action: "view_details" as const, label: "View details" },
+    { action: "change_price" as const, label: "Send new checkout link" },
+    { action: "waive" as const, label: "Waive future payments" },
     hasActiveRecurringSubscription(row.subscription) ? { action: "end_subscription" as const, label: "End subscription" } : null,
-  ].filter((item): item is { action: FinanceAction; label: string } => Boolean(item));
+    { action: "add_note" as const, label: "Add note" },
+  ].filter((item): item is { action: FinanceRowMenuAction; label: string } => Boolean(item));
 
   function updateMenuPosition() {
     const button = buttonRef.current;
@@ -10113,18 +10931,96 @@ function FinanceSelect({ label, value, options, labels = {}, onChange }: { label
   );
 }
 
-function FinanceActionModal({ row, action, program, onClose }: { row: FinanceEnrollmentRow; action: FinanceAction; program: Program; onClose: () => void }) {
+function FinanceActionModal({
+  row,
+  action,
+  program,
+  onClose,
+  onSuccess,
+}: {
+  row: FinanceEnrollmentRow;
+  action: FinanceAction;
+  program: Program;
+  onClose: () => void;
+  onSuccess: () => void;
+}) {
   const [price, setPrice] = useState(((row.request?.approved_price_monthly_cents ?? program.price_monthly_cents ?? 0) / 100).toFixed(2).replace(/\.00$/, ""));
   const [billingMode, setBillingMode] = useState<"monthly" | "one_time">("monthly");
-  const modalTitle = action === "waive" ? "Waive tuition" : action === "change_price" ? "Change price" : action === "end_subscription" ? "End subscription" : "Payment history";
+  const [note, setNote] = useState("");
+  const [confirmedActiveOverride, setConfirmedActiveOverride] = useState(false);
+  const [reason, setReason] = useState("");
+  const [timing, setTiming] = useState<"period_end" | "immediate">("period_end");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [checkoutUrl, setCheckoutUrl] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const studentProfileId = row.enrollment.student_profile_id;
+  const hasActiveSubscription = hasActiveRecurringSubscription(row.subscription);
+
+  const modalTitle = action === "waive" ? "Waive Future Payments" : action === "change_price" ? "Send New Checkout Link" : "End Subscription";
   const modalText =
     action === "waive"
-      ? "Pause charges indefinitely or for a fixed number of months while keeping the student enrolled."
+      ? "This will stop future payment requirements for this student. Past payments will not be changed. The student will remain enrolled."
       : action === "change_price"
-        ? "Changing the price should end the current subscription and send a new checkout link."
-        : action === "end_subscription"
-          ? "Stop future billing for this student. Removing class access is handled from the manage students page after the subscription is ended."
-          : "Payment history will show charges, exceptions, links, and subscription lifecycle events.";
+        ? "This creates a new Stripe checkout link for this student. Past payments will not be changed."
+        : "This stops the Stripe subscription. It does not remove the student from the class.";
+
+  async function handleWaive() {
+    if (!reason.trim()) {
+      setError("A reason is required.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    const result = await callFinanceAction(program.id, "waive", { studentProfileId, timing, reason: reason.trim(), note: note.trim() || undefined });
+    setBusy(false);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    onSuccess();
+    onClose();
+  }
+
+  async function handleChangePrice() {
+    const amountCents = Math.round(parseFloat(price) * 100);
+    if (!amountCents || Number.isNaN(amountCents) || amountCents < 50) {
+      setError("Enter a valid price.");
+      return;
+    }
+    if (hasActiveSubscription && !confirmedActiveOverride) {
+      setError("Please confirm ending the current subscription before sending a new link.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    const result = await callFinanceAction<{ url: string }>(program.id, "change-price", {
+      studentProfileId,
+      amountCents,
+      billingMode,
+      note: note.trim() || undefined,
+    });
+    setBusy(false);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    onSuccess();
+    setCheckoutUrl(result.data.url);
+  }
+
+  async function handleEndSubscription() {
+    setBusy(true);
+    setError(null);
+    const result = await callFinanceAction(program.id, "end-subscription", { studentProfileId, timing });
+    setBusy(false);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    onSuccess();
+    onClose();
+  }
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#26323A]/35 px-5 backdrop-blur-sm">
@@ -10133,41 +11029,470 @@ function FinanceActionModal({ row, action, program, onClose }: { row: FinanceEnr
         <h2 className="mt-1 text-xl font-semibold">{modalTitle}</h2>
         <p className="mt-2 text-sm leading-6 text-[#6B747B]">{row.student?.full_name || "Student"} - {modalText}</p>
 
-        <div className="mt-5">
+        <div className="mt-5 grid gap-3">
           {action === "waive" ? (
-            <div className="grid grid-cols-3 gap-2">
-              {["Indefinite", "1 month", "3 months"].map((label) => (
-                <button key={label} type="button" className="min-h-10 rounded-[10px] bg-[#EEF6F7] px-2 text-xs font-semibold text-[#17624F]">{label}</button>
-              ))}
-            </div>
+            <>
+              {hasActiveSubscription ? (
+                <div className="grid grid-cols-2 overflow-hidden rounded-[10px] border border-[#D6DCE0]">
+                  {(
+                    [
+                      ["period_end", "After current period"],
+                      ["immediate", "Immediately"],
+                    ] as const
+                  ).map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      disabled={busy}
+                      onClick={() => setTiming(value)}
+                      className={cn("px-3 py-2 text-xs font-semibold disabled:opacity-60", timing === value ? "bg-[#17624F] text-white" : "bg-white text-[#52616A]")}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              <label className="grid gap-1 text-[10px] font-semibold uppercase tracking-wide text-[#7B858C]">
+                Reason (required)
+                <textarea
+                  value={reason}
+                  onChange={(event) => setReason(event.target.value)}
+                  disabled={busy}
+                  rows={2}
+                  placeholder="e.g. Financial hardship approved by director"
+                  className="rounded-[10px] border border-[#B9C3C8] px-3 py-2 text-sm font-semibold normal-case tracking-normal text-[#26323A] outline-none focus:border-[#2F8FB3] disabled:opacity-60"
+                />
+              </label>
+              <label className="grid gap-1 text-[10px] font-semibold uppercase tracking-wide text-[#7B858C]">
+                Internal note (optional)
+                <input
+                  value={note}
+                  onChange={(event) => setNote(event.target.value)}
+                  disabled={busy}
+                  placeholder="e.g. Parent requested discount due to sibling enrollment"
+                  className="h-10 rounded-[10px] border border-[#B9C3C8] px-3 text-sm font-semibold normal-case tracking-normal text-[#26323A] outline-none focus:border-[#2F8FB3] disabled:opacity-60"
+                />
+              </label>
+            </>
           ) : null}
           {action === "change_price" ? (
-            <div className="grid grid-cols-[1fr_auto] gap-2">
-              <input value={price} onChange={(event) => setPrice(event.target.value)} inputMode="decimal" className="h-11 rounded-[10px] border border-[#B9C3C8] px-3 text-sm font-semibold outline-none focus:border-[#2F8FB3]" />
-              <div className="grid grid-cols-2 overflow-hidden rounded-[10px] border border-[#D6DCE0]">
-                {(["monthly", "one_time"] as const).map((mode) => (
-                  <button key={mode} type="button" onClick={() => setBillingMode(mode)} className={cn("px-3 text-xs font-semibold", billingMode === mode ? "bg-[#17624F] text-white" : "bg-white text-[#52616A]")}>
-                    {mode === "monthly" ? "Monthly" : "One-time"}
-                  </button>
-                ))}
+            <div className="grid gap-3">
+              {hasActiveSubscription ? (
+                <div className="rounded-[14px] border border-[#F3D9A6] bg-[#FFF7E6] p-3 text-xs leading-5 text-[#8A5A00]">
+                  <p className="font-semibold">This student already has an active subscription.</p>
+                  <p className="mt-1">Sending a new link will end it immediately to avoid double billing.</p>
+                  <label className="mt-2 flex items-center gap-2 font-semibold">
+                    <input type="checkbox" checked={confirmedActiveOverride} onChange={(event) => setConfirmedActiveOverride(event.target.checked)} disabled={busy || Boolean(checkoutUrl)} />
+                    I understand, end the current subscription and send a new link
+                  </label>
+                </div>
+              ) : null}
+              <div className="grid grid-cols-[1fr_auto] gap-2">
+                <input
+                  value={price}
+                  onChange={(event) => setPrice(event.target.value)}
+                  disabled={busy || Boolean(checkoutUrl)}
+                  inputMode="decimal"
+                  className="h-11 rounded-[10px] border border-[#B9C3C8] px-3 text-sm font-semibold outline-none focus:border-[#2F8FB3] disabled:opacity-60"
+                />
+                <div className="grid grid-cols-2 overflow-hidden rounded-[10px] border border-[#D6DCE0]">
+                  {(["monthly", "one_time"] as const).map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      disabled={busy || Boolean(checkoutUrl) || (mode === "one_time" && Boolean(program.is_ongoing))}
+                      onClick={() => setBillingMode(mode)}
+                      className={cn("px-3 text-xs font-semibold disabled:opacity-60", billingMode === mode ? "bg-[#17624F] text-white" : "bg-white text-[#52616A]")}
+                    >
+                      {mode === "monthly" ? "Monthly" : "One-time"}
+                    </button>
+                  ))}
+                </div>
               </div>
+              {program.is_ongoing ? <p className="text-xs leading-5 text-[#7B858C]">Ongoing programs only support monthly billing.</p> : null}
+              <label className="grid gap-1 text-[10px] font-semibold uppercase tracking-wide text-[#7B858C]">
+                Internal note (optional)
+                <input
+                  value={note}
+                  onChange={(event) => setNote(event.target.value)}
+                  disabled={busy || Boolean(checkoutUrl)}
+                  placeholder="e.g. Sibling discount applied"
+                  className="h-10 rounded-[10px] border border-[#B9C3C8] px-3 text-sm font-semibold normal-case tracking-normal text-[#26323A] outline-none focus:border-[#2F8FB3] disabled:opacity-60"
+                />
+              </label>
+              {checkoutUrl ? (
+                <div className="rounded-[14px] border border-[#D6DCE0] bg-[#F8FAFB] p-3">
+                  <p className="text-[10px] font-semibold uppercase tracking-wide text-[#7B858C]">New checkout link</p>
+                  <p className="mt-1 break-all text-sm font-semibold text-[#26323A]">{checkoutUrl}</p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void navigator.clipboard.writeText(checkoutUrl);
+                      setCopied(true);
+                    }}
+                    className="mt-2 min-h-9 rounded-[10px] bg-[#17624F] px-3 text-xs font-semibold text-white"
+                  >
+                    {copied ? "Copied" : "Copy link"}
+                  </button>
+                  <p className="mt-2 text-xs leading-5 text-[#7B858C]">Share this link with the family directly - it is not emailed automatically.</p>
+                </div>
+              ) : null}
             </div>
           ) : null}
           {action === "end_subscription" ? (
-            <div className="grid gap-2">
-              <button type="button" className="min-h-10 rounded-[10px] bg-[#26323A] px-3 text-sm font-semibold text-white">End subscription</button>
-            </div>
-          ) : null}
-          {action === "payment_history" ? (
-            <div className="rounded-[18px] border border-dashed border-[#D6DCE0] bg-[#F8FAFB] p-4 text-sm font-semibold text-[#6B747B]">
-              Payment history will be connected after the payment ledger is added.
+            <div className="grid gap-3">
+              <div className="grid grid-cols-2 overflow-hidden rounded-[10px] border border-[#D6DCE0]">
+                {(
+                  [
+                    ["period_end", "End at period end"],
+                    ["immediate", "End immediately"],
+                  ] as const
+                ).map(([value, label]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    disabled={busy}
+                    onClick={() => setTiming(value)}
+                    className={cn("px-3 py-2 text-xs font-semibold disabled:opacity-60", timing === value ? "bg-[#17624F] text-white" : "bg-white text-[#52616A]")}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={handleEndSubscription}
+                className="min-h-10 rounded-[10px] bg-[#26323A] px-3 text-sm font-semibold text-white transition-opacity disabled:opacity-50"
+              >
+                {busy ? "Ending subscription..." : timing === "immediate" ? "End subscription now" : "End at period end"}
+              </button>
             </div>
           ) : null}
         </div>
 
-        <div className="mt-5 flex justify-end gap-2">
-          <button type="button" onClick={onClose} className="min-h-10 px-3 text-sm font-semibold text-[#6B747B]">Close</button>
-          <button type="button" disabled className="min-h-10 rounded-[10px] bg-[#26323A] px-4 text-sm font-semibold text-white opacity-50">Workflow pending</button>
+        <div className="mt-5 flex items-center justify-between gap-3">
+          <p className="flex-1 text-xs font-semibold text-[#C0392B]">{error ?? ""}</p>
+          <div className="flex shrink-0 gap-2">
+            <button type="button" onClick={onClose} className="min-h-10 px-3 text-sm font-semibold text-[#6B747B]">Close</button>
+            {action === "waive" ? (
+              <button
+                type="button"
+                disabled={busy || !reason.trim()}
+                onClick={handleWaive}
+                className="min-h-10 rounded-[10px] bg-[#26323A] px-4 text-sm font-semibold text-white transition-opacity disabled:opacity-50"
+              >
+                {busy ? "Waiving..." : "Waive future payments"}
+              </button>
+            ) : null}
+            {action === "change_price" && !checkoutUrl ? (
+              <button
+                type="button"
+                disabled={busy || (hasActiveSubscription && !confirmedActiveOverride)}
+                onClick={handleChangePrice}
+                className="min-h-10 rounded-[10px] bg-[#26323A] px-4 text-sm font-semibold text-white transition-opacity disabled:opacity-50"
+              >
+                {busy ? "Generating..." : "Send checkout link"}
+              </button>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+function FinanceDetailsDrawer({
+  row,
+  program,
+  slug,
+  mode,
+  onClose,
+}: {
+  row: FinanceEnrollmentRow;
+  program: Program;
+  slug: string;
+  mode: "teacher" | "admin";
+  onClose: () => void;
+}) {
+  const studentProfileId = row.enrollment.student_profile_id;
+  const [history, setHistory] = useState<FinanceChargeRow[] | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [studentEvents, setStudentEvents] = useState<ProgramFinanceAuditEvent[] | null>(null);
+  const [eventsLoading, setEventsLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    const timeout = window.setTimeout(() => {
+      setHistoryLoading(true);
+      setHistoryError(null);
+      void callFinanceAction<{ charges: FinanceChargeRow[] }>(program.id, "payment-history", { studentProfileId }).then((result) => {
+        if (cancelled) {
+          return;
+        }
+        setHistoryLoading(false);
+        if (!result.ok) {
+          setHistoryError(result.error);
+          return;
+        }
+        setHistory(result.data.charges ?? []);
+      });
+
+      setEventsLoading(true);
+      const supabase = createSupabaseBrowserClient();
+      void supabase
+        .from("program_finance_audit_events")
+        .select("*")
+        .eq("program_id", program.id)
+        .eq("student_profile_id", studentProfileId)
+        .order("created_at", { ascending: false })
+        .limit(50)
+        .then(({ data }) => {
+          if (cancelled) {
+            return;
+          }
+          setStudentEvents(data ?? []);
+          setEventsLoading(false);
+        });
+    }, 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+    };
+  }, [program.id, studentProfileId]);
+
+  const checkoutLinkStatus = row.subscription?.status === "checkout_started" ? "Checkout sent, awaiting completion" : "No pending checkout";
+  const basePath = mode === "admin" ? `/m/${slug}/admin/programs` : `/m/${slug}/teacher/classes`;
+
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex justify-end bg-[#26323A]/35 backdrop-blur-sm">
+      <div className="flex h-full w-full max-w-md flex-col overflow-y-auto bg-white text-[#26323A] shadow-[0_24px_70px_rgba(38,50,58,0.22)]">
+        <div className="flex items-center justify-between border-b border-[#EEF2F4] px-5 py-4">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">{program.title}</p>
+            <h2 className="mt-1 text-lg font-semibold">{row.student?.full_name || "Student"}</h2>
+          </div>
+          <button type="button" onClick={onClose} className="flex h-9 w-9 items-center justify-center rounded-full bg-[#F1F5F6] text-[#26323A] hover:bg-[#E3ECEF]">
+            <XIcon />
+          </button>
+        </div>
+
+        <div className="space-y-5 px-5 py-5">
+          <section className="grid gap-1 text-sm">
+            <div className="flex items-center justify-between">
+              <span className="text-[#6B747B]">Student type</span>
+              <span className="font-semibold">{financeStudentSubtitle(row)}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-[#6B747B]">Parent</span>
+              <span className="font-semibold">{row.parent?.full_name || "Self"}</span>
+            </div>
+            {row.parent?.email ? (
+              <div className="flex items-center justify-between">
+                <span className="text-[#6B747B]">Parent email</span>
+                <span className="font-semibold">{row.parent.email}</span>
+              </div>
+            ) : null}
+            <div className="flex items-center justify-between">
+              <span className="text-[#6B747B]">Enrollment status</span>
+              <span className={cn("rounded-full px-2.5 py-1 text-xs font-semibold", programStatusBadgeToneClass(financeBadgeTone(financeStatus(row))))}>{financeStatus(row)}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-[#6B747B]">Payment type</span>
+              <span className="font-semibold">{financePaymentType(row, program)}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-[#6B747B]">Approved price</span>
+              <span className="font-semibold">{financePrice(row, program)}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-[#6B747B]">Payment status</span>
+              <span className={cn("rounded-full px-2.5 py-1 text-xs font-semibold", programStatusBadgeToneClass(financeBadgeTone(financePaymentStatus(row, program))))}>{financePaymentStatus(row, program)}</span>
+            </div>
+          </section>
+
+          <section className="grid gap-1 rounded-[16px] border border-[#E1E8EC] bg-[#FAFCFC] p-3 text-sm">
+            <div className="flex items-center justify-between">
+              <span className="text-[#6B747B]">Subscription status</span>
+              <span className={cn("rounded-full px-2.5 py-1 text-xs font-semibold", programStatusBadgeToneClass(financeBadgeTone(financeSubscriptionStatus(row))))}>{financeSubscriptionStatus(row)}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-[#6B747B]">Current period</span>
+              <span className="font-semibold">{financeCurrentPeriodLabel(row)}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-[#6B747B]">Next billing / ends on</span>
+              <span className="font-semibold">{financeNextBillingLabel(row)}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-[#6B747B]">Checkout link</span>
+              <span className="font-semibold">{checkoutLinkStatus}</span>
+            </div>
+          </section>
+
+          <section className="space-y-2">
+            <h3 className="text-sm font-semibold text-[#26323A]">Payment History</h3>
+            {historyLoading ? (
+              <div className="rounded-[14px] border border-dashed border-[#D6DCE0] bg-[#F8FAFB] p-3 text-sm font-semibold text-[#6B747B]">Loading payment history...</div>
+            ) : historyError ? (
+              <div className="rounded-[14px] border border-dashed border-[#D6DCE0] bg-[#F8FAFB] p-3 text-sm font-semibold text-[#C0392B]">{historyError}</div>
+            ) : !history?.length ? (
+              <div className="rounded-[14px] border border-dashed border-[#D6DCE0] bg-[#F8FAFB] p-3 text-sm font-semibold text-[#6B747B]">No payments recorded yet.</div>
+            ) : (
+              <div className="divide-y divide-[#EEF2F4]">
+                {history.map((charge) => (
+                  <div key={charge.id} className="py-2.5">
+                    <div className="flex items-center justify-between">
+                      <p className="text-sm font-semibold text-[#26323A]">{formatCurrencyAmount(charge.amountCents)}</p>
+                      <span
+                        className={cn(
+                          "rounded-full px-2 py-0.5 text-xs font-semibold",
+                          charge.status === "succeeded" && !charge.refunded ? "bg-[#EAF8EF] text-[#258A43]" : "bg-[#F3F6F8] text-[#52616A]",
+                        )}
+                      >
+                        {charge.refunded ? "Refunded" : titleCase(charge.status)}
+                      </span>
+                    </div>
+                    <p className="mt-0.5 text-xs text-[#7B858C]">
+                      {formatFinanceDate(charge.createdAt)}
+                      {charge.receiptUrl ? (
+                        <>
+                          {" - "}
+                          <a href={charge.receiptUrl} target="_blank" rel="noreferrer" className="underline">
+                            Receipt
+                          </a>
+                        </>
+                      ) : null}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section className="space-y-2">
+            <h3 className="text-sm font-semibold text-[#26323A]">Audit Trail</h3>
+            {eventsLoading ? (
+              <div className="rounded-[14px] border border-dashed border-[#D6DCE0] bg-[#F8FAFB] p-3 text-sm font-semibold text-[#6B747B]">Loading activity...</div>
+            ) : !studentEvents?.length ? (
+              <div className="rounded-[14px] border border-dashed border-[#D6DCE0] bg-[#F8FAFB] p-3 text-sm font-semibold text-[#6B747B]">No finance activity for this student yet.</div>
+            ) : (
+              <div className="divide-y divide-[#EEF2F4]">
+                {studentEvents.map((event) => (
+                  <div key={event.id} className="py-2.5">
+                    <div className="flex items-center gap-2">
+                      {event.event_type === "manual_note" ? (
+                        <span className={cn("rounded-full px-2 py-0.5 text-[10px] font-semibold", programStatusBadgeToneClass("neutral"))}>Note</span>
+                      ) : null}
+                      <p className="text-sm font-semibold text-[#26323A]">{event.summary}</p>
+                    </div>
+                    <p className="mt-0.5 text-xs text-[#7B858C]">{formatFinanceDate(event.created_at)}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        </div>
+
+        <div className="mt-auto border-t border-[#EEF2F4] px-5 py-4">
+          {hasActiveRecurringSubscription(row.subscription) ? (
+            <p className="mb-3 rounded-[12px] border border-[#F3D9A6] bg-[#FFF7E6] p-3 text-xs font-semibold leading-5 text-[#8A5A00]">
+              This student has an active subscription. End or waive billing before removing them from the class.
+            </p>
+          ) : null}
+          <Link
+            href={`${basePath}/${program.id}/students?from=finances&studentId=${studentProfileId}`}
+            className="text-sm font-semibold text-[#17624F] hover:underline"
+          >
+            Manage class enrollment →
+          </Link>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+function FinanceAddNoteModal({
+  row,
+  program,
+  onClose,
+  onSuccess,
+}: {
+  row: FinanceEnrollmentRow;
+  program: Program;
+  onClose: () => void;
+  onSuccess: () => void;
+}) {
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSave() {
+    const text = note.trim();
+    if (!text) {
+      setError("Enter a note before saving.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    const supabase = createSupabaseBrowserClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      setBusy(false);
+      setError("Please sign in again to continue.");
+      return;
+    }
+    const { error: insertError } = await supabase.from("program_finance_audit_events").insert({
+      program_id: program.id,
+      student_profile_id: row.enrollment.student_profile_id,
+      actor_profile_id: user.id,
+      event_type: "manual_note",
+      summary: text,
+      metadata: {},
+    });
+    setBusy(false);
+    if (insertError) {
+      setError(insertError.message);
+      return;
+    }
+    onSuccess();
+    onClose();
+  }
+
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#26323A]/35 px-5 backdrop-blur-sm">
+      <div className="w-full max-w-md rounded-[28px] bg-white p-5 text-[#26323A] shadow-[0_24px_70px_rgba(38,50,58,0.22)]">
+        <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">{program.title}</p>
+        <h2 className="mt-1 text-xl font-semibold">Add Note</h2>
+        <p className="mt-2 text-sm leading-6 text-[#6B747B]">{row.student?.full_name || "Student"} - Internal note, visible only to Directors and Admins.</p>
+
+        <textarea
+          value={note}
+          onChange={(event) => setNote(event.target.value)}
+          disabled={busy}
+          rows={4}
+          placeholder="e.g. Parent requested discount due to sibling enrollment."
+          className="mt-4 w-full rounded-[14px] border border-[#B9C3C8] px-3 py-2 text-sm font-semibold outline-none focus:border-[#2F8FB3] disabled:opacity-60"
+        />
+
+        <div className="mt-5 flex items-center justify-between gap-3">
+          <p className="flex-1 text-xs font-semibold text-[#C0392B]">{error ?? ""}</p>
+          <div className="flex shrink-0 gap-2">
+            <button type="button" onClick={onClose} className="min-h-10 px-3 text-sm font-semibold text-[#6B747B]">Close</button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={handleSave}
+              className="min-h-10 rounded-[10px] bg-[#26323A] px-4 text-sm font-semibold text-white transition-opacity disabled:opacity-50"
+            >
+              {busy ? "Saving..." : "Save note"}
+            </button>
+          </div>
         </div>
       </div>
     </div>,
@@ -10185,18 +11510,974 @@ function FinanceWorkflowBlock({ title, text, children }: { title: string; text: 
   );
 }
 
+type ApplicationRow = {
+  request: EnrollmentRequest;
+  student: StudentDisplay | null;
+  parent: ParentDisplay | null;
+  track: ProgramTrack | null;
+  subscription: ProgramSubscription | null;
+  approver: Profile | null;
+};
+
+function applicationPaymentPlanLabel(row: ApplicationRow, program: Program | null) {
+  if (!program?.is_paid) {
+    return program?.payment_kind === "manual" ? "Price determined after review" : "Free";
+  }
+  if (row.request.payment_bypassed) {
+    return "Waived after approval";
+  }
+  return row.request.payment_type === "annual" ? "Pay in Full" : "Monthly subscription";
+}
+
+function applicationListedPrice(row: ApplicationRow, program: Program | null) {
+  if (row.request.payment_bypassed) {
+    return "Waived";
+  }
+  if (!program?.is_paid) {
+    return program?.payment_kind === "manual" ? "—" : "Free";
+  }
+  const isAnnual = row.request.payment_type === "annual";
+  const cents = isAnnual
+    ? row.request.approved_price_annual_cents ?? row.track?.price_annual_cents ?? program.price_annual_cents
+    : row.request.approved_price_monthly_cents ?? row.track?.price_monthly_cents ?? program.price_monthly_cents;
+  return formatPrice(cents);
+}
+
+const APPLICATION_ACTION_LABELS: Record<ApplicationRowAction, string> = {
+  view: "View Application",
+  approve: "Approve",
+  waitlist: "Waitlist",
+  reject: "Reject",
+  cancel_approval: "Cancel Approval",
+  change_price: "Change Approved Price",
+  waive_payment: "Waive Payment",
+  copy_confirmation_link: "Copy Registration Confirmation Link",
+  reopen: "Reopen Application",
+  view_enrollment: "View Enrollment",
+  add_note: "Add Note",
+};
+
+export function ProgramApplicationsData({ slug, programId, mode = "teacher" }: { slug: string; programId: string; mode?: "teacher" | "admin" }) {
+  const router = useRouter();
+  const [program, setProgram] = useState<Program | null>(null);
+  const [rows, setRows] = useState<ApplicationRow[]>([]);
+  const [auditEvents, setAuditEvents] = useState<ProgramFinanceAuditEvent[]>([]);
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [payStatusFilter, setPayStatusFilter] = useState("all");
+  const [trackFilter, setTrackFilter] = useState("all");
+  const [planFilter, setPlanFilter] = useState("all");
+  const [tracks, setTracks] = useState<ProgramTrack[]>([]);
+  const [decisionTarget, setDecisionTarget] = useState<{ row: ApplicationRow; action: "approved" | "waitlisted" | "rejected" } | null>(null);
+  const [detailsTarget, setDetailsTarget] = useState<ApplicationRow | null>(null);
+  const [noteTarget, setNoteTarget] = useState<ApplicationRow | null>(null);
+  const [changePriceTarget, setChangePriceTarget] = useState<ApplicationRow | null>(null);
+  const [confirmActionTarget, setConfirmActionTarget] = useState<{ row: ApplicationRow; action: "cancel_approval" | "waive_payment" | "reopen" } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [toast, setToast] = useState<EditorToastState | null>(null);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      void loadApplications();
+    }, 0);
+    return () => window.clearTimeout(timeout);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [programId, slug, mode]);
+
+  async function loadApplications() {
+    setLoading(true);
+    setError(null);
+    const supabase = createSupabaseBrowserClient();
+    const session = await loadCachedSession();
+    const userId = session?.user.id ?? null;
+    if (!userId) {
+      setError("Log in required.");
+      setLoading(false);
+      return;
+    }
+
+    const { data: mosque, error: mosqueError } = await supabase.from("mosques").select("id").eq("slug", slug).maybeSingle();
+    if (mosqueError || !mosque) {
+      setError(mosqueError?.message ?? "Masjid not found.");
+      setLoading(false);
+      return;
+    }
+
+    const { data: programRow, error: programError } = await supabase.from("programs").select("*").eq("id", programId).eq("mosque_id", mosque.id).maybeSingle();
+    if (programError || !programRow) {
+      setError(programError?.message ?? "Class not found.");
+      setLoading(false);
+      return;
+    }
+
+    const { data: canManage } = await supabase.rpc("can_manage_program", { check_program_id: programId, check_profile_id: userId });
+    if (!canManage) {
+      setProgram(programRow);
+      setRows([]);
+      setAuditEvents([]);
+      setError("You don't have permission to manage applications for this class.");
+      setLoading(false);
+      return;
+    }
+
+    const [{ data: requestRows, error: requestError }, { data: trackRows }, { data: subscriptionRows }, { data: auditRows }] = await Promise.all([
+      supabase.from("enrollment_requests").select("*").eq("program_id", programId).order("requested_at", { ascending: false }),
+      supabase.from("program_tracks").select("*").eq("program_id", programId),
+      supabase.from("program_subscriptions").select("*").eq("program_id", programId),
+      supabase.from("program_finance_audit_events").select("*").eq("program_id", programId).order("created_at", { ascending: false }).limit(20),
+    ]);
+    if (requestError) {
+      setError(requestError.message);
+      setLoading(false);
+      return;
+    }
+
+    const studentIds = Array.from(new Set((requestRows ?? []).map((row) => row.student_profile_id)));
+    const parentIds = Array.from(new Set((requestRows ?? []).map((row) => row.parent_profile_id).filter(Boolean) as string[]));
+    const reviewerIds = Array.from(new Set((requestRows ?? []).map((row) => row.reviewed_by).filter(Boolean) as string[]));
+    const profileIds = Array.from(new Set([...studentIds, ...parentIds, ...reviewerIds]));
+    const { data: profileRows } = profileIds.length
+      ? await supabase.from("profiles").select("id, full_name, email, phone_number, avatar_url, age, gender, date_of_birth, account_type").in("id", profileIds)
+      : { data: [] as StudentDisplay[] };
+
+    setProgram(programRow);
+    setTracks(trackRows ?? []);
+    setRows(
+      (requestRows ?? []).map((request) => ({
+        request,
+        student: (profileRows ?? []).find((profile) => profile.id === request.student_profile_id) as StudentDisplay | null,
+        parent: request.parent_profile_id ? ((profileRows ?? []).find((profile) => profile.id === request.parent_profile_id) as ParentDisplay | undefined) ?? null : null,
+        track: request.program_track_id ? (trackRows ?? []).find((track) => track.id === request.program_track_id) ?? null : null,
+        subscription: (subscriptionRows ?? []).find((subscription) => subscription.student_profile_id === request.student_profile_id) ?? null,
+        approver: request.reviewed_by ? ((profileRows ?? []).find((profile) => profile.id === request.reviewed_by) as Profile | undefined) ?? null : null,
+      })),
+    );
+    setAuditEvents(auditRows ?? []);
+    setLoading(false);
+  }
+
+  const filteredRows = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return rows.filter((row) => {
+      const status = getApplicationStatus(row.request);
+      const payStatus = getApplicationPaymentStatus(row.request, program, row.subscription);
+      const plan = applicationPaymentPlanLabel(row, program);
+      if (statusFilter !== "all" && status !== statusFilter) {
+        return false;
+      }
+      if (payStatusFilter !== "all" && payStatus !== payStatusFilter) {
+        return false;
+      }
+      if (trackFilter !== "all" && (row.request.program_track_id ?? "none") !== trackFilter) {
+        return false;
+      }
+      if (planFilter !== "all" && plan.toLowerCase() !== planFilter) {
+        return false;
+      }
+      if (!query) {
+        return true;
+      }
+      return [row.student?.full_name, row.parent?.full_name, row.student?.email, row.parent?.email]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase()
+        .includes(query);
+    });
+  }, [payStatusFilter, planFilter, program, rows, search, statusFilter, trackFilter]);
+
+  const countByStatus = (status: RequestApplicationStatus) => rows.filter((row) => getApplicationStatus(row.request) === status).length;
+  const approvedRows = rows.filter((row) => getApplicationStatus(row.request) === "approved_confirmation_required");
+  const waitingConfirmationCount = approvedRows.filter((row) => {
+    const payStatus = getApplicationPaymentStatus(row.request, program, row.subscription);
+    return payStatus === "not_required" || payStatus === "waived";
+  }).length;
+  const waitingPaymentCount = approvedRows.length - waitingConfirmationCount;
+
+  if (loading) {
+    return <DirectorySkeleton />;
+  }
+
+  if (error && !program) {
+    return <EmptyState title="Could not load applications" text={error} />;
+  }
+
+  if (!program) {
+    return <EmptyState title="Class not found" text="This class could not be loaded." />;
+  }
+
+  if (error) {
+    return <EmptyState title="Applications unavailable" text={error} />;
+  }
+
+  const basePath = mode === "admin" ? `/m/${slug}/admin/programs` : `/m/${slug}/teacher/classes`;
+
+  async function handleCopyConfirmationLink(row: ApplicationRow) {
+    const url = `${window.location.origin}/m/${slug}/registration/${row.request.id}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      setToast({ tone: "success", message: "Registration confirmation link copied." });
+    } catch {
+      setToast({ tone: "error", message: "Could not copy link." });
+    }
+  }
+
+  return (
+    <section className="space-y-5 bg-white px-4 pb-28 pt-4 text-[#26323A]">
+      <EditorToast toast={toast} onClose={() => setToast(null)} />
+      <div className="rounded-[28px] bg-[#17624F] p-5 text-white shadow-[0_18px_45px_rgba(23,98,79,0.22)]">
+        <p className="text-xs font-semibold uppercase tracking-[0.28em] text-white/65">Manage Applications</p>
+        <h2 className="mt-2 text-2xl font-semibold leading-7">{program.title}</h2>
+        <div className="mt-5 grid grid-cols-3 gap-4 text-center sm:grid-cols-6">
+          <FinanceSummaryFigure value={countByStatus("pending_review").toString()} label="Pending Review" />
+          <FinanceSummaryFigure value={waitingConfirmationCount.toString()} label="Waiting Confirmation" />
+          <FinanceSummaryFigure value={waitingPaymentCount.toString()} label="Waiting Payment" />
+          <FinanceSummaryFigure value={countByStatus("waitlisted").toString()} label="Waitlisted" />
+          <FinanceSummaryFigure value={countByStatus("rejected").toString()} label="Rejected" />
+          <FinanceSummaryFigure value={countByStatus("completed_enrolled").toString()} label="Completed" />
+        </div>
+      </div>
+
+      <div className="flex flex-wrap gap-3">
+        <label className="flex min-h-11 min-w-[220px] flex-1 items-center gap-2 rounded-[14px] border border-[#D6DCE0] bg-[#F8FAFB] px-3 text-[#6B747B]">
+          <SearchIcon />
+          <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search students, parents" className="min-w-0 flex-1 bg-transparent text-sm font-semibold text-[#26323A] outline-none placeholder:text-[#9AA4AA]" />
+        </label>
+        <FinanceSelect
+          label="Application status"
+          value={statusFilter}
+          options={["pending_review", "waitlisted", "rejected", "approved_confirmation_required", "completed_enrolled", "cancelled"]}
+          labels={{
+            pending_review: "Pending Review",
+            waitlisted: "Waitlisted",
+            rejected: "Rejected",
+            approved_confirmation_required: "Approved",
+            completed_enrolled: "Completed / Enrolled",
+            cancelled: "Cancelled",
+          }}
+          onChange={setStatusFilter}
+        />
+        <FinanceSelect
+          label="Payment status"
+          value={payStatusFilter}
+          options={["not_required", "waived", "payment_required", "checkout_pending", "paid", "active_subscription", "past_due", "failed", "ended"]}
+          labels={{
+            not_required: "Not required",
+            waived: "Waived",
+            payment_required: "Payment required",
+            checkout_pending: "Awaiting payment",
+            paid: "Paid",
+            active_subscription: "Subscription active",
+            past_due: "Past due",
+            failed: "Failed",
+            ended: "Ended",
+          }}
+          onChange={setPayStatusFilter}
+        />
+        {tracks.length ? (
+          <FinanceSelect
+            label="Track"
+            value={trackFilter}
+            options={tracks.map((track) => track.id)}
+            labels={Object.fromEntries(tracks.map((track) => [track.id, track.name]))}
+            onChange={setTrackFilter}
+          />
+        ) : null}
+        <FinanceSelect
+          label="Payment plan"
+          value={planFilter}
+          options={["free", "monthly subscription", "pay in full", "waived after approval", "price determined after review"]}
+          labels={{ "pay in full": "Pay in Full" }}
+          onChange={setPlanFilter}
+        />
+      </div>
+
+      <div className="flex items-center justify-between px-1 text-sm font-semibold text-[#6B747B]">
+        <span>Showing {filteredRows.length} of {rows.length} applications</span>
+      </div>
+
+      <div className="overflow-hidden rounded-[24px] border border-[#E1E8EC] bg-white shadow-[0_14px_38px_rgba(38,50,58,0.08)]">
+        <div className="overflow-x-auto">
+          <table className="min-w-[1240px] w-full text-left text-sm">
+            <thead className="bg-[#F7FAFB] text-[11px] font-semibold uppercase tracking-wide text-[#7B858C]">
+              <tr>
+                {["Applicant / Student", "Parent / Guardian", "Track / Schedule", "Payment Plan", "Listed Price", "Application Status", "Payment Status", "Submitted", "Actions"].map((column) => (
+                  <th key={column} className="px-4 py-3">{column}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[#EEF2F4]">
+              {filteredRows.map((row) => {
+                const status = getApplicationStatus(row.request);
+                const payStatus = getApplicationPaymentStatus(row.request, program, row.subscription);
+                return (
+                  <tr key={row.request.id} className="align-middle">
+                    <td className="px-4 py-4">
+                      <p className="font-semibold text-[#26323A]">{row.student?.full_name || "Student"}</p>
+                      <p className="mt-0.5 text-xs text-[#7B858C]">{row.parent ? "Child Student" : "Adult Student"}{row.student?.age ? ` · Age ${row.student.age}` : ""}</p>
+                    </td>
+                    <td className="px-4 py-4">
+                      <p className="font-semibold text-[#26323A]">{row.parent?.full_name || "Self"}</p>
+                      <p className="mt-0.5 text-xs text-[#7B858C]">{row.parent?.email || "---"}</p>
+                    </td>
+                    <td className="px-4 py-4 text-[#52616A]">{row.track ? row.track.name : "—"}</td>
+                    <td className="px-4 py-4 font-semibold text-[#52616A]">{applicationPaymentPlanLabel(row, program)}</td>
+                    <td className="px-4 py-4 font-semibold text-[#26323A]">{applicationListedPrice(row, program)}</td>
+                    <td className="px-4 py-4">
+                      <span className={cn("rounded-full px-2.5 py-1 text-xs font-semibold", programStatusBadgeToneClass(applicationStatusTone(status)))}>
+                        {getApplicationRowStatusLabel(status, payStatus)}
+                      </span>
+                    </td>
+                    <td className="px-4 py-4">
+                      <span className={cn("rounded-full px-2.5 py-1 text-xs font-semibold", programStatusBadgeToneClass(paymentStatusTone(payStatus)))}>
+                        {PAYMENT_STATUS_LABELS[payStatus]}
+                      </span>
+                    </td>
+                    <td className="px-4 py-4 text-[#52616A]">{formatFinanceDate(row.request.requested_at)}</td>
+                    <td className="px-4 py-4">
+                      <ApplicationRowActionMenu
+                        row={row}
+                        status={status}
+                        onSelect={(action) => {
+                          if (action === "view") {
+                            setDetailsTarget(row);
+                            return;
+                          }
+                          if (action === "approve") {
+                            setDecisionTarget({ row, action: "approved" });
+                            return;
+                          }
+                          if (action === "waitlist") {
+                            setDecisionTarget({ row, action: "waitlisted" });
+                            return;
+                          }
+                          if (action === "reject") {
+                            setDecisionTarget({ row, action: "rejected" });
+                            return;
+                          }
+                          if (action === "cancel_approval" || action === "waive_payment" || action === "reopen") {
+                            setConfirmActionTarget({ row, action });
+                            return;
+                          }
+                          if (action === "change_price") {
+                            setChangePriceTarget(row);
+                            return;
+                          }
+                          if (action === "add_note") {
+                            setNoteTarget(row);
+                            return;
+                          }
+                          if (action === "copy_confirmation_link") {
+                            void handleCopyConfirmationLink(row);
+                            return;
+                          }
+                          if (action === "view_enrollment") {
+                            router.push(`${basePath}/${programId}/students?from=applications&studentId=${row.request.student_profile_id}`);
+                          }
+                        }}
+                      />
+                    </td>
+                  </tr>
+                );
+              })}
+              {!filteredRows.length ? (
+                <tr>
+                  <td colSpan={9} className="px-4 py-10 text-center text-sm font-semibold text-[#7B858C]">No matching applications.</td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <section className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-semibold text-[#26323A]">Audit Trail</h2>
+          <span className="rounded-full bg-[#EEF6F7] px-2.5 py-1 text-xs font-semibold text-[#17624F]">{auditEvents.length}</span>
+        </div>
+        <div className="divide-y divide-[#EEF2F4]">
+          {auditEvents.length ? (
+            auditEvents.map((event) => (
+              <div key={event.id} className="py-3">
+                <div className="flex items-center gap-2">
+                  {event.event_type === "manual_note" ? (
+                    <span className={cn("rounded-full px-2 py-0.5 text-[10px] font-semibold", programStatusBadgeToneClass("neutral"))}>Note</span>
+                  ) : null}
+                  <p className="text-sm font-semibold text-[#26323A]">{event.summary}</p>
+                </div>
+                <p className="mt-0.5 text-xs text-[#7B858C]">{formatFinanceDate(event.created_at)} - {event.event_type.replace(/_/g, " ")}</p>
+              </div>
+            ))
+          ) : (
+            <p className="py-3 text-sm font-semibold text-[#7B858C]">No activity yet.</p>
+          )}
+        </div>
+      </section>
+
+      {decisionTarget ? (
+        <ApplicationDecisionModal
+          target={{ request: { ...decisionTarget.row.request, program, student: decisionTarget.row.student, parent: decisionTarget.row.parent }, action: decisionTarget.action }}
+          onClose={() => setDecisionTarget(null)}
+          onSubmit={async (options) => {
+            const endpoint = decisionTarget.action === "approved" ? "approve" : decisionTarget.action === "waitlisted" ? "waitlist" : "reject";
+            const result = await callApplicationAction(programId, decisionTarget.row.request.id, endpoint, options);
+            if (!result.ok) {
+              setToast({ tone: "error", message: result.error });
+              return;
+            }
+            setDecisionTarget(null);
+            setToast({ tone: "success", message: "Application updated." });
+            void loadApplications();
+          }}
+        />
+      ) : null}
+
+      {detailsTarget ? (
+        <ApplicationDetailsDrawer row={detailsTarget} program={program} slug={slug} mode={mode} onClose={() => setDetailsTarget(null)} />
+      ) : null}
+
+      {noteTarget ? (
+        <ApplicationAddNoteModal row={noteTarget} program={program} onClose={() => setNoteTarget(null)} onSuccess={() => void loadApplications()} />
+      ) : null}
+
+      {changePriceTarget ? (
+        <ApplicationChangePriceModal row={changePriceTarget} program={program} onClose={() => setChangePriceTarget(null)} onSuccess={() => void loadApplications()} />
+      ) : null}
+
+      {confirmActionTarget ? (
+        <ApplicationConfirmActionModal
+          row={confirmActionTarget.row}
+          action={confirmActionTarget.action}
+          program={program}
+          onClose={() => setConfirmActionTarget(null)}
+          onSuccess={() => void loadApplications()}
+        />
+      ) : null}
+    </section>
+  );
+}
+
+function ApplicationRowActionMenu({ row, status, onSelect }: { row: ApplicationRow; status: RequestApplicationStatus; onSelect: (action: ApplicationRowAction) => void }) {
+  const [open, setOpen] = useState(false);
+  const [menuPosition, setMenuPosition] = useState<{ top: number; left: number } | null>(null);
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const studentName = row.student?.full_name || "student";
+  const actions = getApplicationRowActions(status);
+
+  function updateMenuPosition() {
+    const button = buttonRef.current;
+    if (!button) {
+      return;
+    }
+    const rect = button.getBoundingClientRect();
+    const menuWidth = 260;
+    const menuHeight = 280;
+    const gap = 8;
+    const left = Math.max(12, Math.min(window.innerWidth - menuWidth - 12, rect.right - menuWidth));
+    const below = rect.bottom + gap;
+    const top = below + menuHeight > window.innerHeight ? Math.max(12, rect.top - menuHeight - gap) : below;
+    setMenuPosition({ top, left });
+  }
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    updateMenuPosition();
+    function closeOnPointerDown(event: MouseEvent) {
+      const target = event.target as Node | null;
+      if (target && buttonRef.current?.contains(target)) {
+        return;
+      }
+      const menu = document.getElementById(`application-action-menu-${row.request.id}`);
+      if (target && menu?.contains(target)) {
+        return;
+      }
+      setOpen(false);
+    }
+    window.addEventListener("resize", updateMenuPosition);
+    window.addEventListener("scroll", updateMenuPosition, true);
+    document.addEventListener("mousedown", closeOnPointerDown);
+    return () => {
+      window.removeEventListener("resize", updateMenuPosition);
+      window.removeEventListener("scroll", updateMenuPosition, true);
+      document.removeEventListener("mousedown", closeOnPointerDown);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, row.request.id]);
+
+  return (
+    <div className="inline-flex justify-end">
+      <button
+        ref={buttonRef}
+        type="button"
+        onClick={() => {
+          updateMenuPosition();
+          setOpen((current) => !current);
+        }}
+        className="flex h-9 w-9 items-center justify-center rounded-full bg-[#F1F5F6] text-[#26323A] transition-colors hover:bg-[#E3ECEF]"
+        aria-label={`Open application actions for ${studentName}`}
+      >
+        <MoreVerticalIcon />
+      </button>
+      {open && menuPosition
+        ? createPortal(
+            <div
+              id={`application-action-menu-${row.request.id}`}
+              className="fixed z-[80] w-[260px] rounded-[18px] border border-[#E1E8EC] bg-white p-1.5 text-sm shadow-[0_22px_60px_rgba(38,50,58,0.20)]"
+              style={{ top: menuPosition.top, left: menuPosition.left }}
+            >
+              {actions.map((action) => (
+                <button
+                  key={action}
+                  type="button"
+                  onClick={() => {
+                    setOpen(false);
+                    onSelect(action);
+                  }}
+                  className="flex min-h-10 w-full items-center rounded-[13px] px-3 text-left font-semibold text-[#52616A] transition-colors hover:bg-[#F4F8F9] hover:text-[#26323A]"
+                >
+                  {APPLICATION_ACTION_LABELS[action]}
+                </button>
+              ))}
+            </div>,
+            document.body,
+          )
+        : null}
+    </div>
+  );
+}
+
+function ApplicationDetailsDrawer({
+  row,
+  program,
+  slug,
+  mode,
+  onClose,
+}: {
+  row: ApplicationRow;
+  program: Program;
+  slug: string;
+  mode: "teacher" | "admin";
+  onClose: () => void;
+}) {
+  const [studentEvents, setStudentEvents] = useState<ProgramFinanceAuditEvent[] | null>(null);
+  const [eventsLoading, setEventsLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    const timeout = window.setTimeout(() => {
+      setEventsLoading(true);
+      const supabase = createSupabaseBrowserClient();
+      void supabase
+        .from("program_finance_audit_events")
+        .select("*")
+        .eq("program_id", program.id)
+        .eq("student_profile_id", row.request.student_profile_id)
+        .order("created_at", { ascending: false })
+        .limit(50)
+        .then(({ data }) => {
+          if (cancelled) {
+            return;
+          }
+          setStudentEvents(data ?? []);
+          setEventsLoading(false);
+        });
+    }, 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+    };
+  }, [program.id, row.request.student_profile_id]);
+
+  const status = getApplicationStatus(row.request);
+  const payStatus = getApplicationPaymentStatus(row.request, program, row.subscription);
+  const basePath = mode === "admin" ? `/m/${slug}/admin/programs` : `/m/${slug}/teacher/classes`;
+
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex justify-end bg-[#26323A]/35 backdrop-blur-sm">
+      <div className="flex h-full w-full max-w-md flex-col overflow-y-auto bg-white text-[#26323A] shadow-[0_24px_70px_rgba(38,50,58,0.22)]">
+        <div className="flex items-center justify-between border-b border-[#EEF2F4] px-5 py-4">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">{program.title}</p>
+            <h2 className="mt-1 text-lg font-semibold">{row.student?.full_name || "Student"}</h2>
+          </div>
+          <button type="button" onClick={onClose} className="flex h-9 w-9 items-center justify-center rounded-full bg-[#F1F5F6] text-[#26323A] hover:bg-[#E3ECEF]">
+            <XIcon />
+          </button>
+        </div>
+
+        <div className="space-y-5 px-5 py-5">
+          <section className="grid gap-1 text-sm">
+            <div className="flex items-center justify-between">
+              <span className="text-[#6B747B]">Student type</span>
+              <span className="font-semibold">{row.parent ? "Child Student" : "Adult Student"}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-[#6B747B]">Parent/Guardian</span>
+              <span className="font-semibold">{row.parent?.full_name || "Self"}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-[#6B747B]">Application status</span>
+              <span className={cn("rounded-full px-2.5 py-1 text-xs font-semibold", programStatusBadgeToneClass(applicationStatusTone(status)))}>
+                {getApplicationRowStatusLabel(status, payStatus)}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-[#6B747B]">Payment status</span>
+              <span className={cn("rounded-full px-2.5 py-1 text-xs font-semibold", programStatusBadgeToneClass(paymentStatusTone(payStatus)))}>
+                {PAYMENT_STATUS_LABELS[payStatus]}
+              </span>
+            </div>
+          </section>
+
+          <section className="grid gap-1 rounded-[16px] border border-[#E1E8EC] bg-[#FAFCFC] p-3 text-sm">
+            <div className="flex items-center justify-between">
+              <span className="text-[#6B747B]">Track/Schedule</span>
+              <span className="font-semibold">{row.track ? row.track.name : "—"}</span>
+            </div>
+            {row.track ? (
+              <div className="flex items-center justify-between">
+                <span className="text-[#6B747B]">Schedule</span>
+                <span className="font-semibold">{scheduleSummary(row.track.schedule, null).full}</span>
+              </div>
+            ) : null}
+            <div className="flex items-center justify-between">
+              <span className="text-[#6B747B]">Location</span>
+              <span className="font-semibold">{row.track?.location || program.location || "—"}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-[#6B747B]">Payment plan</span>
+              <span className="font-semibold">{applicationPaymentPlanLabel(row, program)}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-[#6B747B]">Listed price</span>
+              <span className="font-semibold">{applicationListedPrice(row, program)}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-[#6B747B]">Submitted</span>
+              <span className="font-semibold">{formatFinanceDate(row.request.requested_at)}</span>
+            </div>
+            {row.request.reviewed_at ? (
+              <div className="flex items-center justify-between">
+                <span className="text-[#6B747B]">Reviewed</span>
+                <span className="font-semibold">
+                  {formatFinanceDate(row.request.reviewed_at)} by {row.approver?.full_name || row.approver?.email || "staff"}
+                </span>
+              </div>
+            ) : null}
+            {row.request.decision_note ? (
+              <div className="pt-1">
+                <p className="text-[#6B747B]">Decision note</p>
+                <p className="mt-0.5 font-semibold">{row.request.decision_note}</p>
+              </div>
+            ) : null}
+          </section>
+
+          <section className="space-y-2">
+            <h3 className="text-sm font-semibold text-[#26323A]">Audit Trail</h3>
+            {eventsLoading ? (
+              <div className="rounded-[14px] border border-dashed border-[#D6DCE0] bg-[#F8FAFB] p-3 text-sm font-semibold text-[#6B747B]">Loading activity...</div>
+            ) : !studentEvents?.length ? (
+              <div className="rounded-[14px] border border-dashed border-[#D6DCE0] bg-[#F8FAFB] p-3 text-sm font-semibold text-[#6B747B]">No activity for this application yet.</div>
+            ) : (
+              <div className="divide-y divide-[#EEF2F4]">
+                {studentEvents.map((event) => (
+                  <div key={event.id} className="py-2.5">
+                    <div className="flex items-center gap-2">
+                      {event.event_type === "manual_note" ? (
+                        <span className={cn("rounded-full px-2 py-0.5 text-[10px] font-semibold", programStatusBadgeToneClass("neutral"))}>Note</span>
+                      ) : null}
+                      <p className="text-sm font-semibold text-[#26323A]">{event.summary}</p>
+                    </div>
+                    <p className="mt-0.5 text-xs text-[#7B858C]">{formatFinanceDate(event.created_at)}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        </div>
+
+        <div className="mt-auto border-t border-[#EEF2F4] px-5 py-4">
+          <Link href={`${basePath}/${program.id}/students?from=applications&studentId=${row.request.student_profile_id}`} className="text-sm font-semibold text-[#17624F] hover:underline">
+            Manage class enrollment →
+          </Link>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+function ApplicationAddNoteModal({
+  row,
+  program,
+  onClose,
+  onSuccess,
+}: {
+  row: ApplicationRow;
+  program: Program;
+  onClose: () => void;
+  onSuccess: () => void;
+}) {
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSave() {
+    const text = note.trim();
+    if (!text) {
+      setError("Enter a note before saving.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    const result = await callApplicationAction(program.id, row.request.id, "note", { note: text });
+    setBusy(false);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    onSuccess();
+    onClose();
+  }
+
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#26323A]/35 px-5 backdrop-blur-sm">
+      <div className="w-full max-w-md rounded-[28px] bg-white p-5 text-[#26323A] shadow-[0_24px_70px_rgba(38,50,58,0.22)]">
+        <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">{program.title}</p>
+        <h2 className="mt-1 text-xl font-semibold">Add Note</h2>
+        <p className="mt-2 text-sm leading-6 text-[#6B747B]">{row.student?.full_name || "Student"} - Internal note, visible only to Directors and Admins.</p>
+
+        <textarea
+          value={note}
+          onChange={(event) => setNote(event.target.value)}
+          disabled={busy}
+          rows={4}
+          placeholder="e.g. Parent requested a payment plan adjustment."
+          className="mt-4 w-full rounded-[14px] border border-[#B9C3C8] px-3 py-2 text-sm font-semibold outline-none focus:border-[#2F8FB3] disabled:opacity-60"
+        />
+
+        <div className="mt-5 flex items-center justify-between gap-3">
+          <p className="flex-1 text-xs font-semibold text-[#C0392B]">{error ?? ""}</p>
+          <div className="flex shrink-0 gap-2">
+            <button type="button" onClick={onClose} className="min-h-10 px-3 text-sm font-semibold text-[#6B747B]">Close</button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={handleSave}
+              className="min-h-10 rounded-[10px] bg-[#26323A] px-4 text-sm font-semibold text-white transition-opacity disabled:opacity-50"
+            >
+              {busy ? "Saving..." : "Save note"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+function ApplicationChangePriceModal({
+  row,
+  program,
+  onClose,
+  onSuccess,
+}: {
+  row: ApplicationRow;
+  program: Program;
+  onClose: () => void;
+  onSuccess: () => void;
+}) {
+  const isAnnual = row.request.payment_type === "annual";
+  const [paymentType, setPaymentType] = useState<"monthly" | "annual">(isAnnual ? "annual" : "monthly");
+  const initialCents = isAnnual
+    ? row.request.approved_price_annual_cents ?? program.price_annual_cents ?? 0
+    : row.request.approved_price_monthly_cents ?? program.price_monthly_cents ?? 0;
+  const [price, setPrice] = useState((initialCents / 100).toFixed(2).replace(/\.00$/, ""));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const paymentOptions = programPaymentOptions(program);
+  const allowedTypes = paymentOptions.length ? paymentOptions.map((option) => option.type) : (["monthly"] as PaymentType[]);
+
+  async function handleSave() {
+    const cents = Math.round(parseFloat(price) * 100);
+    if (!cents || Number.isNaN(cents) || cents < 50) {
+      setError("Enter a valid price.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    const result = await callApplicationAction(program.id, row.request.id, "change-price", {
+      paymentType,
+      priceMonthlyCents: paymentType === "monthly" ? cents : null,
+      priceAnnualCents: paymentType === "annual" ? cents : null,
+    });
+    setBusy(false);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    onSuccess();
+    onClose();
+  }
+
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#26323A]/35 px-5 backdrop-blur-sm">
+      <div className="w-full max-w-md rounded-[28px] bg-white p-5 text-[#26323A] shadow-[0_24px_70px_rgba(38,50,58,0.22)]">
+        <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">{program.title}</p>
+        <h2 className="mt-1 text-xl font-semibold">Change Approved Price</h2>
+        <p className="mt-2 text-sm leading-6 text-[#6B747B]">
+          {row.student?.full_name || "Student"} - Updates the price shown on Registration Confirmation. Already-completed payments are unaffected.
+        </p>
+
+        <div className="mt-4 grid grid-cols-[1fr_auto] gap-2">
+          <input
+            value={price}
+            onChange={(event) => setPrice(event.target.value)}
+            disabled={busy}
+            inputMode="decimal"
+            className="h-11 rounded-[10px] border border-[#B9C3C8] px-3 text-sm font-semibold outline-none focus:border-[#2F8FB3] disabled:opacity-60"
+          />
+          {allowedTypes.length > 1 ? (
+            <div className="grid grid-cols-2 overflow-hidden rounded-[10px] border border-[#D6DCE0]">
+              {allowedTypes.map((type) => (
+                <button
+                  key={type}
+                  type="button"
+                  disabled={busy}
+                  onClick={() => setPaymentType(type)}
+                  className={cn("px-3 text-xs font-semibold disabled:opacity-60", paymentType === type ? "bg-[#17624F] text-white" : "bg-white text-[#52616A]")}
+                >
+                  {type === "monthly" ? "Monthly" : "Pay in Full"}
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+
+        <div className="mt-5 flex items-center justify-between gap-3">
+          <p className="flex-1 text-xs font-semibold text-[#C0392B]">{error ?? ""}</p>
+          <div className="flex shrink-0 gap-2">
+            <button type="button" onClick={onClose} className="min-h-10 px-3 text-sm font-semibold text-[#6B747B]">Close</button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={handleSave}
+              className="min-h-10 rounded-[10px] bg-[#26323A] px-4 text-sm font-semibold text-white transition-opacity disabled:opacity-50"
+            >
+              {busy ? "Saving..." : "Save Price"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+function ApplicationConfirmActionModal({
+  row,
+  action,
+  program,
+  onClose,
+  onSuccess,
+}: {
+  row: ApplicationRow;
+  action: "cancel_approval" | "waive_payment" | "reopen";
+  program: Program;
+  onClose: () => void;
+  onSuccess: () => void;
+}) {
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const config = {
+    cancel_approval: {
+      title: "Cancel Approval",
+      text: "This moves the application back to pending review. It does not affect any active enrollment.",
+      endpoint: "cancel-approval" as const,
+      confirmLabel: "Cancel Approval",
+    },
+    waive_payment: {
+      title: "Waive Payment",
+      text: "This waives payment for this application. The student must still complete Registration Confirmation.",
+      endpoint: "waive" as const,
+      confirmLabel: "Waive Payment",
+    },
+    reopen: {
+      title: "Reopen Application",
+      text: "This moves the rejected application back to pending review.",
+      endpoint: "reopen" as const,
+      confirmLabel: "Reopen Application",
+    },
+  }[action];
+
+  async function handleConfirm() {
+    setBusy(true);
+    setError(null);
+    const result = await callApplicationAction(program.id, row.request.id, config.endpoint, { note: note.trim() || undefined });
+    setBusy(false);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    onSuccess();
+    onClose();
+  }
+
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#26323A]/35 px-5 backdrop-blur-sm">
+      <div className="w-full max-w-md rounded-[28px] bg-white p-5 text-[#26323A] shadow-[0_24px_70px_rgba(38,50,58,0.22)]">
+        <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">{program.title}</p>
+        <h2 className="mt-1 text-xl font-semibold">{config.title}</h2>
+        <p className="mt-2 text-sm leading-6 text-[#6B747B]">{row.student?.full_name || "Student"} - {config.text}</p>
+
+        {action !== "reopen" ? (
+          <textarea
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+            disabled={busy}
+            rows={3}
+            placeholder="Internal note (optional)"
+            className="mt-4 w-full rounded-[14px] border border-[#B9C3C8] px-3 py-2 text-sm font-semibold outline-none focus:border-[#2F8FB3] disabled:opacity-60"
+          />
+        ) : null}
+
+        <div className="mt-5 flex items-center justify-between gap-3">
+          <p className="flex-1 text-xs font-semibold text-[#C0392B]">{error ?? ""}</p>
+          <div className="flex shrink-0 gap-2">
+            <button type="button" onClick={onClose} className="min-h-10 px-3 text-sm font-semibold text-[#6B747B]">Close</button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={handleConfirm}
+              className="min-h-10 rounded-[10px] bg-[#26323A] px-4 text-sm font-semibold text-white transition-opacity disabled:opacity-50"
+            >
+              {busy ? "Saving..." : config.confirmLabel}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 function financePaymentType(row: FinanceEnrollmentRow, program: Program | null) {
   if (!program?.is_paid) {
     return "Free";
   }
-  if (row.request?.payment_bypassed) {
+  if (row.request?.payment_bypassed || row.subscription?.payment_waived) {
     return "Waived";
   }
-  return (row.subscription?.payment_type ?? row.request?.payment_type) === "annual" ? "Annual" : "Monthly";
+  return (row.subscription?.payment_type ?? row.request?.payment_type) === "annual" ? "Pay in Full" : "Monthly";
 }
 
 function financePrice(row: FinanceEnrollmentRow, program: Program | null) {
-  if (row.request?.payment_bypassed) {
+  if (row.request?.payment_bypassed || row.subscription?.payment_waived) {
     return "Waived";
   }
   if ((row.subscription?.payment_type ?? row.request?.payment_type) === "annual") {
@@ -10224,10 +12505,88 @@ function financeSubscriptionStatus(row: FinanceEnrollmentRow) {
   if (!row.subscription?.stripe_subscription_id) {
     return "N/A";
   }
-  if (hasActiveRecurringSubscription(row.subscription)) {
-    return row.subscription.cancel_at_period_end ? "Ending" : "Active";
+  const stripeStatus = row.subscription.status?.toLowerCase();
+  if (stripeStatus === "past_due" || stripeStatus === "unpaid") {
+    return "Past due";
   }
-  return "Ended";
+  if (!hasActiveRecurringSubscription(row.subscription)) {
+    return "Ended";
+  }
+  if (row.subscription.payment_paused) {
+    return "Paused";
+  }
+  return row.subscription.cancel_at_period_end ? "Ending" : "Active";
+}
+
+function financePaymentStatus(row: FinanceEnrollmentRow, program: Program | null) {
+  if (!program?.is_paid) {
+    return "No payment required";
+  }
+  if (row.request?.payment_bypassed || row.subscription?.payment_waived || row.subscription?.payment_paused) {
+    return "Waived";
+  }
+  const stripeStatus = row.subscription?.status?.toLowerCase();
+  if (stripeStatus === "past_due") {
+    return "Past due";
+  }
+  if (stripeStatus === "unpaid") {
+    return "Payment failed";
+  }
+  if (stripeStatus === "checkout_started") {
+    return "Checkout sent";
+  }
+  if (row.subscription?.stripe_subscription_id && hasActiveRecurringSubscription(row.subscription)) {
+    return "Paid";
+  }
+  if (row.subscription?.stripe_subscription_id) {
+    return "Needs billing decision";
+  }
+  if (row.request?.approved_price_monthly_cents || row.request?.approved_price_annual_cents || program.price_monthly_cents || program.price_annual_cents) {
+    return "Awaiting payment";
+  }
+  return "Needs billing decision";
+}
+
+function financeBadgeTone(label: string): "neutral" | "positive" | "warning" | "danger" {
+  const value = label.toLowerCase();
+  if (["active", "paid"].includes(value)) {
+    return "positive";
+  }
+  if (["paused", "ending", "awaiting payment", "checkout sent"].includes(value)) {
+    return "warning";
+  }
+  if (["kicked", "past due", "payment failed", "needs billing decision"].includes(value)) {
+    return "danger";
+  }
+  return "neutral";
+}
+
+function financeCurrentPeriodLabel(row: FinanceEnrollmentRow) {
+  if (!row.subscription?.current_period_start || !row.subscription.current_period_end) {
+    return "—";
+  }
+  return `${formatFinanceShortDate(row.subscription.current_period_start)} – ${formatFinanceShortDate(row.subscription.current_period_end)}`;
+}
+
+function financeNextBillingLabel(row: FinanceEnrollmentRow) {
+  const subscription = row.subscription;
+  if (!subscription?.stripe_subscription_id || !hasActiveRecurringSubscription(subscription)) {
+    return "—";
+  }
+  if (subscription.payment_paused) {
+    return subscription.payment_paused_until ? `Resumes ${formatFinanceShortDate(subscription.payment_paused_until)}` : "Paused indefinitely";
+  }
+  if (!subscription.current_period_end) {
+    return "—";
+  }
+  return subscription.cancel_at_period_end ? `Ends on ${formatFinanceShortDate(subscription.current_period_end)}` : `Next billing: ${formatFinanceShortDate(subscription.current_period_end)}`;
+}
+
+function formatFinanceShortDate(value: string | null | undefined) {
+  if (!value) {
+    return "—";
+  }
+  return new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
 function hasActiveRecurringSubscription(subscription: ProgramSubscription | null | undefined) {
@@ -10255,16 +12614,6 @@ function financeMonthlyAmountCents(row: FinanceEnrollmentRow, program: Program |
   return row.request?.approved_price_monthly_cents ?? program.price_monthly_cents ?? 0;
 }
 
-function financeTimesPaid(row: FinanceEnrollmentRow) {
-  if (row.request?.payment_bypassed) {
-    return "0";
-  }
-  if (row.request?.admission_completed_at || row.subscription?.current_period_start) {
-    return row.subscription?.stripe_subscription_id ? "1+" : "1";
-  }
-  return "0";
-}
-
 function formatCurrencyAmount(cents: number | null) {
   return new Intl.NumberFormat("en-CA", {
     style: "currency",
@@ -10276,14 +12625,14 @@ function formatCurrencyAmount(cents: number | null) {
 function financeAuditFallbackSummary(row: FinanceEnrollmentRow, program: Program) {
   const actor = row.approver?.full_name ?? "Director";
   const student = row.student?.full_name || "Student";
-  if (row.request?.payment_bypassed) {
+  if (row.request?.payment_bypassed || row.subscription?.payment_waived) {
     return `${actor} waived payment indefinitely for ${student}.`;
   }
   if (row.subscription?.stripe_subscription_id) {
     return `Parent paid and subscription is active for ${student}.`;
   }
   if ((row.subscription?.payment_type ?? row.request?.payment_type) === "annual" && row.request?.approved_price_annual_cents) {
-    return `${actor} approved ${student} for a one-time annual payment of ${formatPrice(row.request.approved_price_annual_cents)}.`;
+    return `${actor} approved ${student} for Pay in Full of ${formatPrice(row.request.approved_price_annual_cents)}.`;
   }
   if (row.request?.approved_price_monthly_cents) {
     return `${actor} changed ${student}'s price to ${formatPrice(row.request.approved_price_monthly_cents)}/month.`;
@@ -10380,11 +12729,7 @@ async function fetchMosqueProgramsSnapshot(slug: string): Promise<MosquePrograms
     throw new Error(programError.message);
   }
 
-  const visiblePrograms = (programData ?? []).filter((program) => {
-    const publicationStatus = program.publication_status ?? "published";
-    const lifecycleStatus = program.lifecycle_status ?? "upcoming";
-    return publicationStatus === "published" && lifecycleStatus !== "cancelled" && lifecycleStatus !== "archived";
-  });
+  const visiblePrograms = (programData ?? []).filter((program) => isPubliclyListed(toProgramStatusFields(program)));
 
   const teacherIds = Array.from(new Set(visiblePrograms.map((program) => program.director_profile_id ?? program.teacher_profile_id).filter(Boolean))) as string[];
   let teachers: TeacherDisplay[] = [];
@@ -10931,6 +13276,105 @@ async function loadEnrollmentTrackMap(
 function useStudentUnreadAnnouncements(slug: string) {
   const { announcementCount, noteCount } = useStudentNotificationCounts(slug);
   return { unreadCount: announcementCount + noteCount };
+}
+
+type ApplicantApplicationRow = {
+  request: EnrollmentRequest;
+  program: Program | null;
+  track: ProgramTrack | null;
+  subscription: ProgramSubscription | null;
+  student: StudentDisplay | null;
+};
+
+/**
+ * Every enrollment_requests row for the current user (or, for a parent, every
+ * linked child) — unlike Inbox's request feed, this is never filtered by
+ * student_dismissed_at, since it's the persistent source of truth for
+ * "what did I apply to and where does it stand", not a dismissable feed.
+ */
+function useApplicantApplications(slug: string) {
+  const [rows, setRows] = useState<ApplicantApplicationRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  async function load() {
+    setLoading(true);
+    setError(null);
+    const supabase = createSupabaseBrowserClient();
+    const session = await loadCachedSession();
+    const userId = session?.user.id ?? null;
+    if (!userId) {
+      setRows([]);
+      setLoading(false);
+      return;
+    }
+
+    const [{ data: profile }, { data: mosque }] = await Promise.all([
+      supabase.from("profiles").select("account_type").eq("id", userId).maybeSingle(),
+      supabase.from("mosques").select("id").eq("slug", slug).maybeSingle(),
+    ]);
+    if (!mosque) {
+      setError("Masjid not found.");
+      setLoading(false);
+      return;
+    }
+
+    const isParent = profile?.account_type === "parent";
+    const { children } = isParent ? await fetchParentChildren(supabase, slug, userId, mosque.id) : { children: [] as StudentDisplay[] };
+
+    const { data: requestRows, error: requestError } = isParent
+      ? await supabase.from("enrollment_requests").select("*").eq("mosque_id", mosque.id).eq("parent_profile_id", userId).order("requested_at", { ascending: false })
+      : await supabase.from("enrollment_requests").select("*").eq("mosque_id", mosque.id).eq("student_profile_id", userId).order("requested_at", { ascending: false });
+
+    if (requestError) {
+      setError(requestError.message);
+      setLoading(false);
+      return;
+    }
+
+    const requests = requestRows ?? [];
+    const programIds = Array.from(new Set(requests.map((request) => request.program_id)));
+    const trackIds = Array.from(new Set(requests.map((request) => request.program_track_id).filter(Boolean) as string[]));
+    const studentIds = Array.from(new Set(requests.map((request) => request.student_profile_id)));
+
+    const [{ data: programRows }, { data: trackRows }, { data: subscriptionRows }] = await Promise.all([
+      programIds.length ? supabase.from("programs").select("*").in("id", programIds) : Promise.resolve({ data: [] as Program[] }),
+      trackIds.length ? supabase.from("program_tracks").select("*").in("id", trackIds) : Promise.resolve({ data: [] as ProgramTrack[] }),
+      programIds.length && studentIds.length
+        ? supabase.from("program_subscriptions").select("*").in("program_id", programIds).in("student_profile_id", studentIds)
+        : Promise.resolve({ data: [] as ProgramSubscription[] }),
+    ]);
+
+    const selfProfile = profile ? ({ id: userId } as StudentDisplay) : null;
+    const knownStudents = [...children, ...(selfProfile ? [selfProfile] : [])];
+    const missingStudentIds = studentIds.filter((id) => !knownStudents.some((student) => student.id === id));
+    const { data: extraStudents } = missingStudentIds.length
+      ? await supabase.from("profiles").select("id, full_name, email, phone_number, avatar_url, age, gender, date_of_birth, account_type").in("id", missingStudentIds)
+      : { data: [] as StudentDisplay[] };
+    const allStudents = [...children, ...(extraStudents ?? [])];
+
+    setRows(
+      requests.map((request) => ({
+        request,
+        program: (programRows ?? []).find((program) => program.id === request.program_id) ?? null,
+        track: request.program_track_id ? (trackRows ?? []).find((track) => track.id === request.program_track_id) ?? null : null,
+        subscription:
+          (subscriptionRows ?? []).find((subscription) => subscription.program_id === request.program_id && subscription.student_profile_id === request.student_profile_id) ?? null,
+        student: request.student_profile_id === userId ? null : allStudents.find((student) => student.id === request.student_profile_id) ?? null,
+      })),
+    );
+    setLoading(false);
+  }
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      void load();
+    }, 0);
+    return () => window.clearTimeout(timeout);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slug]);
+
+  return { rows, loading, error, reload: load };
 }
 
 async function fetchParentChildren(
@@ -11509,25 +13953,25 @@ function StudentRequestCard({
   request,
   onRescind,
   onDismiss,
-  onCompleteRegistration,
-  checkoutBusy = false,
+  completeRegistrationHref,
+  viewClassHref,
 }: {
   request: RequestWithContext;
   onRescind?: () => void;
   onDismiss?: () => void;
-  onCompleteRegistration?: () => void;
-  checkoutBusy?: boolean;
+  completeRegistrationHref?: string;
+  viewClassHref?: string;
 }) {
   const statusLabel = studentRequestStatusLabel(request);
   const statusTime = request.reviewed_at ?? request.requested_at;
   const childName = request.parent_profile_id ? request.student?.full_name?.trim() : null;
-  const isPaymentRequest = Boolean(onCompleteRegistration);
+  const needsConfirmation = Boolean(completeRegistrationHref);
   const reviewedMessage = request.review_note ?? request.decision_note;
   const message =
     request.status === "pending"
       ? null
       : reviewedMessage ??
-        (isPaymentRequest
+        (needsConfirmation
           ? "Your teacher approved this request. Complete registration to activate the class."
           : request.status === "approved"
             ? request.payment_bypassed
@@ -11539,7 +13983,7 @@ function StudentRequestCard({
                 ? `You were removed from ${request.program?.title ?? "this class"}.`
                 : null);
   return (
-    <article className={cn("rounded-xl border border-[#E1E8EC] bg-white p-3", (isPaymentRequest || request.payment_bypassed) && "border-[#CFE8D6] bg-[#FBFEFC]", request.status === "waitlisted" && "border-[#FFE3A3] bg-[#FFFDF7]")}>
+    <article className={cn("rounded-xl border border-[#E1E8EC] bg-white p-3", (needsConfirmation || request.payment_bypassed) && "border-[#CFE8D6] bg-[#FBFEFC]", request.status === "waitlisted" && "border-[#FFE3A3] bg-[#FFFDF7]")}>
       <div className="flex items-start gap-3">
         <DefaultProfileIcon />
         <div className="min-w-0 flex-1">
@@ -11558,15 +14002,20 @@ function StudentRequestCard({
             ) : null}
           </div>
           {message ? <p className="mt-2 text-sm leading-5 text-[#26323A]">{message}</p> : null}
-          {onCompleteRegistration ? (
-            <button
-              type="button"
-              onClick={onCompleteRegistration}
-              disabled={checkoutBusy}
-              className="mt-3 inline-flex min-h-10 w-full items-center justify-center rounded-[6px] bg-[#2E6E52] px-4 text-sm font-semibold text-white shadow-[0_8px_18px_rgba(46,110,82,0.22)] transition-colors hover:bg-[#265D45] disabled:opacity-60"
+          {completeRegistrationHref ? (
+            <Link
+              href={completeRegistrationHref}
+              className="mt-3 inline-flex min-h-10 w-full items-center justify-center rounded-[6px] bg-[#2E6E52] px-4 text-sm font-semibold !text-white shadow-[0_8px_18px_rgba(46,110,82,0.22)] transition-colors hover:bg-[#265D45]"
             >
-              {checkoutBusy ? "Opening checkout..." : "Complete registration"}
-            </button>
+              Complete registration
+            </Link>
+          ) : viewClassHref ? (
+            <Link
+              href={viewClassHref}
+              className="mt-3 inline-flex min-h-10 w-full items-center justify-center rounded-[6px] bg-[#17624F] px-4 text-sm font-semibold !text-white transition-colors hover:bg-[#124F40]"
+            >
+              View Class
+            </Link>
           ) : null}
         </div>
         {onRescind ? <IconActionButton label="Rescind" tone="danger" onClick={onRescind} /> : null}
@@ -11704,7 +14153,9 @@ function studentRequestStatusLabel(request: RequestWithContext) {
     return "Removed";
   }
 
-  return request.status.charAt(0).toUpperCase() + request.status.slice(1);
+  const status = getApplicationStatus(request);
+  const paymentStatus = getApplicationPaymentStatus(request, request.program, null);
+  return getApplicationRowStatusLabel(status, paymentStatus);
 }
 
 function DefaultProfileIcon({ className = "h-6 w-6", compact = false }: { className?: string; compact?: boolean } = {}) {
@@ -12097,12 +14548,12 @@ function ApplicationDecisionModal({
                       }}
                       className={cn("min-h-10 text-sm font-semibold", billingMode === mode ? "bg-[#17624F] text-white" : "bg-white text-[#52616A]")}
                     >
-                      {mode === "monthly" ? "Monthly" : "One-time"}
+                      {mode === "monthly" ? "Monthly" : "Pay in Full"}
                     </button>
                   ))}
                 </div>
                 <label className="block">
-                  <span className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">{billingMode === "monthly" ? "Monthly price" : "One-time annual fee"}</span>
+                  <span className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">{billingMode === "monthly" ? "Monthly price" : "Pay in Full price"}</span>
                   <input value={price} onChange={(event) => setPrice(event.target.value)} inputMode="decimal" className="mt-1 h-11 w-full rounded-[10px] border border-[#B9C3C8] px-3 text-sm font-semibold outline-none focus:border-[#2F8FB3]" />
                 </label>
                 {billingMode === "annual" && target.request.program ? <p className="text-xs leading-5 text-[#7B858C]">{annualDealText(target.request.program)}</p> : null}
@@ -13346,6 +15797,17 @@ function ProgramScheduleOptionsDisplay({ tracks, fallbackSchedule }: { tracks: P
 
 function ProgramPaymentOptionsDisplay({ program }: { program: Program }) {
   const options = programPaymentOptions(program);
+  if (!program.is_paid && program.payment_kind === "manual") {
+    return (
+      <div className="mt-4 space-y-2 border-t border-[#E6ECEF] pt-4">
+        <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">Price options</p>
+        <div className="rounded-[14px] bg-[#F7FAFB] p-3 ring-1 ring-[#E6ECEF]">
+          <p className="text-sm font-semibold text-[#26323A]">Price determined after review</p>
+          <p className="mt-1 text-xs leading-5 text-[#6B747B]">Final price confirmed after application review.</p>
+        </div>
+      </div>
+    );
+  }
   if (!program.is_paid) {
     return (
       <div className="mt-4 space-y-2 border-t border-[#E6ECEF] pt-4">
@@ -13491,7 +15953,7 @@ function ChildEnrollmentSelector({
         disabled={busy || selectedChildIds.length === 0}
         className="mt-3 min-h-11 w-full rounded-full bg-[#17624F] px-4 text-sm font-semibold text-white shadow-[0_10px_20px_rgba(23,98,79,0.18)] disabled:opacity-60"
       >
-        {busy ? "Sending..." : "Submit Request"}
+        {busy ? "Submitting..." : "Submit Application"}
       </button>
     </div>
   );
@@ -13706,6 +16168,7 @@ function ProgramCardGrid({
   detailBaseHref,
   accountType,
   viewerProfiles = [],
+  applicationStatusByProgramId,
 }: {
   programs: ProgramWithTeacher[];
   mosqueSlug: string;
@@ -13714,6 +16177,7 @@ function ProgramCardGrid({
   detailBaseHref?: string;
   accountType?: string | null;
   viewerProfiles?: StudentDisplay[];
+  applicationStatusByProgramId?: Record<string, ApplicantApplicationRow>;
 }) {
   if (programs.length === 0) {
     return <EmptyState title="No programs available" text={emptyText} />;
@@ -13728,12 +16192,42 @@ function ProgramCardGrid({
           : viewerProfiles.length
             ? `You ${eligibleCount > 0 ? "are" : "are not"} eligible for this program.`
             : undefined;
+        const applicationRow = applicationStatusByProgramId?.[program.id];
+        const enrolled = enrolledProgramIds.includes(program.id);
+        const relationship = enrolled
+          ? null
+          : applicationRow
+            ? programBrowseRelationship(applicationRow)
+            : null;
         return (
-          <ProgramCard key={program.id} program={program} enrolled={enrolledProgramIds.includes(program.id)} detailHref={`${detailBaseHref ?? `/m/${mosqueSlug}/programs`}/${program.id}`} eligibilityLabel={eligibilityLabel} />
+          <ProgramCard
+            key={program.id}
+            program={program}
+            enrolled={enrolled}
+            detailHref={`${detailBaseHref ?? `/m/${mosqueSlug}/programs`}/${program.id}`}
+            eligibilityLabel={eligibilityLabel}
+            relationship={relationship}
+          />
         );
       })}
     </div>
   );
+}
+
+function programBrowseRelationship(row: ApplicantApplicationRow): { label: string; tone: "open" | "waitlist" | "closed" } | null {
+  const status = getApplicationStatus(row.request);
+  switch (status) {
+    case "pending_review":
+      return { label: "Application Submitted", tone: "closed" };
+    case "waitlisted":
+      return { label: "Waitlisted", tone: "waitlist" };
+    case "approved_confirmation_required":
+      return { label: "Approved — Action Needed", tone: "open" };
+    case "completed_enrolled":
+      return { label: "Enrolled", tone: "open" };
+    default:
+      return null;
+  }
 }
 
 function EnrolledClassList({ programs, mosqueSlug }: { programs: ProgramWithTeacher[]; mosqueSlug: string }) {
@@ -13757,6 +16251,104 @@ function EnrolledClassList({ programs, mosqueSlug }: { programs: ProgramWithTeac
           </div>
         </article>
       ))}
+    </div>
+  );
+}
+
+function MyApplicationsList({
+  slug,
+  rows,
+  onViewDetails,
+}: {
+  slug: string;
+  rows: ApplicantApplicationRow[];
+  onViewDetails: (row: ApplicantApplicationRow) => void;
+}) {
+  const sorted = [...rows].sort((a, b) => Date.parse(b.request.requested_at) - Date.parse(a.request.requested_at));
+  return (
+    <div className="space-y-3 bg-[var(--workspace)] p-4">
+      {sorted.map((row) => {
+        const status = getApplicationStatus(row.request);
+        const paymentStatus = getApplicationPaymentStatus(row.request, row.program, row.subscription);
+        const action = getApplicantPrimaryAction(status, paymentStatus, row.request);
+        const statusLabel = getApplicationRowStatusLabel(status, paymentStatus);
+        const childName = row.student?.full_name?.trim();
+        const trackName = row.track?.name?.trim();
+        return (
+          <article key={row.request.id} className="rounded-xl border border-[#E1E8EC] bg-white p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <h3 className="truncate text-sm font-semibold text-[#26323A]">{row.program?.title ?? "Class"}</h3>
+                <p className="mt-0.5 text-xs text-[#6B747B]">
+                  {childName ? `${childName} • ` : ""}
+                  {trackName ? `${trackName} • ` : ""}
+                  Submitted {timeAgo(row.request.requested_at)}
+                </p>
+              </div>
+              <span className={cn("shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold", programStatusBadgeToneClass(applicationStatusTone(status)))}>{statusLabel}</span>
+            </div>
+            {paymentStatus !== "not_required" ? (
+              <span className={cn("mt-2 inline-flex rounded-full px-2.5 py-1 text-[11px] font-semibold", programStatusBadgeToneClass(paymentStatusTone(paymentStatus)))}>
+                {PAYMENT_STATUS_LABELS[paymentStatus]}
+              </span>
+            ) : null}
+            {action.kind === "confirmation" ? (
+              <Link
+                href={`/m/${slug}/registration/${row.request.id}`}
+                className="mt-3 inline-flex min-h-10 w-full items-center justify-center rounded-[6px] bg-[#2E6E52] px-4 text-sm font-semibold !text-white shadow-[0_8px_18px_rgba(46,110,82,0.22)] transition-colors hover:bg-[#265D45]"
+              >
+                {action.label}
+              </Link>
+            ) : action.kind === "class" && row.request.program_id ? (
+              <Link
+                href={`/m/${slug}/portal/classes/${row.request.program_id}`}
+                className="mt-3 inline-flex min-h-10 w-full items-center justify-center rounded-[6px] bg-[#17624F] px-4 text-sm font-semibold !text-white transition-colors hover:bg-[#124F40]"
+              >
+                {action.label}
+              </Link>
+            ) : (
+              <button
+                type="button"
+                onClick={() => onViewDetails(row)}
+                className="mt-3 inline-flex min-h-10 w-full items-center justify-center rounded-[6px] border border-[#CBD5D9] bg-white px-4 text-sm font-semibold text-[#26323A] transition-colors hover:bg-[#F5F8F9]"
+              >
+                {action.label}
+              </button>
+            )}
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
+function ApplicantDetailsDrawer({ row, onClose }: { row: ApplicantApplicationRow; onClose: () => void }) {
+  const status = getApplicationStatus(row.request);
+  const paymentStatus = getApplicationPaymentStatus(row.request, row.program, row.subscription);
+  const statusLabel = getApplicationRowStatusLabel(status, paymentStatus);
+  const childName = row.student?.full_name?.trim();
+  const decisionNote = row.request.decision_note ?? row.request.review_note;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 md:items-center" onClick={onClose}>
+      <div className="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-t-2xl bg-white p-5 md:rounded-2xl" onClick={(event) => event.stopPropagation()}>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold text-[#26323A]">{row.program?.title ?? "Application"}</h2>
+            <p className="mt-1 text-sm text-[#6B747B]">{statusLabel}</p>
+          </div>
+          <button type="button" onClick={onClose} className="p-1 text-[#6B747B] hover:text-[#26323A]" aria-label="Close">
+            <XIcon />
+          </button>
+        </div>
+        <dl className="mt-4 divide-y divide-[#E6ECEF] text-sm">
+          {childName ? <SidebarFact label="Student" value={childName} /> : null}
+          {row.track?.name ? <SidebarFact label="Track" value={row.track.name} /> : null}
+          <SidebarFact label="Submitted" value={timeAgo(row.request.requested_at)} />
+          {row.request.reviewed_at ? <SidebarFact label="Reviewed" value={timeAgo(row.request.reviewed_at)} /> : null}
+        </dl>
+        {decisionNote ? <p className="mt-4 rounded-lg bg-[#F5F8F9] p-3 text-sm leading-6 text-[#26323A]">{decisionNote}</p> : null}
+      </div>
     </div>
   );
 }
@@ -14000,26 +16592,35 @@ function programCoverPriceLabel(program: Program) {
 }
 
 function programRegistrationLabel(program: Program) {
-  if (program.publication_status === "draft" || program.lifecycle_status === "cancelled" || program.lifecycle_status === "archived") {
-    return { label: "Registration closed", tone: "closed" as const };
+  const state = getApplicationButtonState(toProgramStatusFields(program));
+  switch (state.type) {
+    case "open":
+      return { label: "Registration open", tone: "open" as const };
+    case "waitlist":
+      return { label: "Waitlist open", tone: "waitlist" as const };
+    case "invite":
+      return { label: "Invite only", tone: "invite" as const };
+    case "scheduled":
+      return { label: "Opens soon", tone: "scheduled" as const };
+    default:
+      return { label: "Registration closed", tone: "closed" as const };
   }
-  if (program.accepting_applications === false) {
-    return { label: "Registration closed", tone: "closed" as const };
-  }
-  if (program.application_status === "waitlist_only") {
-    return { label: "Waitlist open", tone: "waitlist" as const };
-  }
-  if (program.application_status === "invite_only" || program.application_mode === "invite_only") {
-    return { label: "Invite only", tone: "invite" as const };
-  }
-  if (program.application_status === "accepting") {
-    return { label: "Registration open", tone: "open" as const };
-  }
-  return { label: "Registration closed", tone: "closed" as const };
 }
 
-function ProgramCard({ program, detailHref, enrolled = false, eligibilityLabel }: { program: ProgramWithTeacher; detailHref: string; enrolled?: boolean; eligibilityLabel?: string }) {
-  const registration = programRegistrationLabel(program);
+function ProgramCard({
+  program,
+  detailHref,
+  enrolled = false,
+  eligibilityLabel,
+  relationship,
+}: {
+  program: ProgramWithTeacher;
+  detailHref: string;
+  enrolled?: boolean;
+  eligibilityLabel?: string;
+  relationship?: { label: string; tone: "open" | "waitlist" | "closed" } | null;
+}) {
+  const registration = relationship ?? programRegistrationLabel(program);
   return (
     <TransitionLink href={detailHref} label="Class Details" className={cn("group relative overflow-hidden rounded-xl bg-white shadow-[0_5px_18px_rgba(38,50,58,0.14)] transition-transform hover:-translate-y-0.5 hover:shadow-[0_8px_24px_rgba(38,50,58,0.18)]", enrolled && "opacity-70")}>
       <div className="relative">
@@ -14040,6 +16641,12 @@ function ProgramCard({ program, detailHref, enrolled = false, eligibilityLabel }
           </div>
         </div>
         <AudienceDetails age={formatAgeRange(program.age_range_text)} gender={formatGender(program.audience_gender)} />
+        {(program.location?.trim() || program.room?.trim()) ? (
+          <p className="flex items-start gap-1.5 text-xs leading-5 text-[#6B747B]">
+            <span aria-hidden>📍</span>
+            <span className="min-w-0 flex-1">{[program.location?.trim(), program.room?.trim()].filter(Boolean).join(" — ")}</span>
+          </p>
+        ) : null}
         <div className="grid gap-2 text-xs font-semibold">
           <div className="flex items-center justify-between gap-3 rounded-[10px] bg-[#F5F8F9] px-3 py-2">
             <span className="text-[#6B747B]">Registration</span>
@@ -14637,6 +17244,7 @@ function TeacherClassCard({
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const schedule = scheduleSummary(program.schedule, program.schedule_notes);
+  const sessionRows = parseProgramSchedule(program.schedule);
   const age = formatAgeRange(program.age_range_text);
   const gender = formatGender(program.audience_gender);
   const isDirector = role === "director";
@@ -14685,23 +17293,41 @@ function TeacherClassCard({
   return (
     <article className="relative overflow-hidden rounded-[22px] border border-[#CBD8DE] bg-white shadow-[0_16px_40px_rgba(38,50,58,0.09)]">
       {isDirector ? <ClassCardActionMenu onDelete={() => setDeleteOpen(true)} /> : null}
-      <TransitionLink href={primaryHref} label={primaryLabel} className="block transition-opacity hover:opacity-95">
+      <TransitionLink href={primaryHref} label={primaryLabel} className="relative block transition-opacity hover:opacity-95">
         <ProgramHero program={program} />
+        <span className={cn("absolute left-3 top-3 z-10 inline-flex min-h-7 items-center rounded-full bg-white/92 px-3 text-xs font-bold uppercase tracking-wide shadow-[0_6px_16px_rgba(38,50,58,0.18)] backdrop-blur", controlLabel ? "text-[#2F6077]" : isDirector ? "text-[#17624F]" : "text-[#2F6077]")}>
+          {controlLabel ?? (isDirector ? "Director" : "Instructor")}
+        </span>
       </TransitionLink>
       <div className="space-y-4 p-4">
         <div className="space-y-2">
-          <span className={cn("inline-flex min-h-7 items-center rounded-full px-3 text-xs font-bold uppercase tracking-wide", controlLabel ? "bg-[#E7F3F8] text-[#2F6077]" : isDirector ? "bg-[#E6F5EE] text-[#17624F]" : "bg-[#EEF4F7] text-[#2F6077]")}>
-            {controlLabel ?? (isDirector ? "Director" : "Instructor")}
-          </span>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {getProgramStatusBadges(toProgramStatusFields(program)).map((badge) => (
+              <span key={badge.label} className={cn("rounded-full px-2.5 py-1 text-[11px] font-semibold", programStatusBadgeToneClass(badge.tone))}>
+                {badge.label}
+              </span>
+            ))}
+          </div>
           <TransitionLink href={primaryHref} label={primaryLabel} className="line-clamp-2 text-lg font-semibold leading-6 text-[#26323A] hover:text-[#17624F]">
             {program.title}
           </TransitionLink>
-          <p className="mt-1 text-sm text-[#6B747B]">{schedule.full}</p>
+          {sessionRows.length ? (
+            <div className="mt-1 space-y-0.5">
+              {sessionRows.map((row) => (
+                <p key={scheduleRowKey(row)} className="text-sm text-[#6B747B]">
+                  {formatDayAbbreviation(row.day)} {formatScheduleRange(row.start, row.end)}
+                </p>
+              ))}
+            </div>
+          ) : (
+            <p className="mt-1 text-sm text-[#6B747B]">{schedule.full}</p>
+          )}
         </div>
         <AudienceDetails age={age} gender={gender} />
         <div className="divide-y divide-[#E3E8EC] border-t border-[#E3E8EC]">
           <TeacherActionLink href={publicHref} icon={<ExternalLinkIcon />} label="View Public Page" previewLabel="Class Details" />
           <TeacherActionLink href={`${classBasePath}/${program.id}/students`} icon={<StudentsIcon />} label="Students" />
+          {isDirector ? <TeacherActionLink href={`${classBasePath}/${program.id}/applications`} icon={<ClipboardIcon />} label="Manage Applications" /> : null}
           {isDirector ? <TeacherActionLink href={`${classBasePath}/${program.id}/instructors`} icon={<InstructorManageIcon />} label="Instructors" /> : null}
           <TeacherActionLink href={`${classBasePath}/${program.id}/announcement`} icon={<MegaphoneIcon />} label="Announcement" />
           {canManageFinances ? <TeacherActionLink href={`${classBasePath}/${program.id}/finances`} icon={<FinanceIcon />} label="Manage Finances" /> : null}
@@ -14876,6 +17502,12 @@ function TeacherOtherClassCard({ program, mosqueSlug }: { program: Program; mosq
         <div className="min-w-0 flex-1">
           <h3 className="line-clamp-2 text-base font-semibold text-[#26323A]">{program.title}</h3>
           <p className="mt-1 text-sm text-[#6B747B]">{schedule.full}</p>
+          {(program.location?.trim() || program.room?.trim()) ? (
+            <p className="mt-1 flex items-start gap-1.5 text-xs leading-5 text-[#6B747B]">
+              <span aria-hidden>📍</span>
+              <span className="min-w-0 flex-1 truncate">{[program.location?.trim(), program.room?.trim()].filter(Boolean).join(" — ")}</span>
+            </p>
+          ) : null}
         </div>
       </div>
       <div className="mt-4 divide-y divide-[#E3E8EC] border-t border-[#E3E8EC]">
@@ -16004,38 +18636,59 @@ function formatPrice(cents: number | null) {
   }).format(cents / 100);
 }
 
-function programPaymentOptions(program: Pick<Program, "is_paid" | "offers_monthly_payment" | "offers_annual_payment" | "price_monthly_cents" | "price_annual_cents">) {
+type ProgramPaymentOptionsInput = Pick<
+  Program,
+  "is_paid" | "offers_monthly_payment" | "offers_annual_payment" | "price_monthly_cents" | "price_annual_cents" | "is_ongoing" | "start_date" | "end_date" | "duration_months"
+>;
+
+function programPayInFullDurationMonths(program: Pick<Program, "start_date" | "end_date" | "duration_months">) {
+  return monthsBetweenDates(program.start_date ?? "", program.end_date ?? "") ?? program.duration_months ?? null;
+}
+
+function programPaymentOptions(program: ProgramPaymentOptionsInput) {
   if (!program.is_paid) {
     return [];
   }
   const monthlyEnabled = program.offers_monthly_payment !== false && Boolean(program.price_monthly_cents);
-  const annualEnabled = Boolean(program.offers_annual_payment && program.price_annual_cents);
+  const annualEnabled = !program.is_ongoing && Boolean(program.offers_annual_payment && program.price_annual_cents);
+  const durationMonths = programPayInFullDurationMonths(program);
   const options: Array<{ type: PaymentType; title: string; price: string; subtitle: string; badge?: string }> = [];
   if (monthlyEnabled) {
     const monthlyBadge = monthlyDealText(program);
+    const fixedRange = !program.is_ongoing && program.start_date && program.end_date ? `${formatFinanceShortDate(program.start_date)} to ${formatFinanceShortDate(program.end_date)}` : null;
     options.push({
       type: "monthly",
       title: "Monthly plan",
       price: `${formatPrice(program.price_monthly_cents)}/month`,
-      subtitle: "10 monthly payments during the active school year.",
+      subtitle: program.is_ongoing
+        ? "This class is ongoing. Subscription continues monthly until ended."
+        : fixedRange
+          ? `Runs from ${fixedRange}. Subscription is scheduled to end when the program ends.`
+          : "Billed monthly for the length of the program.",
       badge: monthlyBadge || undefined,
     });
   }
   if (annualEnabled) {
-    const monthlyEquivalent = program.price_annual_cents ? Math.round(program.price_annual_cents / 10) : null;
+    const monthlyEquivalent = durationMonths && program.price_annual_cents ? Math.round(program.price_annual_cents / durationMonths) : null;
     options.push({
       type: "annual",
-      title: "One-time annual payment",
+      title: "Pay in Full",
       price: formatPrice(program.price_annual_cents),
-      subtitle: monthlyEquivalent ? `Equivalent to ${formatPrice(monthlyEquivalent)}/month for 10 months.` : "One payment covers the 10-month class year.",
+      subtitle: monthlyEquivalent
+        ? `Equivalent to ${formatPrice(monthlyEquivalent)}/month for the ${durationMonths}-month program.`
+        : "One payment covers the full program.",
       badge: annualDealText(program),
     });
   }
   return options;
 }
 
-function annualDealText(program: Pick<Program, "price_monthly_cents" | "price_annual_cents">) {
-  const monthlyTotal = (program.price_monthly_cents ?? 0) * 10;
+function annualDealText(program: Pick<Program, "price_monthly_cents" | "price_annual_cents" | "start_date" | "end_date" | "duration_months">) {
+  const durationMonths = programPayInFullDurationMonths(program);
+  if (!durationMonths) {
+    return "";
+  }
+  const monthlyTotal = (program.price_monthly_cents ?? 0) * durationMonths;
   const annual = program.price_annual_cents ?? 0;
   if (!monthlyTotal || !annual || annual >= monthlyTotal) {
     return "";
@@ -16052,8 +18705,12 @@ function mosqueSlugLabel(mosque: Pick<Mosque, "slug" | "name"> | null | undefine
   return titleCase(mosque.slug || mosque.name);
 }
 
-function monthlyDealText(program: Pick<Program, "price_monthly_cents" | "price_annual_cents">) {
-  const monthlyTotal = (program.price_monthly_cents ?? 0) * 10;
+function monthlyDealText(program: Pick<Program, "price_monthly_cents" | "price_annual_cents" | "start_date" | "end_date" | "duration_months">) {
+  const durationMonths = programPayInFullDurationMonths(program);
+  if (!durationMonths) {
+    return "";
+  }
+  const monthlyTotal = (program.price_monthly_cents ?? 0) * durationMonths;
   const annual = program.price_annual_cents ?? 0;
   if (!monthlyTotal || !annual || monthlyTotal >= annual) {
     return "";
@@ -16061,7 +18718,7 @@ function monthlyDealText(program: Pick<Program, "price_monthly_cents" | "price_a
   return `Save ${formatPrice(annual - monthlyTotal)}`;
 }
 
-function defaultPaymentType(program: Pick<Program, "is_paid" | "offers_monthly_payment" | "offers_annual_payment" | "price_monthly_cents" | "price_annual_cents">): PaymentType {
+function defaultPaymentType(program: ProgramPaymentOptionsInput): PaymentType {
   const options = programPaymentOptions(program);
   return options[0]?.type ?? "monthly";
 }
@@ -16373,7 +19030,7 @@ function scheduleTime(schedule: Json | null) {
 }
 
 function scheduleSummary(schedule: Json | null, notes: string | null) {
-  const day = scheduleLabel(schedule, "Schedule TBA");
+  const day = scheduleLabel(schedule, "Schedule will be announced");
   const time = scheduleTime(schedule);
   const full = notes || (time === "TBA" ? day : `${day}, ${time}`);
   return { day, time, full };

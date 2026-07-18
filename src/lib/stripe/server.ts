@@ -26,3 +26,7 @@ export function getStripeWebhookSecret() {
 
   return webhookSecret;
 }
+
+export function shouldUseStripeConnect() {
+  return process.env.STRIPE_CONNECT_PLATFORM === "true";
+}

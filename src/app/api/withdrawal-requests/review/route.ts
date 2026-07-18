@@ -1,4 +1,4 @@
-import { getStripe } from "@/lib/stripe/server";
+import { cancelProgramSubscription } from "@/lib/stripe/subscriptions";
 import { createSupabaseServiceClient } from "@/lib/supabase/service";
 
 export const runtime = "nodejs";
@@ -7,14 +7,6 @@ type ReviewWithdrawalBody = {
   withdrawalRequestId?: string;
   status?: "approved" | "rejected";
 };
-
-function shouldUseStripeConnect() {
-  return process.env.STRIPE_CONNECT_PLATFORM === "true";
-}
-
-function isActiveStripeStatus(status: string | null | undefined) {
-  return Boolean(status && !["canceled", "incomplete_expired"].includes(status));
-}
 
 export async function POST(request: Request) {
   try {
@@ -93,18 +85,7 @@ export async function POST(request: Request) {
       .eq("student_profile_id", withdrawalRequest.student_profile_id)
       .maybeSingle();
 
-    if (subscription?.stripe_subscription_id && isActiveStripeStatus(subscription.status)) {
-      const stripeOptions = shouldUseStripeConnect() && subscription.stripe_account_id ? { stripeAccount: subscription.stripe_account_id } : undefined;
-      await getStripe().subscriptions.cancel(subscription.stripe_subscription_id, {}, stripeOptions);
-      await supabase
-        .from("program_subscriptions")
-        .update({
-          status: "canceled",
-          cancel_at_period_end: false,
-          updated_at: now,
-        })
-        .eq("id", subscription.id);
-    }
+    await cancelProgramSubscription(supabase, subscription);
 
     const { error: updateError } = await supabase
       .from("withdrawal_requests")

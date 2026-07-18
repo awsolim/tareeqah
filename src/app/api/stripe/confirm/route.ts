@@ -1,5 +1,6 @@
 import Stripe from "stripe";
 import { getStripe } from "@/lib/stripe/server";
+import { activateEnrollmentForRequest, selectedTrackIdsForRequest } from "@/lib/programs/enrollment-activation";
 import { createSupabaseServiceClient } from "@/lib/supabase/service";
 
 export const runtime = "nodejs";
@@ -7,19 +8,6 @@ export const runtime = "nodejs";
 type ConfirmCheckoutBody = {
   checkoutSessionId?: string;
 };
-
-async function selectedTrackIdsForRequest(supabase: ReturnType<typeof createSupabaseServiceClient>, enrollmentRequestId: string, fallbackTrackId: string | null) {
-  const { data } = await supabase.from("enrollment_request_tracks").select("program_track_id").eq("enrollment_request_id", enrollmentRequestId);
-  const trackIds = (data ?? []).map((row) => row.program_track_id).filter((trackId): trackId is string => Boolean(trackId));
-  return trackIds.length ? trackIds : fallbackTrackId ? [fallbackTrackId] : [];
-}
-
-async function replaceEnrollmentTracks(supabase: ReturnType<typeof createSupabaseServiceClient>, enrollmentId: string, trackIds: string[]) {
-  await supabase.from("enrollment_tracks").delete().eq("enrollment_id", enrollmentId);
-  if (trackIds.length) {
-    await supabase.from("enrollment_tracks").insert(trackIds.map((trackId) => ({ enrollment_id: enrollmentId, program_track_id: trackId })));
-  }
-}
 
 async function replaceSubscriptionTracks(supabase: ReturnType<typeof createSupabaseServiceClient>, subscriptionRowId: string, trackIds: string[]) {
   await supabase.from("program_subscription_tracks").delete().eq("program_subscription_id", subscriptionRowId);
@@ -127,27 +115,20 @@ export async function POST(request: Request) {
       { onConflict: "program_id,student_profile_id" },
     ).select("id").single();
 
-    const { data: enrollment } = await supabase.from("enrollments").upsert(
-      {
-        program_id: programId,
-        student_profile_id: studentProfileId,
-        program_track_id: trackIds[0] ?? enrollmentRequest.program_track_id,
-        status: "active",
-      },
-      { onConflict: "program_id,student_profile_id" },
-    ).select("id").single();
-
     if (subscriptionRow) {
       await replaceSubscriptionTracks(supabase, subscriptionRow.id, trackIds);
     }
-    if (enrollment) {
-      await replaceEnrollmentTracks(supabase, enrollment.id, trackIds);
-    }
 
-    await supabase
-      .from("enrollment_requests")
-      .update({ admission_completed_at: now, student_dismissed_at: now, teacher_dismissed_at: null })
-      .eq("id", enrollmentRequestId);
+    // Enrollment activation itself is idempotent (upsert on program_id+student_profile_id),
+    // so it's safe for this client-triggered fast path and the webhook to both call it for
+    // the same payment. The audit trail entry is intentionally only recorded by the
+    // webhook (the true source of truth) to avoid a duplicate entry per payment.
+    await activateEnrollmentForRequest(supabase, {
+      enrollmentRequestId,
+      programId,
+      studentProfileId,
+      fallbackTrackId: enrollmentRequest.program_track_id,
+    });
 
     return Response.json({ ok: true });
   } catch (error) {

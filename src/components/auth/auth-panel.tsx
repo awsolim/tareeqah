@@ -54,7 +54,7 @@ function saveDevSwitchAccountForTesting(account: { label: string; email: string;
   }
 }
 
-export function AuthPanel({ mode, slug }: { mode: AuthMode; slug: string }) {
+export function AuthPanel({ mode, slug, returnTo }: { mode: AuthMode; slug: string; returnTo?: string }) {
   const router = useRouter();
   const pathname = usePathname();
   const [accountType, setAccountType] = useState<AccountType>("student");
@@ -165,7 +165,7 @@ export function AuthPanel({ mode, slug }: { mode: AuthMode; slug: string }) {
           password,
           accountType,
         });
-        router.push(getDefaultLandingHref(activeSlug, access));
+        router.push(returnTo ?? getDefaultLandingHref(activeSlug, access));
         router.refresh();
         return;
       }
@@ -194,7 +194,7 @@ export function AuthPanel({ mode, slug }: { mode: AuthMode; slug: string }) {
       password,
       accountType: isDevSwitchAccountType(loginAccountType) ? loginAccountType : "student",
     });
-    router.push(getDefaultLandingHref(activeSlug, access));
+    router.push(returnTo ?? getDefaultLandingHref(activeSlug, access));
     router.refresh();
   }
 
@@ -224,7 +224,7 @@ export function AuthPanel({ mode, slug }: { mode: AuthMode; slug: string }) {
     <div className="mx-auto max-w-xl">
       <div className="grid grid-cols-2 border-b border-[#D6DCE0]">
         <Link
-          href={`/m/${activeSlug}/login`}
+          href={returnTo ? `/m/${activeSlug}/login?returnTo=${encodeURIComponent(returnTo)}` : `/m/${activeSlug}/login`}
           className={cn(
             "flex min-h-12 items-center justify-center text-sm font-medium",
             mode === "login" ? "border-b-2 border-[#2F8FB3] text-[#2F8FB3]" : "text-[#6B747B]",
@@ -233,7 +233,7 @@ export function AuthPanel({ mode, slug }: { mode: AuthMode; slug: string }) {
           Log In
         </Link>
         <Link
-          href={`/m/${activeSlug}/signup`}
+          href={returnTo ? `/m/${activeSlug}/signup?returnTo=${encodeURIComponent(returnTo)}` : `/m/${activeSlug}/signup`}
           className={cn(
             "flex min-h-12 items-center justify-center text-sm font-medium",
             mode === "signup" ? "border-b-2 border-[#2F8FB3] text-[#2F8FB3]" : "text-[#6B747B]",
