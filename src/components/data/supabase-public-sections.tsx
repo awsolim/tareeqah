@@ -5001,7 +5001,7 @@ export function TeacherClassesData({ slug }: { slug: string }) {
 
   const visiblePrograms = programs.filter((program) => !hiddenProgramIds.has(program.id));
   const assignedProgramIds = new Set(programs.map((program) => program.id));
-  const otherPrograms = allPrograms.filter((program) => !assignedProgramIds.has(program.id));
+  const otherPrograms = allPrograms.filter((program) => !assignedProgramIds.has(program.id) && program.is_active);
 
   return (
     <section className="bg-[var(--workspace)]">
@@ -13114,7 +13114,11 @@ function useTeacherPrograms(slug: string) {
       }
 
       const [{ data: mosquePrograms, error: programError }, { data: assignments, error: assignmentError }, { data: memberships }] = await Promise.all([
-        supabase.from("programs").select("*").eq("mosque_id", mosque.id).eq("is_active", true).order("title", { ascending: true }),
+        // Deliberately not filtered on is_active: a director/instructor must still be able to
+        // find their own draft (is_active=false) programs in "My Classes" to finish/publish them.
+        // Inactive programs unassigned to the viewer are filtered back out below, in the
+        // "My Classes" vs "Other Classes" split, so they never leak into other directors' browsing.
+        supabase.from("programs").select("*").eq("mosque_id", mosque.id).order("title", { ascending: true }),
         supabase.from("program_teachers").select("program_id, role, can_manage_finances").eq("teacher_profile_id", userId),
         supabase.from("mosque_memberships").select("role, status, can_create_programs").eq("mosque_id", mosque.id).eq("profile_id", userId),
       ]);
