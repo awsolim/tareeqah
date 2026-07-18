@@ -148,6 +148,14 @@ export async function loadCachedUserAccess(slug: string, userId: string) {
   return promise;
 }
 
+export function getCachedProfileName(userId: string) {
+  return profileNameCache.has(userId) ? profileNameCache.get(userId) ?? null : undefined;
+}
+
+export function getCachedProfileSummary(userId: string) {
+  return profileSummaryCache.get(userId) ?? undefined;
+}
+
 export async function loadCachedProfileName(userId: string) {
   if (profileNameCache.has(userId)) {
     return profileNameCache.get(userId) ?? null;
@@ -240,6 +248,12 @@ export async function refreshCachedProfileSummary(userId: string) {
   profileSummaryCache.delete(userId);
   profileSummaryPromises.delete(userId);
   return loadCachedProfileSummary(userId);
+}
+
+export async function performClientLogout() {
+  clearUserScopedCaches();
+  setCachedSessionSnapshot(null);
+  await createSupabaseBrowserClient().auth.signOut();
 }
 
 function startAuthListener() {

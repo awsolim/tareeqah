@@ -10,7 +10,9 @@ import type { NavItem } from "@/components/layout/horizontal-nav";
 import { emptyUserAccess, type UserAccess } from "@/lib/authz";
 import {
   getCachedMosqueChrome,
+  getCachedProfileName,
   getCachedSessionSnapshot,
+  getCachedUserAccess,
   loadCachedProfileName,
   loadCachedSession,
   loadCachedUserAccess,
@@ -319,8 +321,12 @@ export function AppTopBar({
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
   const cachedSession = getCachedSessionSnapshot();
   const [session, setSession] = useState<Session | null>(cachedSession ?? null);
-  const [access, setAccess] = useState<UserAccess>(emptyUserAccess);
-  const [profileName, setProfileName] = useState<string | null>(null);
+  const [access, setAccess] = useState<UserAccess>(() =>
+    cachedSession?.user.id && mosqueSlug ? getCachedUserAccess(mosqueSlug, cachedSession.user.id) ?? emptyUserAccess : emptyUserAccess,
+  );
+  const [profileName, setProfileName] = useState<string | null>(() =>
+    cachedSession?.user.id ? getCachedProfileName(cachedSession.user.id) ?? null : null,
+  );
 
   useEffect(() => {
     if (!mosqueSlug) {
@@ -466,14 +472,23 @@ function TopBarLogo({ src, name, compact = false }: { src: string | null; name: 
   }
 
   return (
-    <span className={cn("flex shrink-0 items-center justify-center bg-[#F7F8F9] font-medium text-[#2E8F7D]", sizeClass, compact ? "text-[10px]" : "text-sm")}>
-      {name
-        .split(" ")
-        .map((part) => part[0])
-        .join("")
-        .slice(0, 2)
-        .toUpperCase()}
+    <span className={cn("flex shrink-0 items-center justify-center bg-[#F7F8F9] text-[#2E8F7D]", sizeClass)} aria-label={name}>
+      <MosqueIcon className={compact ? "h-4 w-4" : "h-5 w-5"} />
     </span>
+  );
+}
+
+function MosqueIcon({ className = "h-5 w-5" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M12 2.5v2.2" />
+      <circle cx="12" cy="2" r="0.6" fill="currentColor" stroke="none" />
+      <path d="M7.2 10.5a4.8 4.8 0 0 1 9.6 0" />
+      <path d="M4.5 20.5v-7a1.6 1.6 0 0 1 3.2 0v7" />
+      <path d="M16.3 20.5v-7a1.6 1.6 0 0 1 3.2 0v7" />
+      <path d="M7.2 20.5v-10h9.6v10" />
+      <path d="M10.5 20.5v-4a1.5 1.5 0 0 1 3 0v4" />
+    </svg>
   );
 }
 

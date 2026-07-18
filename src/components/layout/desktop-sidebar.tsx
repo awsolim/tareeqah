@@ -10,10 +10,14 @@ import type { NavItem } from "@/components/layout/horizontal-nav";
 import { emptyUserAccess, getAccountLabel, type UserAccess } from "@/lib/authz";
 import {
   getCachedMosqueChrome,
+  getCachedProfileSummary,
+  getCachedSessionSnapshot,
+  getCachedUserAccess,
   loadCachedSession,
   loadCachedProfileSummary,
   loadCachedUserAccess,
   loadMosqueChrome,
+  performClientLogout,
   subscribeCachedSession,
 } from "@/lib/client-cache";
 import { cn } from "@/lib/utils";
@@ -187,6 +191,7 @@ const accountPanelItems = [
   { label: "Billing", panel: "billing" },
   { label: "Privacy and Security", panel: "security" },
   { label: "Add App to Homescreen", panel: "homescreen" },
+  { label: "Switch Account", panel: "switchAccount" },
 ] as const;
 
 function useHasMounted() {
@@ -200,10 +205,19 @@ function useHasMounted() {
 }
 
 function DesktopProfileLink({ mosqueSlug, accountHref }: { mosqueSlug: string; accountHref: string }) {
-  const [session, setSession] = useState<Session | null>(null);
-  const [access, setAccess] = useState<UserAccess>(emptyUserAccess);
-  const [profileName, setProfileName] = useState<string | null>(null);
-  const [profileAvatarUrl, setProfileAvatarUrl] = useState<string | null>(null);
+  const cachedSession = getCachedSessionSnapshot();
+  const [session, setSession] = useState<Session | null>(cachedSession ?? null);
+  const [access, setAccess] = useState<UserAccess>(() =>
+    cachedSession?.user.id ? getCachedUserAccess(mosqueSlug, cachedSession.user.id) ?? emptyUserAccess : emptyUserAccess,
+  );
+  const [profileName, setProfileName] = useState<string | null>(() => {
+    const summary = cachedSession?.user.id ? getCachedProfileSummary(cachedSession.user.id) : undefined;
+    return summary?.fullName ?? cachedSession?.user.user_metadata?.full_name ?? null;
+  });
+  const [profileAvatarUrl, setProfileAvatarUrl] = useState<string | null>(() => {
+    const summary = cachedSession?.user.id ? getCachedProfileSummary(cachedSession.user.id) : undefined;
+    return summary?.avatarUrl ?? cachedSession?.user.user_metadata?.avatar_url ?? null;
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -284,9 +298,12 @@ function DesktopAccountSubnav({ mosqueSlug, accountHref }: { mosqueSlug: string;
   const router = useRouter();
   const hasMounted = useHasMounted();
 
-  const [session, setSession] = useState<Session | null>(null);
-  const [sessionResolved, setSessionResolved] = useState(false);
-  const [access, setAccess] = useState<UserAccess>(emptyUserAccess);
+  const cachedSession = getCachedSessionSnapshot();
+  const [session, setSession] = useState<Session | null>(cachedSession ?? null);
+  const [sessionResolved, setSessionResolved] = useState(cachedSession !== undefined);
+  const [access, setAccess] = useState<UserAccess>(() =>
+    cachedSession?.user.id ? getCachedUserAccess(mosqueSlug, cachedSession.user.id) ?? emptyUserAccess : emptyUserAccess,
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -368,6 +385,16 @@ function DesktopAccountSubnav({ mosqueSlug, accountHref }: { mosqueSlug: string;
           </Link>
         );
       })}
+      <button
+        type="button"
+        onClick={() => {
+          router.replace(`/m/${mosqueSlug}/login`);
+          void performClientLogout();
+        }}
+        className="flex min-h-9 w-full items-center rounded-xl px-3 text-left text-sm font-medium text-[#C0392B] transition-colors hover:bg-[#FDF1F0]"
+      >
+        Log out
+      </button>
     </div>
   );
 }
@@ -420,7 +447,8 @@ function buildDesktopSubItems(label: string, section: "public" | "portal" | "tea
     }
     if (section === "portal") {
       return [
-        { label: "Enrolled", href: `${base}/portal/classes?tab=enrolled` },
+        { label: "My Classes", href: `${base}/portal/classes?tab=classes` },
+        { label: "My Applications", href: `${base}/portal/classes?tab=applications` },
         { label: "Browse", href: `${base}/portal/classes?tab=browse` },
       ];
     }
@@ -523,9 +551,23 @@ function SidebarLogo({ src, name }: { src: string | null; name: string }) {
   }
 
   return (
-    <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-[#D6DCE0] bg-[#F7F8F9] text-sm font-semibold text-[#2E8F7D]">
-      {initials(name)}
+    <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-[#D6DCE0] bg-[#F7F8F9] text-[#2E8F7D]" aria-label={name}>
+      <MosqueIcon className="h-6 w-6" />
     </span>
+  );
+}
+
+function MosqueIcon({ className = "h-5 w-5" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M12 2.5v2.2" />
+      <circle cx="12" cy="2" r="0.6" fill="currentColor" stroke="none" />
+      <path d="M7.2 10.5a4.8 4.8 0 0 1 9.6 0" />
+      <path d="M4.5 20.5v-7a1.6 1.6 0 0 1 3.2 0v7" />
+      <path d="M16.3 20.5v-7a1.6 1.6 0 0 1 3.2 0v7" />
+      <path d="M7.2 20.5v-10h9.6v10" />
+      <path d="M10.5 20.5v-4a1.5 1.5 0 0 1 3 0v4" />
+    </svg>
   );
 }
 

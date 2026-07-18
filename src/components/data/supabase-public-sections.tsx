@@ -11,7 +11,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { EmptyState } from "@/components/data/empty-state";
 import { FlatLink } from "@/components/ui/flat-button";
 import { getAccountLabel, getDefaultLandingHref } from "@/lib/authz";
-import { clearUserScopedCaches, loadCachedSession, loadCachedUserAccess, setCachedProfileName, setCachedProfileSummary, setCachedSessionSnapshot } from "@/lib/client-cache";
+import { clearUserScopedCaches, loadCachedSession, loadCachedUserAccess, performClientLogout, setCachedProfileName, setCachedProfileSummary, setCachedSessionSnapshot } from "@/lib/client-cache";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import type { Database, Json } from "@/lib/supabase/types";
 import { cn } from "@/lib/utils";
@@ -110,7 +110,6 @@ type ProgramBuilderStatus = {
   manualPaymentNote: string;
   financialAssistanceNote: string;
   receiptNote: string;
-  contactName: string;
   contactEmail: string;
   contactPhone: string;
   coverPriceLabelEnabled: boolean;
@@ -175,7 +174,6 @@ function defaultBuilderStatus(): ProgramBuilderStatus {
     manualPaymentNote: "",
     financialAssistanceNote: "Financial assistance or custom payment arrangements may be available. Please apply and contact the program Director for details.",
     receiptNote: "Receipt eligibility may depend on program type and masjid policy. Please contact administration for details.",
-    contactName: "",
     contactEmail: "",
     contactPhone: "",
     coverPriceLabelEnabled: true,
@@ -551,7 +549,7 @@ async function getCurrentAccessToken() {
   return sessionData.session?.access_token ?? null;
 }
 
-type ApplicationActionEndpoint = "approve" | "waitlist" | "reject" | "cancel-approval" | "change-price" | "waive" | "note" | "confirm" | "reopen";
+type ApplicationActionEndpoint = "approve" | "waitlist" | "reject" | "cancel-approval" | "change-price" | "waive" | "note" | "confirm" | "reopen" | "cancel-registration";
 
 async function callApplicationAction<T = Record<string, unknown>>(
   programId: string,
@@ -832,10 +830,9 @@ export function PublicMasjidData({ slug }: { slug: string }) {
 
 export function StudentHomeData({ slug }: { slug: string }) {
   const { programs, enrolledProgramIds, programOwnerLabels, programTracksByProgramId, accountType, viewerProfiles, loading, enrollmentLoading, error } = useStudentPrograms(slug);
-  const { unreadCount } = useStudentUnreadAnnouncements(slug);
   const { rows: applicationRows, loading: applicationsLoading } = useApplicantApplications(slug);
 
-  if (loading || enrollmentLoading) {
+  if (loading || enrollmentLoading || applicationsLoading) {
     return <HomeLoadingState />;
   }
 
@@ -850,9 +847,7 @@ export function StudentHomeData({ slug }: { slug: string }) {
       scheduleTracks: programTracksByProgramId[program.id],
     }));
 
-  const actionRequiredRows = applicationsLoading
-    ? []
-    : applicationRows.filter((row) => isApplicationActionRequired(getApplicationStatus(row.request)));
+  const actionRequiredRows = applicationRows.filter((row) => isApplicationActionRequired(getApplicationStatus(row.request)));
 
   return (
     <section className="space-y-5 bg-[var(--workspace)] p-4">
@@ -863,13 +858,9 @@ export function StudentHomeData({ slug }: { slug: string }) {
             <ActionRequiredCard key={row.request.id} slug={slug} row={row} />
           ))}
         </div>
-      ) : null}
-      <HomeNotification
-        tone={unreadCount > 0 ? "active" : "empty"}
-        title={unreadCount > 0 ? `${unreadCount} unread message${unreadCount === 1 ? "" : "s"}` : "No new inbox items"}
-        text={unreadCount > 0 ? "Class messages are waiting in your inbox." : "New announcements, notes, and updates will appear here."}
-        href={unreadCount > 0 ? `/m/${slug}/portal/announcements` : undefined}
-      />
+      ) : (
+        <HomeNotification tone="empty" title="No action needed" text="You're all caught up — nothing needs your attention right now." />
+      )}
       <HomeSectionTitle title="Upcoming" />
       {enrolledPrograms.length === 0 ? (
         <HomeEmptyState title="You are not enrolled in any classes" text="Your next lesson will appear here after enrollment." />
@@ -1832,6 +1823,10 @@ export function RegistrationConfirmationData({ slug, requestId }: { slug: string
   const [confirmBusy, setConfirmBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [confirmedResult, setConfirmedResult] = useState<"success" | "cancelled" | null>(null);
+  const [cancelModalOpen, setCancelModalOpen] = useState(false);
+  const [cancelReason, setCancelReason] = useState("");
+  const [cancelBusy, setCancelBusy] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -1979,6 +1974,22 @@ export function RegistrationConfirmationData({ slug, requestId }: { slug: string
     void loadRegistration();
   }
 
+  async function handleCancelRegistration() {
+    if (!program || !cancelReason.trim()) {
+      return;
+    }
+    setCancelBusy(true);
+    setCancelError(null);
+    const result = await callApplicationAction(program.id, requestId, "cancel-registration", { reason: cancelReason.trim() });
+    setCancelBusy(false);
+    if (!result.ok) {
+      setCancelError(result.error);
+      return;
+    }
+    setCancelModalOpen(false);
+    void loadRegistration();
+  }
+
   if (loading) {
     return <ProgramDetailLoadingState />;
   }
@@ -2107,6 +2118,13 @@ export function RegistrationConfirmationData({ slug, requestId }: { slug: string
                         ? "Pay in Full"
                         : "Start Subscription"}
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setCancelModalOpen(true)}
+                  className="mt-3 flex min-h-10 w-full items-center justify-center text-sm font-semibold text-[#C0392B] hover:underline"
+                >
+                  Cancel Registration
+                </button>
               </section>
             ) : (
               <section className="rounded-[24px] bg-white p-6 text-center shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
@@ -2123,6 +2141,52 @@ export function RegistrationConfirmationData({ slug, requestId }: { slug: string
           </>
         )}
       </div>
+      {cancelModalOpen
+        ? createPortal(
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#26323A]/35 px-5 backdrop-blur-sm">
+              <div className="w-full max-w-md rounded-[24px] bg-white p-5 text-[#26323A] shadow-[0_24px_70px_rgba(38,50,58,0.22)]">
+                <h2 className="text-lg font-semibold">Cancel Registration</h2>
+                <p className="mt-2 text-sm leading-6 text-[#6B747B]">
+                  This will cancel this application. If you change your mind, you will need to apply again.
+                </p>
+                <label className="mt-4 grid gap-1 text-[10px] font-semibold uppercase tracking-wide text-[#7B858C]">
+                  Reason (required)
+                  <textarea
+                    value={cancelReason}
+                    onChange={(event) => setCancelReason(event.target.value)}
+                    disabled={cancelBusy}
+                    rows={3}
+                    placeholder="Let us know why you're cancelling"
+                    className="rounded-[10px] border border-[#B9C3C8] px-3 py-2 text-sm font-semibold normal-case tracking-normal text-[#26323A] outline-none focus:border-[#2F8FB3] disabled:opacity-60"
+                  />
+                </label>
+                {cancelError ? <p className="mt-3 text-sm font-semibold text-[#C0392B]">{cancelError}</p> : null}
+                <div className="mt-5 flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCancelModalOpen(false);
+                      setCancelError(null);
+                    }}
+                    disabled={cancelBusy}
+                    className="min-h-10 px-3 text-sm font-semibold text-[#6B747B]"
+                  >
+                    Never mind
+                  </button>
+                  <button
+                    type="button"
+                    disabled={cancelBusy || !cancelReason.trim()}
+                    onClick={handleCancelRegistration}
+                    className="min-h-10 rounded-[10px] bg-[#C0392B] px-4 text-sm font-semibold text-white transition-opacity disabled:opacity-50"
+                  >
+                    {cancelBusy ? "Cancelling..." : "Cancel Registration"}
+                  </button>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }
@@ -2649,10 +2713,8 @@ export function PortalAccountData({ slug }: { slug: string }) {
   }, [canUseAccountSwitcher]);
 
   function handleLogout() {
-    clearUserScopedCaches();
-    setCachedSessionSnapshot(null);
     router.replace(`/m/${slug}/login`);
-    void createSupabaseBrowserClient().auth.signOut();
+    void performClientLogout();
   }
 
   async function switchAccount(account: DevSwitchAccount) {
@@ -4902,7 +4964,7 @@ export function AdminHomeData({ slug }: { slug: string }) {
 }
 
 export function TeacherClassesData({ slug }: { slug: string }) {
-  const { programs, allPrograms, roleByProgramId, financeAccessByProgramId, canCreateClass, loading, error } = useTeacherPrograms(slug);
+  const { programs, allPrograms, roleByProgramId, financeAccessByProgramId, programCounts, canCreateClass, loading, error } = useTeacherPrograms(slug);
   const router = useRouter();
   const searchParams = useSearchParams();
   const initialTeacherClassesTab = searchParams.get("tab");
@@ -4975,6 +5037,7 @@ export function TeacherClassesData({ slug }: { slug: string }) {
                   mosqueSlug={slug}
                   role={roleByProgramId[program.id] ?? "instructor"}
                   canManageFinances={financeAccessByProgramId[program.id] ?? false}
+                  counts={programCounts[program.id]}
                   onResigned={() => {
                     setHiddenProgramIds((current) => new Set([...current, program.id]));
                     setToast({ tone: "success", message: "You resigned from the class." });
@@ -5011,7 +5074,7 @@ export function TeacherClassesData({ slug }: { slug: string }) {
 }
 
 export function AdminClassesData({ slug }: { slug: string }) {
-  const { programs, canCreateClass, loading, error } = useTeacherPrograms(slug);
+  const { programs, programCounts, canCreateClass, loading, error } = useTeacherPrograms(slug);
   const [toast, setToast] = useState<EditorToastState | null>(null);
   const [hiddenProgramIds, setHiddenProgramIds] = useState<Set<string>>(new Set());
 
@@ -5047,6 +5110,7 @@ export function AdminClassesData({ slug }: { slug: string }) {
               basePath={`/m/${slug}/admin/programs`}
               controlLabel="Admin Control"
               canManageFinances
+              counts={programCounts[program.id]}
               onDeleted={() => {
                 setHiddenProgramIds((current) => new Set([...current, program.id]));
                 setToast({ tone: "success", message: "Class deleted." });
@@ -5113,6 +5177,7 @@ function AdminMosqueSwitcher({ slug, target = "programs" }: { slug: string; targ
 
 export function AdminMasjidData({ slug }: { slug: string }) {
   const [mosque, setMosque] = useState<Mosque | null>(null);
+  const [memberCount, setMemberCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -5121,11 +5186,18 @@ export function AdminMasjidData({ slug }: { slug: string }) {
       void (async () => {
         setLoading(true);
         setError(null);
-        const { data, error: mosqueError } = await createSupabaseBrowserClient().from("mosques").select("*").eq("slug", slug).maybeSingle();
+        const supabase = createSupabaseBrowserClient();
+        const { data, error: mosqueError } = await supabase.from("mosques").select("*").eq("slug", slug).maybeSingle();
         if (mosqueError) {
           setError(mosqueError.message);
         }
         setMosque(data ?? null);
+        if (data) {
+          const { count } = await supabase.from("mosque_memberships").select("*", { count: "exact", head: true }).eq("mosque_id", data.id).eq("status", "active");
+          setMemberCount(count ?? 0);
+        } else {
+          setMemberCount(0);
+        }
         setLoading(false);
       })();
     }, 0);
@@ -5162,7 +5234,7 @@ export function AdminMasjidData({ slug }: { slug: string }) {
           </div>
           <div className="divide-y divide-[#E3E8EC] border-t border-[#E3E8EC]">
             <TeacherActionLink href={`/m/${slug}/admin/masjid/information`} icon={<EditClassIcon />} label="Masjid Information" />
-            <TeacherActionLink href={`/m/${slug}/admin/students`} icon={<StudentsIcon />} label="Manage Members" />
+            <TeacherActionLink href={`/m/${slug}/admin/students`} icon={<StudentsIcon />} label="Manage Members" count={memberCount} />
             <TeacherActionLink href={`/m/${slug}/admin/finances`} icon={<FinanceIcon />} label="Manage Finances" />
           </div>
         </div>
@@ -5837,7 +5909,6 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
           manualPaymentNote: effectiveBuilderStatus.manualPaymentNote.trim() || null,
           financialAssistanceNote: effectiveBuilderStatus.financialAssistanceNote.trim() || null,
           receiptNote: effectiveBuilderStatus.receiptNote.trim() || null,
-          contactName: effectiveBuilderStatus.contactName.trim() || null,
           contactEmail: contactEmailOmitted ? "" : effectiveBuilderStatus.contactEmail.trim() || null,
           contactPhone: effectiveBuilderStatus.contactPhone.trim() || null,
           coverPriceLabelEnabled: effectiveBuilderStatus.coverPriceLabelEnabled,
@@ -5906,7 +5977,6 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
             manualPaymentNote: effectiveBuilderStatus.manualPaymentNote.trim() || null,
             financialAssistanceNote: effectiveBuilderStatus.financialAssistanceNote.trim() || null,
             receiptNote: effectiveBuilderStatus.receiptNote.trim() || null,
-            contactName: effectiveBuilderStatus.contactName.trim() || null,
             contactEmail: contactEmailOmitted ? "" : effectiveBuilderStatus.contactEmail.trim() || null,
             contactPhone: effectiveBuilderStatus.contactPhone.trim() || null,
             coverPriceLabelEnabled: effectiveBuilderStatus.coverPriceLabelEnabled,
@@ -6075,12 +6145,6 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
     scrollBuilderToTop();
   }
 
-  function handleSaveDraftClick() {
-    const draftOverride = { publicationStatus: "draft", applicationStatus: "not_accepting", acceptingApplications: false } as const;
-    setBuilderStatus((current) => ({ ...current, ...draftOverride }));
-    void saveNewProgram(draftOverride);
-  }
-
   function getMissingBuilderFields() {
     return computeProgramBuilderMissingFields({
       title,
@@ -6097,7 +6161,6 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
       faqRows,
       contentSectionsVisible,
       contentSectionRows,
-      contactName: builderStatus.contactName,
       contactPhone: instructorContactPhone,
       contactPhoneOmitted,
       contactEmail: builderStatus.contactEmail,
@@ -6131,8 +6194,9 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
   function handleContinueOrPublishClick() {
     const missing = getMissingBuilderFields();
     if (builderStep !== "review") {
-      if (missing.length) {
-        setMissingFieldsModal({ fields: missing, allowContinue: true });
+      const missingOnThisStep = missing.filter((field) => field.step === builderStep);
+      if (missingOnThisStep.length) {
+        setMissingFieldsModal({ fields: missingOnThisStep, allowContinue: true });
         return;
       }
       const index = programBuilderSteps.findIndex((step) => step.id === builderStep);
@@ -6161,7 +6225,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
         />
       ) : null}
       <ProgramBuilderStepper activeStep={builderStep} />
-      <ProgramBuilderActionBar busy={busy} builderStep={builderStep} onBack={goToPreviousStep} onSaveDraft={handleSaveDraftClick} onContinueOrPublish={handleContinueOrPublishClick} />
+      <ProgramBuilderActionBar busy={busy} builderStep={builderStep} onBack={goToPreviousStep} onContinueOrPublish={handleContinueOrPublishClick} />
 
       <section className="rounded-2xl border border-[#DDE7EA] bg-white p-4">
         <div className="flex items-start justify-between gap-3">
@@ -6228,8 +6292,8 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
             <p className="-mt-2 text-xs leading-5 text-[#6B747B]">Public title is what parents and students see.</p>
             <EditBox label="Description" value={description} onChange={setDescription} multiline />
             <div className="grid gap-3">
-              <EditBox label="Location name" value={builderStatus.location} onChange={(value) => setBuilderStatus((current) => ({ ...current, location: value }))} />
-              <EditBox label="Location address" value={builderStatus.room} onChange={(value) => setBuilderStatus((current) => ({ ...current, room: value }))} />
+              <EditBox label="Location name" required value={builderStatus.location} onChange={(value) => setBuilderStatus((current) => ({ ...current, location: value }))} />
+              <EditBox label="Location address" required value={builderStatus.room} onChange={(value) => setBuilderStatus((current) => ({ ...current, room: value }))} />
             </div>
           </div>
         </section>
@@ -6334,8 +6398,6 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
         setInstructorCredentials={setInstructorCredentials}
         instructorContactPhone={instructorContactPhone}
         setInstructorContactPhone={setInstructorContactPhone}
-        contactName={builderStatus.contactName}
-        setContactName={(value) => setBuilderStatus((current) => ({ ...current, contactName: value }))}
         contactEmail={builderStatus.contactEmail}
         setContactEmail={(value) => setBuilderStatus((current) => ({ ...current, contactEmail: value }))}
         contactPhoneOmitted={contactPhoneOmitted}
@@ -6348,7 +6410,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
         setCoverPriceLabel={(value) => setBuilderStatus((current) => ({ ...current, coverPriceLabel: value }))}
       />
 
-      <ProgramBuilderActionBar busy={busy} builderStep={builderStep} onBack={goToPreviousStep} onSaveDraft={handleSaveDraftClick} onContinueOrPublish={handleContinueOrPublishClick} sticky message={message} />
+      <ProgramBuilderActionBar busy={busy} builderStep={builderStep} onBack={goToPreviousStep} onContinueOrPublish={handleContinueOrPublishClick} sticky message={message} />
     </div>
   );
 }
@@ -6543,7 +6605,6 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
           manualPaymentNote: programRow.manual_payment_note ?? "",
           financialAssistanceNote: programRow.financial_assistance_note ?? defaultBuilderStatus().financialAssistanceNote,
           receiptNote: programRow.receipt_note ?? defaultBuilderStatus().receiptNote,
-          contactName: programRow.contact_name ?? "",
           contactEmail: programRow.contact_email ?? directorProfile?.email ?? "",
           contactPhone: programRow.contact_phone ?? "",
           coverPriceLabelEnabled: programRow.cover_price_label_enabled !== false,
@@ -6842,7 +6903,6 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         manualPaymentNote: effectiveBuilderStatus.manualPaymentNote.trim() || null,
         financialAssistanceNote: effectiveBuilderStatus.financialAssistanceNote.trim() || null,
         receiptNote: effectiveBuilderStatus.receiptNote.trim() || null,
-        contactName: effectiveBuilderStatus.contactName.trim() || null,
         contactEmail: contactEmailOmitted ? "" : effectiveBuilderStatus.contactEmail.trim() || null,
         contactPhone: effectiveBuilderStatus.contactPhone.trim() || null,
         coverPriceLabelEnabled: effectiveBuilderStatus.coverPriceLabelEnabled,
@@ -7036,12 +7096,6 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
     scrollBuilderToTop();
   }
 
-  function handleSaveDraftClick() {
-    const draftOverride = { publicationStatus: "draft", applicationStatus: "not_accepting", acceptingApplications: false } as const;
-    setBuilderStatus((current) => ({ ...current, ...draftOverride }));
-    void saveProgram(draftOverride);
-  }
-
   function getMissingBuilderFields() {
     return computeProgramBuilderMissingFields({
       title,
@@ -7058,7 +7112,6 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
       faqRows,
       contentSectionsVisible,
       contentSectionRows,
-      contactName: builderStatus.contactName,
       contactPhone: instructorContactPhone,
       contactPhoneOmitted,
       contactEmail: builderStatus.contactEmail,
@@ -7092,8 +7145,9 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
   function handleContinueOrPublishClick() {
     const missing = getMissingBuilderFields();
     if (builderStep !== "review") {
-      if (missing.length) {
-        setMissingFieldsModal({ fields: missing, allowContinue: true });
+      const missingOnThisStep = missing.filter((field) => field.step === builderStep);
+      if (missingOnThisStep.length) {
+        setMissingFieldsModal({ fields: missingOnThisStep, allowContinue: true });
         return;
       }
       const index = programBuilderSteps.findIndex((step) => step.id === builderStep);
@@ -7113,7 +7167,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
   const editWizardContent = (
     <>
       <ProgramBuilderStepper activeStep={builderStep} />
-      <ProgramBuilderActionBar busy={busy} builderStep={builderStep} onBack={goToPreviousStep} onSaveDraft={handleSaveDraftClick} onContinueOrPublish={handleContinueOrPublishClick} />
+      <ProgramBuilderActionBar busy={busy} builderStep={builderStep} onBack={goToPreviousStep} onContinueOrPublish={handleContinueOrPublishClick} />
       <section className="rounded-2xl border border-[#DDE7EA] bg-white p-4">
         <div className="flex items-start justify-between gap-3">
           <div>
@@ -7140,7 +7194,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         {builderStep === "pricing" ? (
           <div className="mt-5 grid gap-3 md:grid-cols-2">
             <label className="block">
-              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">How payments are handled</span>
+              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("How payments are handled", true)}</span>
               <select value={builderStatus.paymentKind} onChange={(event) => { const value = event.target.value as ProgramBuilderStatus["paymentKind"]; setBuilderStatus((current) => ({ ...current, paymentKind: value })); setIsPaid(value === "tareeqah"); }} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
                 <option value="free">Free</option>
                 <option value="tareeqah">Paid through Tareeqah</option>
@@ -7188,8 +7242,8 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
             <EditBox label="Short summary / tagline" value={builderStatus.summary} onChange={(value) => setBuilderStatus((current) => ({ ...current, summary: value }))} />
             <EditBox label="Description" value={description} onChange={setDescription} multiline />
             <div className="grid gap-3">
-              <EditBox label="Location name" value={builderStatus.location} onChange={(value) => setBuilderStatus((current) => ({ ...current, location: value }))} />
-              <EditBox label="Location address" value={builderStatus.room} onChange={(value) => setBuilderStatus((current) => ({ ...current, room: value }))} />
+              <EditBox label="Location name" required value={builderStatus.location} onChange={(value) => setBuilderStatus((current) => ({ ...current, location: value }))} />
+              <EditBox label="Location address" required value={builderStatus.room} onChange={(value) => setBuilderStatus((current) => ({ ...current, room: value }))} />
             </div>
           </div>
         </section>
@@ -7302,8 +7356,6 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         setInstructorCredentials={setInstructorCredentials}
         instructorContactPhone={instructorContactPhone}
         setInstructorContactPhone={setInstructorContactPhone}
-        contactName={builderStatus.contactName}
-        setContactName={(value) => setBuilderStatus((current) => ({ ...current, contactName: value }))}
         contactEmail={builderStatus.contactEmail}
         setContactEmail={(value) => setBuilderStatus((current) => ({ ...current, contactEmail: value }))}
         contactPhoneOmitted={contactPhoneOmitted}
@@ -7316,7 +7368,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         setCoverPriceLabel={(value) => setBuilderStatus((current) => ({ ...current, coverPriceLabel: value }))}
       />
 
-      <ProgramBuilderActionBar busy={busy} builderStep={builderStep} onBack={goToPreviousStep} onSaveDraft={handleSaveDraftClick} onContinueOrPublish={handleContinueOrPublishClick} sticky message={message} />
+      <ProgramBuilderActionBar busy={busy} builderStep={builderStep} onBack={goToPreviousStep} onContinueOrPublish={handleContinueOrPublishClick} sticky message={message} />
     </div>
   );
 }
@@ -7567,7 +7619,6 @@ function computeProgramBuilderMissingFields(input: {
   faqRows: ProgramEditorFaqRow[];
   contentSectionsVisible: boolean;
   contentSectionRows: ProgramEditorContentSectionRow[];
-  contactName: string;
   contactPhone: string;
   contactPhoneOmitted: boolean;
   contactEmail: string;
@@ -7598,19 +7649,18 @@ function computeProgramBuilderMissingFields(input: {
     missing.push({ label: "Age range (or choose All ages)", step: "basics" });
   }
 
-  if (input.learningVisible) {
+  if (input.outcomeRows.length > 0) {
     if (!input.learningTitle.trim()) missing.push({ label: "Learning Outcomes section title", step: "public" });
-    if (input.outcomeRows.length === 0 || input.outcomeRows.some((row) => !row.text.trim())) missing.push({ label: "Learning Outcomes: fill in every outcome point", step: "public" });
+    if (input.outcomeRows.some((row) => !row.text.trim())) missing.push({ label: "Learning Outcomes: fill in every outcome point", step: "public" });
   }
-  if (input.faqVisible && (input.faqRows.length === 0 || input.faqRows.some((row) => !row.question.trim() || !row.answer.trim()))) {
+  if (input.faqRows.length > 0 && input.faqRows.some((row) => !row.question.trim() || !row.answer.trim())) {
     missing.push({ label: "FAQ: fill in every question and answer", step: "public" });
   }
-  if (input.contentSectionsVisible && (input.contentSectionRows.length === 0 || input.contentSectionRows.some((row) => !row.title.trim()))) {
+  if (input.contentSectionRows.length > 0 && input.contentSectionRows.some((row) => !row.title.trim())) {
     missing.push({ label: "Class Content: fill in every item title", step: "public" });
   }
-  if (!input.contactName.trim()) missing.push({ label: "Contact name", step: "public" });
-  if (!input.contactPhoneOmitted && !input.contactPhone.trim()) missing.push({ label: "Contact phone (or mark Do not include)", step: "public" });
-  if (!input.contactEmailOmitted && !input.contactEmail.trim()) missing.push({ label: "Contact email (or mark Do not include)", step: "public" });
+  if (!input.contactPhoneOmitted && !input.contactPhone.trim()) missing.push({ label: "Contact phone (or mark Do not include)", step: "basics" });
+  if (!input.contactEmailOmitted && !input.contactEmail.trim()) missing.push({ label: "Contact email (or mark Do not include)", step: "basics" });
 
   if (input.programType === "event") {
     if (!input.eventDate.trim()) missing.push({ label: "Event date", step: "schedule" });
@@ -7630,8 +7680,22 @@ function computeProgramBuilderMissingFields(input: {
   }
 
   if (input.paymentKind === "tareeqah") {
-    if (input.offersMonthlyPayment && !(Number(input.price) > 0)) missing.push({ label: "Monthly price", step: "pricing" });
-    if (input.offersAnnualPayment && !(Number(input.annualPrice) > 0)) missing.push({ label: "Pay in Full price", step: "pricing" });
+    const perTrackPricingEnabled =
+      input.programType === "recurring" &&
+      input.schedulePattern === "weekly" &&
+      input.trackRows.length > 0 &&
+      input.trackRows.some((track) => track.pricingOverrideEnabled);
+    if (perTrackPricingEnabled) {
+      if (input.offersMonthlyPayment && input.trackRows.some((track) => !(Number(track.priceMonthly) > 0))) {
+        missing.push({ label: "Monthly price for every track", step: "pricing" });
+      }
+      if (input.offersAnnualPayment && input.trackRows.some((track) => !(Number(track.priceAnnual) > 0))) {
+        missing.push({ label: "Pay in Full price for every track", step: "pricing" });
+      }
+    } else {
+      if (input.offersMonthlyPayment && !(Number(input.price) > 0)) missing.push({ label: "Monthly price", step: "pricing" });
+      if (input.offersAnnualPayment && !(Number(input.annualPrice) > 0)) missing.push({ label: "Pay in Full price", step: "pricing" });
+    }
   }
   if (input.coverPriceLabelEnabled && !input.coverPriceLabel.trim()) missing.push({ label: "Price tag label", step: "pricing" });
 
@@ -7686,7 +7750,6 @@ function ProgramBuilderActionBar({
   busy,
   builderStep,
   onBack,
-  onSaveDraft,
   onContinueOrPublish,
   sticky = false,
   message,
@@ -7694,7 +7757,6 @@ function ProgramBuilderActionBar({
   busy: boolean;
   builderStep: ProgramBuilderStep;
   onBack: () => void;
-  onSaveDraft: () => void;
   onContinueOrPublish: () => void;
   sticky?: boolean;
   message?: string | null;
@@ -7705,9 +7767,6 @@ function ProgramBuilderActionBar({
       <div className="flex items-center gap-2">
         <button type="button" disabled={busy || builderStep === "basics"} onClick={onBack} className="min-h-11 shrink-0 rounded-[10px] border border-[#C9D3D8] bg-white px-4 text-sm font-semibold text-[#26323A] disabled:opacity-40">
           Back
-        </button>
-        <button type="button" disabled={busy} onClick={onSaveDraft} className="min-h-11 flex-1 rounded-[10px] bg-[#2F8FB3] px-4 text-sm font-semibold text-white disabled:opacity-60">
-          Save Draft
         </button>
         <button type="button" disabled={busy} onClick={onContinueOrPublish} className="min-h-11 flex-[1.4] rounded-[10px] bg-[#17624F] px-5 text-sm font-semibold text-white disabled:opacity-60">
           {busy ? "Saving..." : builderStep === "review" ? "Publish" : "Continue"}
@@ -7769,7 +7828,7 @@ function ProgramTimingFields({
         </label>
       ) : null}
       <label className="block">
-        <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{builderStatus.programType === "event" ? "Event date" : "Start date"}</span>
+        <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel(builderStatus.programType === "event" ? "Event date" : "Start date", true)}</span>
         {builderStatus.programType === "event" ? (
           <input type="date" value={eventDate} onChange={(event) => setEventDate(event.target.value)} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]" />
         ) : (
@@ -7814,7 +7873,7 @@ function ProgramTimingFields({
         </label>
       ) : null}
       <label className="block">
-        <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Registration deadline</span>
+        <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">{formatRequiredLabel("Registration deadline", !noRegistrationDeadline)}</span>
         <input type={noRegistrationDeadline ? "text" : "datetime-local"} disabled={noRegistrationDeadline} value={noRegistrationDeadline ? "None" : builderStatus.registrationDeadline} onChange={(event) => setBuilderStatus((current) => ({ ...current, registrationDeadline: event.target.value }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3] disabled:bg-[#F2F6F7] disabled:text-[#52616A]" />
         <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs font-semibold text-[#52616A]">
           <input type="checkbox" checked={noRegistrationDeadline} onChange={(event) => { setNoRegistrationDeadline(event.target.checked); if (event.target.checked) setBuilderStatus((current) => ({ ...current, registrationDeadline: "" })); }} />
@@ -8090,8 +8149,6 @@ type ProgramEditorFieldsProps = {
   setInstructorCredentials: (value: string) => void;
   instructorContactPhone: string;
   setInstructorContactPhone: (value: string) => void;
-  contactName?: string;
-  setContactName?: (value: string) => void;
   contactEmail?: string;
   setContactEmail?: (value: string) => void;
   contactPhoneOmitted?: boolean;
@@ -8120,9 +8177,17 @@ function programStatusBadgeToneClass(tone: "neutral" | "positive" | "warning" | 
   }
 }
 
+function RemoveSectionButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button type="button" onClick={onClick} className="shrink-0 text-xs font-semibold text-[#C83F31] hover:underline">
+      Remove section
+    </button>
+  );
+}
+
 function EditorFieldSection({ title, action, children }: { title: string; action?: ReactNode; children: ReactNode }) {
   return (
-    <section className="py-5 first:pt-0 last:pb-0">
+    <section className="rounded-2xl border border-[#E1E8EC] bg-white p-4 md:p-6">
       <div className="flex items-center justify-between gap-3">
         <h2 className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">{title}</h2>
         {action}
@@ -8146,9 +8211,17 @@ function RowIconButton({ tone = "neutral", ...props }: React.ComponentPropsWitho
   );
 }
 
-function ProgramFaqEditor({ faqRows, onChange }: { faqRows: ProgramEditorFaqRow[]; onChange: Dispatch<SetStateAction<ProgramEditorFaqRow[]>> }) {
+function ProgramFaqEditor({
+  faqRows,
+  onChange,
+  onRemoveSection,
+}: {
+  faqRows: ProgramEditorFaqRow[];
+  onChange: Dispatch<SetStateAction<ProgramEditorFaqRow[]>>;
+  onRemoveSection?: () => void;
+}) {
   return (
-    <EditorFieldSection title="FAQs">
+    <EditorFieldSection title="FAQs" action={onRemoveSection ? <RemoveSectionButton onClick={onRemoveSection} /> : undefined}>
       <div className="divide-y divide-[#E6ECEF]">
         {faqRows.map((row, index) => (
           <div key={row.id} className="space-y-2 py-3 first:pt-0 last:pb-0">
@@ -8256,8 +8329,6 @@ function ProgramEditorFields({
   setInstructorCredentials,
   instructorContactPhone,
   setInstructorContactPhone,
-  contactName = "",
-  setContactName,
   contactEmail = "",
   setContactEmail,
   contactPhoneOmitted = false,
@@ -8364,6 +8435,44 @@ function ProgramEditorFields({
   const showTopicsField = topicsVisible || Boolean(topicsIntro.trim());
   const showRequirementsField = requirementsVisible || Boolean(requirementsText.trim());
   const showPoliciesField = policiesVisible || Boolean(policiesText.trim());
+
+  function removeLearningSection() {
+    setLearningVisible(false);
+    setOutcomeRows([]);
+    setLearningTitle("");
+    setLearningIntro("");
+    setLearningDescriptionVisible?.(false);
+  }
+
+  function removeTopicsSection() {
+    setTopicsVisible(false);
+    setTopicsIntro?.("");
+  }
+
+  function removeRequirementsSection() {
+    setRequirementsVisible(false);
+    setRequirementsText?.("");
+  }
+
+  function removePoliciesSection() {
+    setPoliciesVisible(false);
+    setPoliciesText?.("");
+  }
+
+  function removeFaqSection() {
+    setFaqVisible(false);
+    setFaqRows([]);
+  }
+
+  function removeContentSection() {
+    setContentSectionsVisible(false);
+    setContentSectionRows([]);
+  }
+
+  function removeMediaSection() {
+    setMediaVisible(false);
+    setMediaRows([]);
+  }
 
   if (showReview) {
     const program = previewProgram;
@@ -8585,9 +8694,9 @@ function ProgramEditorFields({
   void _setIsPaid;
 
   return (
-    <div className="divide-y divide-[#E1E8EC] rounded-2xl border border-[#E1E8EC] bg-white p-4 md:p-6">
+    <div className="space-y-4">
         {showPublic ? (learningVisible ? (
-          <EditorFieldSection title="Learning Outcomes">
+          <EditorFieldSection title="Learning Outcomes" action={<RemoveSectionButton onClick={removeLearningSection} />}>
             <div className="space-y-4">
               <EditBox label="Section title" required value={learningTitle} onChange={setLearningTitle} />
               {learningDescriptionVisible || learningIntro.trim() ? (
@@ -8619,11 +8728,6 @@ function ProgramEditorFields({
                   </div>
                 ))}
               </div>
-              <div className="grid gap-3">
-                {setTopicsIntro ? (showTopicsField ? <EditBox label="Topics covered" value={topicsIntro} onChange={setTopicsIntro} multiline /> : <button type="button" onClick={() => setTopicsVisible(true)} className="w-fit text-left text-sm font-semibold text-[#2F8FB3]">Add Topics Covered</button>) : null}
-                {setRequirementsText ? (showRequirementsField ? <EditBox label="Prerequisites" value={requirementsText} onChange={setRequirementsText} multiline /> : <button type="button" onClick={() => setRequirementsVisible(true)} className="w-fit text-left text-sm font-semibold text-[#2F8FB3]">Add Prerequisites</button>) : null}
-                {setPoliciesText ?(showPoliciesField ? <EditBox label="Policies" value={policiesText} onChange={setPoliciesText} multiline /> : <button type="button" onClick={() => setPoliciesVisible(true)} className="w-fit text-left text-sm font-semibold text-[#2F8FB3]">Add Policies</button>) : null}
-              </div>
             </div>
           </EditorFieldSection>
         ) : (
@@ -8632,33 +8736,33 @@ function ProgramEditorFields({
           </button>
         )) : null}
 
-        {showPublic ? (faqVisible ? (
-          <ProgramFaqEditor faqRows={faqRows} onChange={setFaqRows} />
-        ) : (
-          <button
-            type="button"
-            onClick={() => {
-              setFaqVisible(true);
-              setFaqRows([{ id: crypto.randomUUID(), question: "", answer: "" }]);
-            }}
-            className="min-h-20 w-full rounded-[10px] border border-dashed border-[#9EB4BD] bg-white text-sm font-semibold text-[#2F6077]"
-          >
-            Add FAQ section
-          </button>
-        )) : null}
+        {showPublic && setTopicsIntro ? (
+          showTopicsField ? (
+            <EditorFieldSection title="Topics Covered" action={<RemoveSectionButton onClick={removeTopicsSection} />}>
+              <EditBox label="Topics covered" value={topicsIntro} onChange={setTopicsIntro} multiline />
+            </EditorFieldSection>
+          ) : (
+            <button type="button" onClick={() => setTopicsVisible(true)} className="min-h-20 w-full rounded-[10px] border border-dashed border-[#9EB4BD] bg-white text-sm font-semibold text-[#2F6077]">
+              Add Topics Covered section
+            </button>
+          )
+        ) : null}
 
         {showPublic ? (contentSectionsVisible ? (
           <EditorFieldSection
             title="Class Content"
             action={
-              <RowIconButton
-                tone="accent"
-                className="border border-[#A8D4E2] text-lg"
-                onClick={() => setContentSectionRows((current) => [...current, { id: crypto.randomUUID(), title: "", description: "", durationText: "" }])}
-                aria-label="Add content item"
-              >
-                +
-              </RowIconButton>
+              <div className="flex items-center gap-3">
+                <RemoveSectionButton onClick={removeContentSection} />
+                <RowIconButton
+                  tone="accent"
+                  className="border border-[#A8D4E2] text-lg"
+                  onClick={() => setContentSectionRows((current) => [...current, { id: crypto.randomUUID(), title: "", description: "", durationText: "" }])}
+                  aria-label="Add content item"
+                >
+                  +
+                </RowIconButton>
+              </div>
             }
           >
             <div className="divide-y divide-[#E6ECEF]">
@@ -8666,7 +8770,17 @@ function ProgramEditorFields({
                 <div key={row.id} className="space-y-2 py-3 first:pt-0 last:pb-0">
                   <div className="flex items-center justify-between gap-2">
                     <p className="text-xs font-semibold uppercase tracking-wide text-[#7B858C]">Item {index + 1}</p>
-                    <RowIconButton tone="danger" onClick={() => setContentSectionRows((current) => current.filter((item) => item.id !== row.id))} aria-label="Remove content item">
+                    <RowIconButton
+                      tone="danger"
+                      onClick={() => {
+                        const next = contentSectionRows.filter((item) => item.id !== row.id);
+                        setContentSectionRows(next);
+                        if (next.length === 0) {
+                          setContentSectionsVisible(false);
+                        }
+                      }}
+                      aria-label="Remove content item"
+                    >
                       <TrashIcon />
                     </RowIconButton>
                   </div>
@@ -8707,8 +8821,47 @@ function ProgramEditorFields({
           </button>
         )) : null}
 
+        {showPublic && setRequirementsText ? (
+          showRequirementsField ? (
+            <EditorFieldSection title="Prerequisites" action={<RemoveSectionButton onClick={removeRequirementsSection} />}>
+              <EditBox label="Prerequisites" value={requirementsText} onChange={setRequirementsText} multiline />
+            </EditorFieldSection>
+          ) : (
+            <button type="button" onClick={() => setRequirementsVisible(true)} className="min-h-20 w-full rounded-[10px] border border-dashed border-[#9EB4BD] bg-white text-sm font-semibold text-[#2F6077]">
+              Add Prerequisites section
+            </button>
+          )
+        ) : null}
+
+        {showPublic && setPoliciesText ? (
+          showPoliciesField ? (
+            <EditorFieldSection title="Policies" action={<RemoveSectionButton onClick={removePoliciesSection} />}>
+              <EditBox label="Policies" value={policiesText} onChange={setPoliciesText} multiline />
+            </EditorFieldSection>
+          ) : (
+            <button type="button" onClick={() => setPoliciesVisible(true)} className="min-h-20 w-full rounded-[10px] border border-dashed border-[#9EB4BD] bg-white text-sm font-semibold text-[#2F6077]">
+              Add Policies section
+            </button>
+          )
+        ) : null}
+
+        {showPublic ? (faqVisible ? (
+          <ProgramFaqEditor faqRows={faqRows} onChange={setFaqRows} onRemoveSection={removeFaqSection} />
+        ) : (
+          <button
+            type="button"
+            onClick={() => {
+              setFaqVisible(true);
+              setFaqRows([{ id: crypto.randomUUID(), question: "", answer: "" }]);
+            }}
+            className="min-h-20 w-full rounded-[10px] border border-dashed border-[#9EB4BD] bg-white text-sm font-semibold text-[#2F6077]"
+          >
+            Add FAQ section
+          </button>
+        )) : null}
+
         {showPublic ? (mediaVisible ? (
-          <EditorFieldSection title="Program Media">
+          <EditorFieldSection title="Program Media" action={<RemoveSectionButton onClick={removeMediaSection} />}>
             <div className="divide-y divide-[#E6ECEF]">
               {mediaRows.map((row) => {
                 const previewUrl = row.previewUrl || row.url;
@@ -8971,6 +9124,33 @@ function ProgramEditorFields({
           </label>
         </EditorFieldSection> : null}
 
+        {showBasics ? <EditorFieldSection title="Director Information">
+          <div className="space-y-3">
+            <EditBox label="Display name" value={instructorDisplayName} onChange={setInstructorDisplayName} />
+            <EditBox label="Credentials (optional)" value={instructorCredentials} onChange={setInstructorCredentials} />
+            <div>
+              <EditBox label="Contact phone" required={!contactPhoneOmitted} disabled={contactPhoneOmitted} value={contactPhoneOmitted ? "" : instructorContactPhone} onChange={setInstructorContactPhone} />
+              {setContactPhoneOmitted ? (
+                <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs font-semibold text-[#52616A]">
+                  <input type="checkbox" checked={contactPhoneOmitted} onChange={(event) => setContactPhoneOmitted(event.target.checked)} />
+                  Do not include phone number
+                </label>
+              ) : null}
+            </div>
+            {setContactEmail ? (
+              <div>
+                <EditBox label="Contact email" required={!contactEmailOmitted} disabled={contactEmailOmitted} value={contactEmailOmitted ? "" : contactEmail} onChange={setContactEmail} />
+                {setContactEmailOmitted ? (
+                  <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs font-semibold text-[#52616A]">
+                    <input type="checkbox" checked={contactEmailOmitted} onChange={(event) => setContactEmailOmitted(event.target.checked)} />
+                    Do not include email
+                  </label>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+        </EditorFieldSection> : null}
+
         {showPricing && paymentKind === "tareeqah" ? <EditorFieldSection title="Price">
             {programType === "event" ? (
               <div>
@@ -9085,33 +9265,6 @@ function ProgramEditorFields({
           </div>
         </EditorFieldSection> : null}
 
-        {showPublic ? <EditorFieldSection title="Instructor Display">
-          <div className="space-y-3">
-            <EditBox label="Display name" value={instructorDisplayName} onChange={setInstructorDisplayName} />
-            <EditBox label="Credentials" value={instructorCredentials} onChange={setInstructorCredentials} />
-            {setContactName ? <EditBox label="Contact name" required value={contactName} onChange={setContactName} /> : null}
-            <div>
-              <EditBox label="Contact phone" required={!contactPhoneOmitted} disabled={contactPhoneOmitted} value={contactPhoneOmitted ? "" : instructorContactPhone} onChange={setInstructorContactPhone} />
-              {setContactPhoneOmitted ? (
-                <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs font-semibold text-[#52616A]">
-                  <input type="checkbox" checked={contactPhoneOmitted} onChange={(event) => setContactPhoneOmitted(event.target.checked)} />
-                  Do not include phone number
-                </label>
-              ) : null}
-            </div>
-            {setContactEmail ? (
-              <div>
-                <EditBox label="Contact email" required={!contactEmailOmitted} disabled={contactEmailOmitted} value={contactEmailOmitted ? "" : contactEmail} onChange={setContactEmail} />
-                {setContactEmailOmitted ? (
-                  <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs font-semibold text-[#52616A]">
-                    <input type="checkbox" checked={contactEmailOmitted} onChange={(event) => setContactEmailOmitted(event.target.checked)} />
-                    Do not include email
-                  </label>
-                ) : null}
-              </div>
-            ) : null}
-          </div>
-        </EditorFieldSection> : null}
     </div>
   );
 }
@@ -9700,8 +9853,9 @@ function AdminMemberChildrenList({ children }: { children: Profile[] }) {
 export function TeacherStudentsData({ slug, programId }: { slug: string; programId: string }) {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const fromFinances = searchParams.get("from") === "finances";
-  const financeStudentId = searchParams.get("studentId");
+  const cameFromParam = searchParams.get("from");
+  const cameFrom = cameFromParam === "finances" || cameFromParam === "applications" ? cameFromParam : null;
+  const originStudentId = searchParams.get("studentId");
   const [mosque, setMosque] = useState<Mosque | null>(null);
   const [program, setProgram] = useState<Program | null>(null);
   const [students, setStudents] = useState<Array<{ enrollment: Enrollment; profile: StudentDisplay | null; parent?: ParentDisplay | null; subscription?: ProgramSubscription | null; trackIds: string[] }>>([]);
@@ -9709,7 +9863,7 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
   const [selectedRosterTrackIds, setSelectedRosterTrackIds] = useState<string[]>([]);
   const [selectedRosterDays, setSelectedRosterDays] = useState<string[]>(() => [...scheduleDayOptions]);
   const [waitlist, setWaitlist] = useState<RequestWithContext[]>([]);
-  const [studentSearch, setStudentSearch] = useState(financeStudentId ?? "");
+  const [studentSearch, setStudentSearch] = useState(originStudentId ?? "");
   const [genderFilter, setGenderFilter] = useState("all");
   const [studentSort, setStudentSort] = useState<"first" | "last" | "age">("first");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
@@ -9727,10 +9881,10 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
   const [kickMessage, setKickMessage] = useState("");
 
   useEffect(() => {
-    if (fromFinances && financeStudentId) {
-      setStudentSearch(financeStudentId);
+    if (cameFrom && originStudentId) {
+      setStudentSearch(originStudentId);
     }
-  }, [financeStudentId, fromFinances]);
+  }, [originStudentId, cameFrom]);
 
   function notesHref(studentId: string) {
     const isAdminRoute = typeof window !== "undefined" && window.location.pathname.startsWith(`/m/${slug}/admin/`);
@@ -10052,14 +10206,17 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
   return (
     <div className="bg-white px-5 pb-28 pt-5">
       <EditorToast toast={toast} onClose={() => setToast(null)} />
-      {fromFinances ? (
+      {cameFrom ? (
         <div className="sticky top-3 z-20 mb-4">
           <button
             type="button"
-            onClick={() => router.push(`${typeof window !== "undefined" && window.location.pathname.startsWith(`/m/${slug}/admin/`) ? `/m/${slug}/admin/programs` : `/m/${slug}/teacher/classes`}/${programId}/finances`)}
+            onClick={() => {
+              const basePath = typeof window !== "undefined" && window.location.pathname.startsWith(`/m/${slug}/admin/`) ? `/m/${slug}/admin/programs` : `/m/${slug}/teacher/classes`;
+              router.push(`${basePath}/${programId}/${cameFrom}`);
+            }}
             className="min-h-10 rounded-full bg-[#17624F] px-4 text-sm font-semibold text-white shadow-[0_10px_24px_rgba(23,98,79,0.22)]"
           >
-            Back to Finances
+            {cameFrom === "finances" ? "Back to Finances" : "Back to Applications"}
           </button>
         </div>
       ) : null}
@@ -10171,7 +10328,7 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
           )}
         </section>
 
-        {!fromFinances && waitlist.length ? (
+        {!cameFrom && waitlist.length ? (
           <section className="space-y-3">
             <HomeSectionTitle title="Waitlist" />
             {waitlist.map((request) => (
@@ -10660,11 +10817,11 @@ export function ProgramFinancesData({ slug, programId, mode = "teacher" }: { slu
         </div>
       </div>
 
+      <label className="flex min-h-11 w-full items-center gap-2 rounded-[14px] border border-[#D6DCE0] bg-[#F8FAFB] px-3 text-[#6B747B]">
+        <SearchIcon />
+        <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search students, parents, status" className="min-w-0 flex-1 bg-transparent text-sm font-semibold text-[#26323A] outline-none placeholder:text-[#9AA4AA]" />
+      </label>
       <div className="flex flex-wrap gap-3">
-        <label className="flex min-h-11 min-w-[220px] flex-1 items-center gap-2 rounded-[14px] border border-[#D6DCE0] bg-[#F8FAFB] px-3 text-[#6B747B]">
-          <SearchIcon />
-          <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search students, parents, status" className="min-w-0 flex-1 bg-transparent text-sm font-semibold text-[#26323A] outline-none placeholder:text-[#9AA4AA]" />
-        </label>
         <FinanceSelect label="Enrollment" value={statusFilter} options={["active", "kicked", "withdrawn"]} onChange={setStatusFilter} />
         <FinanceSelect
           label="Payment status"
@@ -12875,6 +13032,7 @@ function useTeacherPrograms(slug: string) {
   const [allPrograms, setAllPrograms] = useState<ProgramScheduleSource[]>([]);
   const [roleByProgramId, setRoleByProgramId] = useState<Record<string, TeacherProgramRole>>({});
   const [financeAccessByProgramId, setFinanceAccessByProgramId] = useState<Record<string, boolean>>({});
+  const [programCounts, setProgramCounts] = useState<Record<string, { students: number; applications: number; instructors: number }>>({});
   const [canCreateClass, setCanCreateClass] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -12899,6 +13057,7 @@ function useTeacherPrograms(slug: string) {
         setAllPrograms([]);
         setRoleByProgramId({});
         setFinanceAccessByProgramId({});
+        setProgramCounts({});
         setCanCreateClass(false);
         setCurrentUserId(null);
         setError("Log in required.");
@@ -12933,6 +13092,7 @@ function useTeacherPrograms(slug: string) {
           setAllPrograms([]);
           setRoleByProgramId({});
           setFinanceAccessByProgramId({});
+          setProgramCounts({});
           setCanCreateClass(false);
           setError("Teacher account required.");
           setLoading(false);
@@ -12946,6 +13106,7 @@ function useTeacherPrograms(slug: string) {
           setAllPrograms([]);
           setRoleByProgramId({});
           setFinanceAccessByProgramId({});
+          setProgramCounts({});
           setCanCreateClass(false);
           setLoading(false);
         }
@@ -12970,9 +13131,33 @@ function useTeacherPrograms(slug: string) {
         (assignments ?? []).map((assignment) => [assignment.program_id, assignment.role === "director" ? "director" : "instructor" as TeacherProgramRole]),
       ) as Record<string, TeacherProgramRole>;
       const programIds = (mosquePrograms ?? []).map((program) => program.id);
-      const { data: trackRows } = programIds.length
-        ? await supabase.from("program_tracks").select("*").in("program_id", programIds).eq("is_active", true).order("sort_order", { ascending: true })
-        : { data: [] as ProgramTrack[] };
+      const [{ data: trackRows }, { data: activeEnrollmentRows }, { data: pendingRequestRows }, { data: instructorRows }] = await Promise.all([
+        programIds.length
+          ? supabase.from("program_tracks").select("*").in("program_id", programIds).eq("is_active", true).order("sort_order", { ascending: true })
+          : Promise.resolve({ data: [] as ProgramTrack[] }),
+        programIds.length
+          ? supabase.from("enrollments").select("program_id").in("program_id", programIds).eq("status", "active")
+          : Promise.resolve({ data: [] as Array<{ program_id: string }> }),
+        programIds.length
+          ? supabase.from("enrollment_requests").select("program_id").in("program_id", programIds).eq("status", "pending")
+          : Promise.resolve({ data: [] as Array<{ program_id: string }> }),
+        programIds.length
+          ? supabase.from("program_teachers").select("program_id").in("program_id", programIds)
+          : Promise.resolve({ data: [] as Array<{ program_id: string }> }),
+      ]);
+      const nextProgramCounts: Record<string, { students: number; applications: number; instructors: number }> = {};
+      for (const programId of programIds) {
+        nextProgramCounts[programId] = { students: 0, applications: 0, instructors: 0 };
+      }
+      for (const row of activeEnrollmentRows ?? []) {
+        if (nextProgramCounts[row.program_id]) nextProgramCounts[row.program_id].students += 1;
+      }
+      for (const row of pendingRequestRows ?? []) {
+        if (nextProgramCounts[row.program_id]) nextProgramCounts[row.program_id].applications += 1;
+      }
+      for (const row of instructorRows ?? []) {
+        if (nextProgramCounts[row.program_id]) nextProgramCounts[row.program_id].instructors += 1;
+      }
       const hydratedTrackRows = await hydrateTracksWithLinkedSessions(supabase, programIds, trackRows ?? []);
       const programsWithTracks = (mosquePrograms ?? []).map((program) => ({
         ...program,
@@ -13002,6 +13187,7 @@ function useTeacherPrograms(slug: string) {
         setAllPrograms(programsWithTracks);
         setRoleByProgramId(nextRoleByProgramId);
         setFinanceAccessByProgramId(nextFinanceAccessByProgramId);
+        setProgramCounts(nextProgramCounts);
         setPrograms(assignedPrograms);
         setCanCreateClass(canCreateForMosque);
         setLoading(false);
@@ -13017,7 +13203,7 @@ function useTeacherPrograms(slug: string) {
     };
   }, [slug]);
 
-  return { programs, allPrograms, roleByProgramId, financeAccessByProgramId, canCreateClass, currentUserId, loading, error };
+  return { programs, allPrograms, roleByProgramId, financeAccessByProgramId, programCounts, canCreateClass, currentUserId, loading, error };
 }
 
 function useAdminProgramsWithTracks(slug: string) {
@@ -13271,11 +13457,6 @@ async function loadEnrollmentTrackMap(
   }
 
   return next;
-}
-
-function useStudentUnreadAnnouncements(slug: string) {
-  const { announcementCount, noteCount } = useStudentNotificationCounts(slug);
-  return { unreadCount: announcementCount + noteCount };
 }
 
 type ApplicantApplicationRow = {
@@ -16190,8 +16371,10 @@ function ProgramCardGrid({
         const eligibilityLabel = accountType === "parent" && viewerProfiles.length
           ? `${eligibleCount}/${viewerProfiles.length} family members (including you) are eligible for this program.`
           : viewerProfiles.length
-            ? `You ${eligibleCount > 0 ? "are" : "are not"} eligible for this program.`
+            ? eligibleCount > 0 ? "You are eligible." : "You are not eligible."
             : undefined;
+        const eligibilityTone: "positive" | "negative" | undefined =
+          accountType !== "parent" && viewerProfiles.length ? (eligibleCount > 0 ? "positive" : "negative") : undefined;
         const applicationRow = applicationStatusByProgramId?.[program.id];
         const enrolled = enrolledProgramIds.includes(program.id);
         const relationship = enrolled
@@ -16206,6 +16389,7 @@ function ProgramCardGrid({
             enrolled={enrolled}
             detailHref={`${detailBaseHref ?? `/m/${mosqueSlug}/programs`}/${program.id}`}
             eligibilityLabel={eligibilityLabel}
+            eligibilityTone={eligibilityTone}
             relationship={relationship}
           />
         );
@@ -16612,12 +16796,14 @@ function ProgramCard({
   detailHref,
   enrolled = false,
   eligibilityLabel,
+  eligibilityTone,
   relationship,
 }: {
   program: ProgramWithTeacher;
   detailHref: string;
   enrolled?: boolean;
   eligibilityLabel?: string;
+  eligibilityTone?: "positive" | "negative";
   relationship?: { label: string; tone: "open" | "waitlist" | "closed" } | null;
 }) {
   const registration = relationship ?? programRegistrationLabel(program);
@@ -16659,7 +16845,9 @@ function ProgramCard({
           </div>
           <div className="flex items-center justify-between gap-3 rounded-[10px] bg-[#F5F8F9] px-3 py-2">
             <span className="text-[#6B747B]">Eligibility</span>
-            <span className="text-right text-[#26323A]">{eligibilityLabel ?? `${formatAgeRange(program.age_range_text)} · ${formatGender(program.audience_gender)}`}</span>
+            <span className={cn("text-right", eligibilityTone === "positive" ? "text-[#17624F]" : eligibilityTone === "negative" ? "text-[#C83F31]" : "text-[#26323A]")}>
+              {eligibilityLabel ?? `${formatAgeRange(program.age_range_text)} · ${formatGender(program.audience_gender)}`}
+            </span>
           </div>
         </div>
       </div>
@@ -17223,6 +17411,7 @@ function TeacherClassCard({
   basePath,
   controlLabel,
   canManageFinances = false,
+  counts,
   onResigned,
   onResignError,
   onDeleted,
@@ -17234,6 +17423,7 @@ function TeacherClassCard({
   basePath?: string;
   controlLabel?: string;
   canManageFinances?: boolean;
+  counts?: { students?: number; applications?: number; instructors?: number };
   onResigned?: () => void;
   onResignError?: (message: string) => void;
   onDeleted?: () => void;
@@ -17326,9 +17516,9 @@ function TeacherClassCard({
         <AudienceDetails age={age} gender={gender} />
         <div className="divide-y divide-[#E3E8EC] border-t border-[#E3E8EC]">
           <TeacherActionLink href={publicHref} icon={<ExternalLinkIcon />} label="View Public Page" previewLabel="Class Details" />
-          <TeacherActionLink href={`${classBasePath}/${program.id}/students`} icon={<StudentsIcon />} label="Students" />
-          {isDirector ? <TeacherActionLink href={`${classBasePath}/${program.id}/applications`} icon={<ClipboardIcon />} label="Manage Applications" /> : null}
-          {isDirector ? <TeacherActionLink href={`${classBasePath}/${program.id}/instructors`} icon={<InstructorManageIcon />} label="Instructors" /> : null}
+          <TeacherActionLink href={`${classBasePath}/${program.id}/students`} icon={<StudentsIcon />} label="Students" count={counts?.students} />
+          {isDirector ? <TeacherActionLink href={`${classBasePath}/${program.id}/applications`} icon={<ClipboardIcon />} label="Manage Applications" count={counts?.applications} /> : null}
+          {isDirector ? <TeacherActionLink href={`${classBasePath}/${program.id}/instructors`} icon={<InstructorManageIcon />} label="Instructors" count={counts?.instructors} /> : null}
           <TeacherActionLink href={`${classBasePath}/${program.id}/announcement`} icon={<MegaphoneIcon />} label="Announcement" />
           {canManageFinances ? <TeacherActionLink href={`${classBasePath}/${program.id}/finances`} icon={<FinanceIcon />} label="Manage Finances" /> : null}
           {isDirector ? <TeacherActionLink href={`${classBasePath}/${program.id}`} icon={<EditClassIcon />} label="Edit Program" /> : null}
@@ -17366,15 +17556,24 @@ function programLessonColor(programId: string) {
   return `hsl(${hue} ${saturation}% ${lightness}%)`;
 }
 
-function TeacherActionLink({ href, icon, label, previewLabel }: { href: string; icon: ReactNode; label: string; previewLabel?: string }) {
+function TeacherActionLink({ href, icon, label, previewLabel, count }: { href: string; icon: ReactNode; label: string; previewLabel?: string; count?: number }) {
   return (
     <TransitionLink href={href} label={previewLabel ?? label} className="group flex min-h-[58px] items-center gap-3 text-sm font-semibold text-[#26323A] transition hover:bg-[#F7FAFB]">
       <span className="flex h-10 w-10 shrink-0 items-center justify-center text-[#26323A] transition group-hover:text-[#17624F]" aria-hidden>
         {icon}
       </span>
       <span className="min-w-0 flex-1 text-left leading-5">{label}</span>
+      {count ? <ActionRowCount count={count} /> : null}
       <ChevronRightIcon className="text-[#9AA4AA]" />
     </TransitionLink>
+  );
+}
+
+function ActionRowCount({ count }: { count: number }) {
+  return (
+    <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-[#EDF1F2] px-1.5 text-[11px] font-semibold leading-none text-[#6B747B]">
+      {count > 99 ? "99+" : count}
+    </span>
   );
 }
 
