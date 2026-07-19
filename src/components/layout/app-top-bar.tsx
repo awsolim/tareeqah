@@ -320,13 +320,21 @@ export function AppTopBar({
   );
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
   const cachedSession = getCachedSessionSnapshot();
-  const [session, setSession] = useState<Session | null>(cachedSession ?? null);
+  const [session, setSession] = useState<Session | null | undefined>(cachedSession);
   const [access, setAccess] = useState<UserAccess>(() =>
     cachedSession?.user.id && mosqueSlug ? getCachedUserAccess(mosqueSlug, cachedSession.user.id) ?? emptyUserAccess : emptyUserAccess,
   );
   const [profileName, setProfileName] = useState<string | null>(() =>
     cachedSession?.user.id ? getCachedProfileName(cachedSession.user.id) ?? null : null,
   );
+  const [accessResolved, setAccessResolved] = useState(() => {
+    if (cachedSession === null) return true;
+    return Boolean(cachedSession?.user.id && mosqueSlug && getCachedUserAccess(mosqueSlug, cachedSession.user.id));
+  });
+  const [profileResolved, setProfileResolved] = useState(() => {
+    if (cachedSession === null) return true;
+    return Boolean(cachedSession?.user.id && getCachedProfileName(cachedSession.user.id) !== undefined);
+  });
 
   useEffect(() => {
     if (!mosqueSlug) {
@@ -363,6 +371,11 @@ export function AppTopBar({
       if (!nextSession) {
         setAccess(emptyUserAccess);
         setProfileName(null);
+        setAccessResolved(true);
+        setProfileResolved(true);
+      } else {
+        setAccessResolved(false);
+        setProfileResolved(false);
       }
     });
 
@@ -383,6 +396,10 @@ export function AppTopBar({
 
     if (!session?.user.id || !mosqueSlug) {
       setAccess(emptyUserAccess);
+      if (session === null) {
+        setAccessResolved(true);
+        setProfileResolved(true);
+      }
       return () => {
         cancelled = true;
       };
@@ -395,6 +412,8 @@ export function AppTopBar({
       if (!cancelled) {
         setAccess(nextAccess);
         setProfileName(nextProfileName);
+        setAccessResolved(true);
+        setProfileResolved(true);
       }
     });
 
@@ -429,7 +448,8 @@ export function AppTopBar({
     return display.split(/\s+/)[0] || "Guest";
   }, [profileName, session]);
 
-  const accountInitial = useMemo(() => getAccountInitial(access, session), [access, session]);
+  const accountInitial = useMemo(() => getAccountInitial(access, session ?? null), [access, session]);
+  const accountReady = session !== undefined && (session === null || (accessResolved && profileResolved));
 
   if (!showTopBar) {
     return null;
@@ -447,12 +467,21 @@ export function AppTopBar({
           Powered by Tareeqah
         </p>
         <div className="flex min-w-0 items-center justify-end gap-1.5">
-          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#17624F] text-[11px] font-semibold leading-none text-white">
-            {accountInitial}
-          </span>
-          <span className="min-w-0 max-w-[74px] truncate text-right text-[12px] font-semibold leading-4 text-[#26323A]">
-            {userFirstName}
-          </span>
+          {!accountReady ? (
+            <>
+              <span className="h-6 w-6 shrink-0 animate-pulse rounded-full bg-[#E4E9EC]" />
+              <span className="h-3 w-12 animate-pulse rounded bg-[#E4E9EC]" />
+            </>
+          ) : (
+            <>
+              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#17624F] text-[11px] font-semibold leading-none text-white">
+                {accountInitial ?? <GuestProfileIcon />}
+              </span>
+              <span className="min-w-0 max-w-[74px] truncate text-right text-[12px] font-semibold leading-4 text-[#26323A]">
+                {userFirstName}
+              </span>
+            </>
+          )}
         </div>
       </div>
     </header>
@@ -492,9 +521,12 @@ function MosqueIcon({ className = "h-5 w-5" }: { className?: string }) {
   );
 }
 
-function getAccountInitial(access: UserAccess, session: Session | null) {
+// Returns null for "no letter to show" (guest, or a signed-in session whose
+// role couldn't be matched) so the caller can render a neutral icon instead
+// of ever falling back to a "?" character.
+function getAccountInitial(access: UserAccess, session: Session | null): string | null {
   if (!session) {
-    return "?";
+    return null;
   }
 
   if (access.isMosqueAdmin) {
@@ -513,7 +545,16 @@ function getAccountInitial(access: UserAccess, session: Session | null) {
     return "S";
   }
 
-  return "?";
+  return null;
+}
+
+function GuestProfileIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <circle cx="12" cy="8" r="3.2" />
+      <path d="M5.5 19c1-3.2 3.2-5 6.5-5s5.5 1.8 6.5 5" />
+    </svg>
+  );
 }
 
 function titleFromSlug(slug: string) {

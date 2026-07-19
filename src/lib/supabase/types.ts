@@ -56,6 +56,7 @@ export type Database = {
           registration_deadline_at: string | null;
           location: string | null;
           room: string | null;
+          room_area: string | null;
           is_active: boolean;
           is_paid: boolean;
           payment_kind: string;

@@ -31,6 +31,7 @@ type UpdateProgramBody = {
   registrationDeadlineAt?: string | null;
   location?: string | null;
   room?: string | null;
+  roomArea?: string | null;
   paymentKind?: string;
   billingStartBehavior?: string;
   billingEndBehavior?: string;
@@ -124,6 +125,7 @@ const optionalProgramBuilderColumns = new Set([
   "registration_deadline_at",
   "location",
   "room",
+  "room_area",
   "payment_kind",
   "billing_start_behavior",
   "billing_end_behavior",
@@ -431,6 +433,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
       registration_deadline_at: cleanDateTime(body.registrationDeadlineAt),
       location: cleanText(body.location, 180),
       room: cleanText(body.room, 120),
+      room_area: cleanText(body.roomArea, 120),
       is_active: publicationStatus !== "draft" && derivedLifecycleStatus !== "cancelled" && derivedLifecycleStatus !== "archived",
       is_paid: isPaid,
       payment_kind: paymentKind,

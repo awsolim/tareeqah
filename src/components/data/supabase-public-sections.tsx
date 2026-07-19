@@ -101,6 +101,7 @@ type ProgramBuilderStatus = {
   registrationDeadline: string;
   location: string;
   room: string;
+  roomArea: string;
   paymentKind: "free" | "tareeqah" | "manual";
   billingStartBehavior: "on_payment" | "program_start";
   billingEndBehavior: "manual_cancel" | "program_end" | "fixed_months";
@@ -165,6 +166,7 @@ function defaultBuilderStatus(): ProgramBuilderStatus {
     registrationDeadline: "",
     location: "",
     room: "",
+    roomArea: "",
     paymentKind: "free",
     billingStartBehavior: "on_payment",
     billingEndBehavior: "fixed_months",
@@ -206,6 +208,7 @@ function defaultProgramBuilderColumns(): Pick<Program,
   | "registration_deadline_at"
   | "location"
   | "room"
+  | "room_area"
   | "payment_kind"
   | "billing_start_behavior"
   | "billing_end_behavior"
@@ -247,6 +250,7 @@ function defaultProgramBuilderColumns(): Pick<Program,
     registration_deadline_at: null,
     location: null,
     room: null,
+    room_area: null,
     payment_kind: defaults.paymentKind,
     billing_start_behavior: defaults.billingStartBehavior,
     billing_end_behavior: defaults.billingEndBehavior,
@@ -892,7 +896,7 @@ function ActionRequiredCard({ slug, row }: { slug: string; row: ApplicantApplica
       <p className="mt-1 text-sm leading-5 text-[#52616A]">{explanation}</p>
       <Link
         href={`/m/${slug}/registration/${row.request.id}`}
-        className="mt-3 inline-flex min-h-10 w-full items-center justify-center rounded-[6px] bg-[#2E6E52] px-4 text-sm font-semibold !text-white shadow-[0_8px_18px_rgba(46,110,82,0.22)] transition-colors hover:bg-[#265D45]"
+        className="mt-3 inline-flex min-h-10 w-full items-center justify-center rounded-[6px] bg-[#2E6E52] px-4 text-sm font-semibold !text-white shadow-[0_8px_18px_rgba(46,110,82,0.22)] transition-colors hover:bg-[#265D45] md:w-auto md:px-10"
       >
         {action.label}
       </Link>
@@ -934,6 +938,7 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
   const [isEnrolled, setIsEnrolled] = useState(false);
   const [isStaffForProgram, setIsStaffForProgram] = useState(false);
   const [enrolledCount, setEnrolledCount] = useState<number | null>(null);
+  const [enrolledCountByTrackId, setEnrolledCountByTrackId] = useState<Record<string, number>>({});
   const [toast, setToast] = useState<EditorToastState | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1009,7 +1014,7 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
           supabase.from("program_faqs").select("*").eq("program_id", programData.id).order("sort_order", { ascending: true }),
           supabase.from("program_media").select("*").eq("program_id", programData.id).order("sort_order", { ascending: true }),
           supabase.from("program_tracks").select("*").eq("program_id", programData.id).eq("is_active", true).order("sort_order", { ascending: true }),
-          supabase.from("enrollments").select("id", { count: "exact", head: true }).eq("program_id", programData.id).eq("status", "active"),
+          supabase.from("enrollments").select("id").eq("program_id", programData.id).eq("status", "active"),
         ]);
 
         setDetails(detailsResult.data ?? null);
@@ -1018,7 +1023,17 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
         setFaqs(faqResult.data ?? []);
         setMediaItems(mediaResult.data ?? []);
         setTracks(tracksResult.data ?? []);
-        setEnrolledCount(typeof enrolledCountResult.count === "number" ? enrolledCountResult.count : null);
+        const activeEnrollmentIds = (enrolledCountResult.data ?? []).map((row) => row.id);
+        setEnrolledCount(activeEnrollmentIds.length);
+
+        const { data: enrollmentTrackRows } = activeEnrollmentIds.length
+          ? await supabase.from("enrollment_tracks").select("enrollment_id, program_track_id").in("enrollment_id", activeEnrollmentIds)
+          : { data: [] as Array<{ enrollment_id: string; program_track_id: string }> };
+        const nextCountByTrackId: Record<string, number> = {};
+        for (const row of enrollmentTrackRows ?? []) {
+          nextCountByTrackId[row.program_track_id] = (nextCountByTrackId[row.program_track_id] ?? 0) + 1;
+        }
+        setEnrolledCountByTrackId(nextCountByTrackId);
 
         if (userId) {
           const [profileResult, enrollmentResult, requestResult, teacherAssignmentResult, access] = await Promise.all([
@@ -1111,19 +1126,21 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
   const teacherWhatsAppHref = getWhatsAppHref(details?.instructor_contact_phone?.trim() || program.teacher?.teacher_whatsapp_number);
   const age = formatAgeRange(program.age_range_text);
   const gender = formatGender(program.audience_gender);
-  const paymentOptions = programPaymentOptions(program);
-  const price = program.is_paid ? (paymentOptions[0]?.price ?? "Payment details pending") : program.payment_kind === "manual" ? "Price determined after review" : "Free";
   const schedule = scheduleSummary(program.schedule, program.schedule_notes);
   const primaryTrack = tracks[0] ?? null;
-  const primaryTrackSchedule = primaryTrack
-    ? {
-        short: tracks.map((track) => track.name).join(", "),
-        full: tracks.map((track) => `${track.name}: ${scheduleSummary(track.schedule, null).full}`).join("; "),
-      }
-    : schedule;
   const locationName = primaryTrack?.location?.trim() || program.location?.trim() || "";
   const locationRoom = primaryTrack?.room?.trim() || program.room?.trim() || "";
   const locationDisplay = locationName ? `${locationName}${locationRoom ? `, ${locationRoom}` : ""}` : "Location will be announced";
+  const durationDisplay = program.start_date
+    ? program.end_date
+      ? `${formatFinanceShortDate(program.start_date)} – ${formatFinanceShortDate(program.end_date)}`
+      : `${formatFinanceShortDate(program.start_date)} · Ongoing`
+    : "Schedule to be announced";
+  const registrationState = programRegistrationLabel(program);
+  const registrationDeadlineText =
+    registrationState.label === "Registration open" && program.application_close_at
+      ? `Closes ${formatFinanceShortDate(program.application_close_at)}`
+      : "";
   const learningIntro = details?.learning_intro?.trim() ?? "";
   const learningOutcomes = outcomes.map((item) => item.text);
   const hasLearningSection = Boolean(learningIntro) || learningOutcomes.length > 0;
@@ -1139,11 +1156,12 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
   const viewerHasActiveEnrollment =
     isEnrolled || (accountType === "parent" && Object.values(childStatuses).some((status) => status.enrolled));
 
-  const totalCapacity = tracks.length
-    ? tracks.reduce((sum, track) => (track.capacity != null ? sum + track.capacity : sum), 0) || null
-    : program.default_capacity;
-  const capacityFull = totalCapacity != null && enrolledCount != null && enrolledCount >= totalCapacity;
-  const spotsRemaining = totalCapacity != null && enrolledCount != null ? Math.max(0, totalCapacity - enrolledCount) : null;
+  // Capacity is strictly track-specific: a track only counts as full against its
+  // own capacity/enrolled-count, and the whole program only reads as full once
+  // every track is full (a track with no capacity limit set is never full).
+  const capacityFull = tracks.length
+    ? tracks.every((track) => track.capacity != null && (enrolledCountByTrackId[track.id] ?? 0) >= track.capacity)
+    : program.default_capacity != null && enrolledCount != null && enrolledCount >= program.default_capacity;
   const waitlistAllowed = program.capacity_behavior === "allow_waitlist";
 
   const applyHref = `/m/${slug}/programs/${programId}/apply`;
@@ -1236,82 +1254,94 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
 
           <div className="space-y-4 lg:sticky lg:top-24">
             <aside className="rounded-2xl border border-[#C8DCE2] bg-white p-4 shadow-[0_14px_34px_rgba(38,50,58,0.10)]">
-              <div className="flex items-baseline gap-2">
-                <p className="text-2xl font-semibold text-[#26323A]">{price}</p>
+              <p className="text-lg font-semibold text-[#26323A]">Program Details</p>
+              <div className="mt-3 divide-y divide-[#E6ECEF]">
+                <ProgramDetailFact icon="🎂" label="Age" value={age} />
+                <ProgramDetailFact icon="🧑‍🤝‍🧑" label="Gender" value={gender} />
+                <ProgramDetailFact icon="📅" label="Duration" value={durationDisplay} />
+                <ProgramDetailFact icon="📍" label="Location" value={locationDisplay} />
+                {program.room_area?.trim() ? <ProgramDetailFact icon="🚪" label="Room / Area" value={program.room_area.trim()} /> : null}
+                {registrationDeadlineText ? (
+                  <div className="flex items-start justify-between gap-4 py-3">
+                    <dt className="flex items-center gap-2 text-[#6B747B]">
+                      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#FBEAE7] text-sm" aria-hidden>
+                        ⏰
+                      </span>
+                      Registration deadline
+                    </dt>
+                    <dd className="max-w-[55%] text-right font-semibold text-[#C0392B]">{registrationDeadlineText}</dd>
+                  </div>
+                ) : null}
               </div>
-              {spotsRemaining !== null ? (
-                <p className={cn("mt-1 text-xs font-semibold", capacityFull ? "text-[#C0392B]" : "text-[#6B747B]")}>
-                  {capacityFull ? "Full" : `${spotsRemaining} spot${spotsRemaining === 1 ? "" : "s"} remaining`}
-                </p>
-              ) : null}
-              <ProgramScheduleOptionsDisplay tracks={tracks} fallbackSchedule={schedule.full} />
-              <ProgramPaymentOptionsDisplay program={program} />
+
               {program.publication_status === "hidden" ? (
                 <p className="mt-3 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-[#8A6418]">
                   <span aria-hidden>🔒</span> Private class — shared by direct link only
                 </p>
               ) : null}
-              {isTeacherContext || isStaffForProgram ? (
-                <div className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#EEF6F8] px-4 text-sm font-semibold text-[#2F6F83] ring-1 ring-[#CFE2E8]">
-                  {accountType === "admin" ? "Admin Control" : "Teaching"}
-                </div>
-              ) : accountType === "admin" ? (
-                <div className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#EEF6F8] px-4 text-sm font-semibold text-[#2F6F83] ring-1 ring-[#CFE2E8]">
-                  Admin Account
-                </div>
-              ) : accountType === "teacher" ? (
-                <div className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#EEF6F8] px-4 text-sm font-semibold text-[#2F6F83] ring-1 ring-[#CFE2E8]">
-                  Teacher Account
-                </div>
-              ) : primaryCta.kind === "pill" ? (
-                <div
-                  className={cn(
-                    "mt-4 flex min-h-12 w-full items-center justify-center rounded-full px-4 text-sm font-semibold ring-1",
-                    primaryCta.tone === "positive"
-                      ? "bg-[#E8F7F2] text-[#17624F] ring-[#B9E4D7]"
-                      : primaryCta.tone === "warning"
-                        ? "bg-[#FFF7E6] text-[#8A5A00] ring-[#F3D28A]"
-                        : "bg-[#F6F8F9] text-[#52616A] ring-[#DDE6EA]",
-                  )}
-                >
-                  {primaryCta.label}
-                </div>
-              ) : primaryCta.kind === "disabled" ? (
-                <div className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#F6F8F9] px-4 text-center text-sm font-semibold text-[#52616A] ring-1 ring-[#DDE6EA]">
-                  {primaryCta.label}
-                </div>
-              ) : (
-                <Link
-                  href={primaryCta.href}
-                  className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#248B72] px-4 text-sm font-semibold !text-white shadow-[0_10px_22px_rgba(36,139,114,0.24)] transition-colors hover:bg-[#17624F]"
-                >
-                  {primaryCta.label}
-                </Link>
-              )}
 
-              <dl className="mt-5 divide-y divide-[#E6ECEF] text-sm">
-                <SidebarFact label="Age" value={age} />
-                <SidebarFact label="Audience" value={gender} />
-                <SidebarFact label="Schedule" value={primaryTrackSchedule.full} />
-                <SidebarFact label="Location" value={locationDisplay} />
-                {section === "portal" && viewerHasActiveEnrollment ? (
-                  <div className="py-3 text-xs leading-5 text-[#6B747B]">
-                    Go to Schedule Options from your class card to view different schedule options.
+              <div className="mt-4 border-t border-[#E6ECEF] pt-4">
+                <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">Registration</p>
+                {isTeacherContext || isStaffForProgram ? (
+                  <div className="mt-2 flex min-h-12 w-full items-center justify-center rounded-full bg-[#EEF6F8] px-4 text-sm font-semibold text-[#2F6F83] ring-1 ring-[#CFE2E8] md:w-auto md:px-10">
+                    {accountType === "admin" ? "Admin Control" : "Teaching"}
                   </div>
-                ) : null}
-                <SidebarFact label="Applications" value={getApplicationButtonState(toProgramStatusFields(program)).label} />
-              </dl>
+                ) : accountType === "admin" ? (
+                  <div className="mt-2 flex min-h-12 w-full items-center justify-center rounded-full bg-[#EEF6F8] px-4 text-sm font-semibold text-[#2F6F83] ring-1 ring-[#CFE2E8] md:w-auto md:px-10">
+                    Admin Account
+                  </div>
+                ) : accountType === "teacher" ? (
+                  <div className="mt-2 flex min-h-12 w-full items-center justify-center rounded-full bg-[#EEF6F8] px-4 text-sm font-semibold text-[#2F6F83] ring-1 ring-[#CFE2E8] md:w-auto md:px-10">
+                    Teacher Account
+                  </div>
+                ) : primaryCta.kind === "pill" ? (
+                  <div
+                    className={cn(
+                      "mt-2 flex min-h-12 w-full items-center justify-center rounded-full px-4 text-sm font-semibold ring-1 md:w-auto md:px-10",
+                      primaryCta.tone === "positive"
+                        ? "bg-[#E8F7F2] text-[#17624F] ring-[#B9E4D7]"
+                        : primaryCta.tone === "warning"
+                          ? "bg-[#FFF7E6] text-[#8A5A00] ring-[#F3D28A]"
+                          : "bg-[#F6F8F9] text-[#52616A] ring-[#DDE6EA]",
+                    )}
+                  >
+                    {primaryCta.label}
+                  </div>
+                ) : primaryCta.kind === "disabled" ? (
+                  <div className="mt-2 flex min-h-12 w-full items-center justify-center rounded-full bg-[#F6F8F9] px-4 text-center text-sm font-semibold text-[#52616A] ring-1 ring-[#DDE6EA] md:w-auto md:px-10">
+                    {primaryCta.label}
+                  </div>
+                ) : (
+                  <Link
+                    href={primaryCta.href}
+                    className="mt-2 flex min-h-12 w-full items-center justify-center rounded-full bg-[#248B72] px-4 text-sm font-semibold !text-white shadow-[0_10px_22px_rgba(36,139,114,0.24)] transition-colors hover:bg-[#17624F] md:w-auto md:px-10"
+                  >
+                    {primaryCta.label}
+                  </Link>
+                )}
+              </div>
             </aside>
+
+            <section className="rounded-2xl border border-[#C8DCE2] bg-white p-4 shadow-[0_14px_34px_rgba(38,50,58,0.10)]">
+              <p className="text-lg font-semibold text-[#26323A]">Schedule and Pricing</p>
+              <ProgramScheduleOptionsDisplay tracks={tracks} program={program} fallbackSchedule={schedule.full} enrolledCountByTrackId={enrolledCountByTrackId} />
+              <ProgramPaymentOptionsDisplay program={program} />
+              {section === "portal" && viewerHasActiveEnrollment ? (
+                <p className="mt-3 text-xs leading-5 text-[#6B747B]">
+                  Go to Schedule Options from your class card to view different schedule options.
+                </p>
+              ) : null}
+            </section>
 
             <section className="overflow-hidden rounded-[24px] bg-[#17624F] p-4 text-white shadow-[0_16px_34px_rgba(23,98,79,0.20)]">
               <p className="text-center text-[11px] font-semibold uppercase tracking-[0.18em] text-white/70">Program Director</p>
-              <div className="mt-4 flex items-center gap-4">
+              <div className="mt-4 flex flex-col items-center gap-3 text-center">
                 <Avatar src={program.teacher?.avatar_url ?? null} name={teacherName} />
                 <div className="min-w-0">
                   <h2 className="truncate text-lg font-semibold text-white">{teacherName}</h2>
                 </div>
               </div>
-              {teacherCredentials ? <p className="mt-4 text-sm leading-7 text-white/82">{teacherCredentials}</p> : null}
+              {teacherCredentials ? <p className="mt-4 text-center text-sm leading-7 text-white/82">{teacherCredentials}</p> : null}
               <div className="mt-5 flex justify-center">
                 {teacherWhatsAppHref ? (
                   <a
@@ -1348,6 +1378,7 @@ export function ProgramApplyData({ slug, programId }: { slug: string; programId:
   const [mosque, setMosque] = useState<Mosque | null>(null);
   const [program, setProgram] = useState<Program | null>(null);
   const [tracks, setTracks] = useState<ProgramTrack[]>([]);
+  const [enrolledCountByTrackId, setEnrolledCountByTrackId] = useState<Record<string, number>>({});
   const [isSignedIn, setIsSignedIn] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [accountType, setAccountType] = useState<string | null>(null);
@@ -1423,6 +1454,17 @@ export function ProgramApplyData({ slug, programId }: { slug: string; programId:
       setSelectedPaymentType(defaultPaymentType(programData));
       setMosque(mosqueData);
       setProgram(programData);
+
+      const { data: activeEnrollments } = await supabase.from("enrollments").select("id").eq("program_id", programData.id).eq("status", "active");
+      const activeEnrollmentIds = (activeEnrollments ?? []).map((row) => row.id);
+      const { data: enrollmentTrackRows } = activeEnrollmentIds.length
+        ? await supabase.from("enrollment_tracks").select("enrollment_id, program_track_id").in("enrollment_id", activeEnrollmentIds)
+        : { data: [] as Array<{ enrollment_id: string; program_track_id: string }> };
+      const nextCountByTrackId: Record<string, number> = {};
+      for (const row of enrollmentTrackRows ?? []) {
+        nextCountByTrackId[row.program_track_id] = (nextCountByTrackId[row.program_track_id] ?? 0) + 1;
+      }
+      setEnrolledCountByTrackId(nextCountByTrackId);
 
       if (!userId) {
         setLoading(false);
@@ -1758,6 +1800,7 @@ export function ProgramApplyData({ slug, programId }: { slug: string; programId:
                   tracks={tracks}
                   selectedTrackIds={selectedTrackIds}
                   program={program}
+                  enrolledCountByTrackId={enrolledCountByTrackId}
                   onToggle={(trackId) => setSelectedTrackIds((current) => nextProgramTrackSelection(program, tracks, current, trackId))}
                 />
               </DetailSection>
@@ -1779,7 +1822,7 @@ export function ProgramApplyData({ slug, programId }: { slug: string; programId:
                   type="button"
                   onClick={submitApplication}
                   disabled={submitBusy}
-                  className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#248B72] px-4 text-sm font-semibold !text-white shadow-[0_10px_22px_rgba(36,139,114,0.24)] transition-colors hover:bg-[#17624F] disabled:opacity-60"
+                  className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#248B72] px-4 text-sm font-semibold !text-white shadow-[0_10px_22px_rgba(36,139,114,0.24)] transition-colors hover:bg-[#17624F] disabled:opacity-60 md:w-auto md:px-10"
                 >
                   {submitBusy ? "Submitting..." : "Submit Application"}
                 </button>
@@ -2108,7 +2151,7 @@ export function RegistrationConfirmationData({ slug, requestId }: { slug: string
                   type="button"
                   disabled={!agreed || checkoutBusy || confirmBusy}
                   onClick={state === "no_payment_required" ? handleConfirmFree : handleStartCheckout}
-                  className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#248B72] px-4 text-sm font-semibold !text-white shadow-[0_10px_22px_rgba(36,139,114,0.24)] transition-colors hover:bg-[#17624F] disabled:cursor-not-allowed disabled:opacity-60"
+                  className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#248B72] px-4 text-sm font-semibold !text-white shadow-[0_10px_22px_rgba(36,139,114,0.24)] transition-colors hover:bg-[#17624F] disabled:cursor-not-allowed disabled:opacity-60 md:w-auto md:px-10"
                 >
                   {checkoutBusy || confirmBusy
                     ? "Please wait..."
@@ -2588,6 +2631,7 @@ export function PortalAccountData({ slug }: { slug: string }) {
   const [profileForm, setProfileForm] = useState({ avatarUrl: "", fullName: "", phone: "", dateOfBirth: "", email: "", password: "" });
   const [profileSaving, setProfileSaving] = useState(false);
   const [profileMessage, setProfileMessage] = useState<string | null>(null);
+  const [toast, setToast] = useState<EditorToastState | null>(null);
   const [editingField, setEditingField] = useState<EditableProfileField | null>(null);
   const [photoDraftUrl, setPhotoDraftUrl] = useState("");
   const [photoScale, setPhotoScale] = useState(1);
@@ -2851,7 +2895,7 @@ export function PortalAccountData({ slug }: { slug: string }) {
     });
     window.dispatchEvent(new Event("tareeqah:profile-name-changed"));
     setProfileSaving(false);
-    setProfileMessage(cleanedAvatarUrl ? "Profile photo updated." : "Profile photo removed.");
+    setToast({ tone: "success", message: cleanedAvatarUrl ? "Profile photo updated." : "Profile photo removed." });
   }
 
   async function confirmPhotoChanges() {
@@ -2962,7 +3006,7 @@ export function PortalAccountData({ slug }: { slug: string }) {
     }
 
     setEditingField(null);
-    setProfileMessage("Saved.");
+    setToast({ tone: "success", message: "Saved." });
     setProfileSaving(false);
   }
 
@@ -3183,6 +3227,7 @@ export function PortalAccountData({ slug }: { slug: string }) {
 
   return (
     <section className="min-h-[calc(100vh-140px)] overflow-hidden bg-[var(--workspace)] px-5 py-8 text-[#26323A]">
+      <EditorToast toast={toast} onClose={() => setToast(null)} />
       <div className="mx-auto max-w-sm overflow-hidden md:hidden">
         {renderAccountPanel(mobilePanel)}
       </div>
@@ -5662,7 +5707,6 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
       if (mosque) {
         const mosqueAddress = typeof mosque.address === "string" && mosque.address.trim() ? mosque.address.trim() : "";
         setBuilderStatus((current) => current.location ? current : { ...current, location: mosque.name ?? titleCase(slug), room: mosqueAddress });
-        setRoomVisible(Boolean(mosqueAddress));
       }
       if (data?.account_type === "admin") {
         if (!mosque) {
@@ -5900,6 +5944,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
           registrationDeadlineAt: noRegistrationDeadline ? null : effectiveBuilderStatus.registrationDeadline || null,
           location: effectiveBuilderStatus.location.trim() || null,
           room: effectiveBuilderStatus.room.trim() || null,
+          roomArea: effectiveBuilderStatus.roomArea.trim() || null,
           paymentKind: effectiveBuilderStatus.paymentKind,
           billingStartBehavior: effectiveBuilderStatus.billingStartBehavior,
           billingEndBehavior: effectiveBuilderStatus.billingEndBehavior,
@@ -5968,6 +6013,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
             registrationDeadlineAt: noRegistrationDeadline ? null : effectiveBuilderStatus.registrationDeadline || null,
             location: effectiveBuilderStatus.location.trim() || null,
             room: effectiveBuilderStatus.room.trim() || null,
+            roomArea: effectiveBuilderStatus.roomArea.trim() || null,
             paymentKind: effectiveBuilderStatus.paymentKind,
             billingStartBehavior: effectiveBuilderStatus.billingStartBehavior,
             billingEndBehavior: effectiveBuilderStatus.billingEndBehavior,
@@ -6294,6 +6340,25 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
             <div className="grid gap-3">
               <EditBox label="Location name" required value={builderStatus.location} onChange={(value) => setBuilderStatus((current) => ({ ...current, location: value }))} />
               <EditBox label="Location address" required value={builderStatus.room} onChange={(value) => setBuilderStatus((current) => ({ ...current, room: value }))} />
+              {roomVisible || builderStatus.roomArea.trim() ? (
+                <div className="space-y-1.5">
+                  <EditBox label="Room / Area" value={builderStatus.roomArea} onChange={(value) => setBuilderStatus((current) => ({ ...current, roomArea: value }))} />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRoomVisible(false);
+                      setBuilderStatus((current) => ({ ...current, roomArea: "" }));
+                    }}
+                    className="justify-self-start text-sm font-semibold text-[#C0392B]"
+                  >
+                    Remove Room / Area
+                  </button>
+                </div>
+              ) : (
+                <button type="button" onClick={() => setRoomVisible(true)} className="justify-self-start text-sm font-semibold text-[#2F8FB3]">
+                  Add Room / Area
+                </button>
+              )}
             </div>
           </div>
         </section>
@@ -6466,6 +6531,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
   const [message, setMessage] = useState<string | null>(null);
   const [toast, setToast] = useState<EditorToastState | null>(null);
   const [missingFieldsModal, setMissingFieldsModal] = useState<{ fields: ProgramBuilderMissingField[]; allowContinue: boolean } | null>(null);
+  const [startDateChangeConfirmOpen, setStartDateChangeConfirmOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const thumbnailInputRef = useRef<HTMLInputElement | null>(null);
@@ -6569,7 +6635,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         const nextInstructorCredentials = detailResult.data?.instructor_credentials ?? "";
         const nextInstructorContactPhone = detailResult.data?.instructor_contact_phone ?? directorProfile?.phone_number ?? directorProfile?.teacher_whatsapp_number ?? "";
         setNoRegistrationDeadline(!programRow.registration_deadline_at);
-        setRoomVisible(Boolean(programRow.room));
+        setRoomVisible(Boolean(programRow.room_area));
         setEventTimeVisible(programRow.program_type === "event" && Boolean((sessionResult.data ?? [])[0]));
         setEventDate((sessionResult.data ?? [])[0]?.session_date ?? programRow.start_date ?? "");
         setBuilderStatus({
@@ -6596,6 +6662,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
           applicationCloseAt: programRow.application_close_at ? programRow.application_close_at.slice(0, 16) : "",
           location: programRow.location ?? "",
           room: programRow.room ?? "",
+          roomArea: programRow.room_area ?? "",
           paymentKind: ["free", "tareeqah", "manual"].includes(programRow.payment_kind) ? programRow.payment_kind as ProgramBuilderStatus["paymentKind"] : (programRow.is_paid ? "tareeqah" : "free"),
           billingStartBehavior: ["on_payment", "program_start"].includes(programRow.billing_start_behavior) ? programRow.billing_start_behavior as ProgramBuilderStatus["billingStartBehavior"] : "on_payment",
           billingEndBehavior: ["manual_cancel", "program_end", "fixed_months"].includes(programRow.billing_end_behavior) ? programRow.billing_end_behavior as ProgramBuilderStatus["billingEndBehavior"] : "fixed_months",
@@ -6894,6 +6961,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         registrationDeadlineAt: noRegistrationDeadline ? null : effectiveBuilderStatus.registrationDeadline || null,
         location: effectiveBuilderStatus.location.trim() || null,
         room: effectiveBuilderStatus.room.trim() || null,
+        roomArea: effectiveBuilderStatus.roomArea.trim() || null,
         paymentKind: effectiveBuilderStatus.paymentKind,
         billingStartBehavior: effectiveBuilderStatus.billingStartBehavior,
         billingEndBehavior: effectiveBuilderStatus.billingEndBehavior,
@@ -7142,6 +7210,22 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
     scrollBuilderToTop();
   }
 
+  function publishNow() {
+    const publishOverride = { publicationStatus: builderStatus.publicationStatus === "hidden" ? "hidden" : "published" } as const;
+    setBuilderStatus((current) => ({ ...current, ...publishOverride, applicationStatus: current.acceptingApplications ? current.applicationStatus : "not_accepting" }));
+    void saveProgram(publishOverride);
+  }
+
+  function confirmStartDateChangeAndPublish() {
+    setStartDateChangeConfirmOpen(false);
+    const publishOverride = {
+      publicationStatus: builderStatus.publicationStatus === "hidden" ? "hidden" : "published",
+      lifecycleStatus: "paused",
+    } as const;
+    setBuilderStatus((current) => ({ ...current, ...publishOverride, applicationStatus: current.acceptingApplications ? current.applicationStatus : "not_accepting" }));
+    void saveProgram(publishOverride);
+  }
+
   function handleContinueOrPublishClick() {
     const missing = getMissingBuilderFields();
     if (builderStep !== "review") {
@@ -7159,9 +7243,12 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
       setMissingFieldsModal({ fields: missing, allowContinue: false });
       return;
     }
-    const publishOverride = { publicationStatus: builderStatus.publicationStatus === "hidden" ? "hidden" : "published" } as const;
-    setBuilderStatus((current) => ({ ...current, ...publishOverride, applicationStatus: current.acceptingApplications ? current.applicationStatus : "not_accepting" }));
-    void saveProgram(publishOverride);
+    const startDateChanged = startDateLocked && builderStatus.startDate.trim() && builderStatus.startDate !== (program?.start_date ?? "");
+    if (startDateChanged) {
+      setStartDateChangeConfirmOpen(true);
+      return;
+    }
+    publishNow();
   }
 
   const editWizardContent = (
@@ -7219,6 +7306,31 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
           onClose={() => setMissingFieldsModal(null)}
         />
       ) : null}
+      {startDateChangeConfirmOpen
+        ? createPortal(
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#26323A]/35 px-5 backdrop-blur-sm">
+              <div className="w-full max-w-md rounded-[24px] bg-white p-5 text-[#26323A] shadow-[0_24px_70px_rgba(38,50,58,0.22)]">
+                <h2 className="text-lg font-semibold">Change start date?</h2>
+                <p className="mt-2 text-sm leading-6 text-[#6B747B]">
+                  This class has already started. Changing the start date will pause the class until then, and it won&apos;t be treated as an active class in the meantime.
+                </p>
+                <div className="mt-5 flex items-center justify-end gap-2">
+                  <button type="button" onClick={() => setStartDateChangeConfirmOpen(false)} className="min-h-10 px-3 text-sm font-semibold text-[#6B747B]">
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={confirmStartDateChangeAndPublish}
+                    className="min-h-10 rounded-[10px] bg-[#17624F] px-4 text-xs font-semibold text-white"
+                  >
+                    Pause and update start date
+                  </button>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
       {editWizardContent}
 
       {builderStep === "basics" ? (
@@ -7244,6 +7356,25 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
             <div className="grid gap-3">
               <EditBox label="Location name" required value={builderStatus.location} onChange={(value) => setBuilderStatus((current) => ({ ...current, location: value }))} />
               <EditBox label="Location address" required value={builderStatus.room} onChange={(value) => setBuilderStatus((current) => ({ ...current, room: value }))} />
+              {roomVisible || builderStatus.roomArea.trim() ? (
+                <div className="space-y-1.5">
+                  <EditBox label="Room / Area" value={builderStatus.roomArea} onChange={(value) => setBuilderStatus((current) => ({ ...current, roomArea: value }))} />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRoomVisible(false);
+                      setBuilderStatus((current) => ({ ...current, roomArea: "" }));
+                    }}
+                    className="justify-self-start text-sm font-semibold text-[#C0392B]"
+                  >
+                    Remove Room / Area
+                  </button>
+                </div>
+              ) : (
+                <button type="button" onClick={() => setRoomVisible(true)} className="justify-self-start text-sm font-semibold text-[#2F8FB3]">
+                  Add Room / Area
+                </button>
+              )}
             </div>
           </div>
         </section>
@@ -7539,7 +7670,7 @@ function ProgramEditorPreview({
             })}
           </div>
         ) : null}
-        <button type="button" disabled className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#248B72] px-4 text-sm font-semibold text-white opacity-70">
+        <button type="button" disabled className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#248B72] px-4 text-sm font-semibold text-white opacity-70 md:w-auto md:px-10">
           Request Enrollment
         </button>
         <dl className="mt-5 divide-y divide-[#E6ECEF] text-sm">
@@ -7762,7 +7893,7 @@ function ProgramBuilderActionBar({
   message?: string | null;
 }) {
   return (
-    <div className={cn("z-10 space-y-2 bg-white py-2", sticky ? "sticky bottom-[92px] md:bottom-4" : "")}>
+    <div className={cn("z-10 space-y-2 bg-white py-2 md:max-w-[420px]", sticky ? "sticky bottom-[92px] md:bottom-4" : "")}>
       {message ? <p className="text-sm font-medium text-[#52616A]">{message}</p> : null}
       <div className="flex items-center gap-2">
         <button type="button" disabled={busy || builderStep === "basics"} onClick={onBack} className="min-h-11 shrink-0 rounded-[10px] border border-[#C9D3D8] bg-white px-4 text-sm font-semibold text-[#26323A] disabled:opacity-40">
@@ -7834,18 +7965,20 @@ function ProgramTimingFields({
         ) : (
           <>
             <input
-              type={startDateLocked || builderStatus.startNow ? "text" : "date"}
-              disabled={startDateLocked || builderStatus.startNow}
-              value={startDateLocked ? "Already Started" : builderStatus.startNow ? "Start Immediately" : builderStatus.startDate}
+              type={builderStatus.startNow ? "text" : "date"}
+              disabled={builderStatus.startNow}
+              value={builderStatus.startNow ? "Start Immediately" : builderStatus.startDate}
               onChange={(event) => setBuilderStatus((current) => ({ ...current, startDate: event.target.value }))}
               className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3] disabled:bg-[#F2F6F7] disabled:text-[#52616A]"
             />
-            {!startDateLocked ? (
+            {startDateLocked ? (
+              <p className="mt-2 text-xs leading-5 text-[#8A5A00]">This class has already started. Changing this date will pause the class until then.</p>
+            ) : (
               <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs font-semibold text-[#52616A]">
                 <input type="checkbox" checked={builderStatus.startNow} onChange={(event) => setBuilderStatus((current) => ({ ...current, startNow: event.target.checked }))} />
                 Start now after publishing
               </label>
-            ) : null}
+            )}
           </>
         )}
       </label>
@@ -8609,7 +8742,7 @@ function ProgramEditorFields({
           <p className="text-2xl font-semibold text-[#26323A]">{isPaid ? formatPrice(Math.round(Number(price || "0") * 100)) : "Free"}</p>
           <ProgramScheduleOptionsDisplay tracks={previewTracks} fallbackSchedule={previewTracks[0] ? scheduleSummary(previewTracks[0].schedule, null).full : "Schedule TBA"} />
           {program ? <ProgramPaymentOptionsDisplay program={program} /> : null}
-          <button type="button" disabled className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#248B72] px-4 text-sm font-semibold text-white opacity-70">
+          <button type="button" disabled className="mt-4 flex min-h-12 w-full items-center justify-center rounded-full bg-[#248B72] px-4 text-sm font-semibold text-white opacity-70 md:w-auto md:px-10">
             Request Enrollment
           </button>
         </aside>
@@ -9206,7 +9339,7 @@ function ProgramEditorFields({
                   ) : null}
                 </>
               ) : (
-                <p className="text-xs leading-5 text-[#6B747B]">Ongoing programs can only offer monthly subscriptions — Pay in Full isn&apos;t available while &quot;Ongoing until manually ended&quot; is selected.</p>
+                <p className="text-xs leading-5 text-[#6B747B]">Ongoing programs can only offer monthly subscriptions. Pay in Full is not supported.&quot; is selected.</p>
               )}
               {perTrackPricingEnabled ? (
                 <div className="divide-y divide-[#E6ECEF] rounded-[8px] border border-[#E1E8EC]">
@@ -10806,7 +10939,6 @@ export function ProgramFinancesData({ slug, programId, mode = "teacher" }: { slu
       <div className="rounded-[28px] bg-[#17624F] p-5 text-white shadow-[0_18px_45px_rgba(23,98,79,0.22)]">
         <div className="grid gap-5 md:grid-cols-[1fr_auto] md:items-end">
           <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.28em] text-white/65">Finance Control</p>
             <h2 className="mt-2 text-2xl font-semibold leading-7">{program.title}</h2>
           </div>
           <div className="grid grid-cols-3 gap-4 text-center">
@@ -11883,7 +12015,6 @@ export function ProgramApplicationsData({ slug, programId, mode = "teacher" }: {
     <section className="space-y-5 bg-white px-4 pb-28 pt-4 text-[#26323A]">
       <EditorToast toast={toast} onClose={() => setToast(null)} />
       <div className="rounded-[28px] bg-[#17624F] p-5 text-white shadow-[0_18px_45px_rgba(23,98,79,0.22)]">
-        <p className="text-xs font-semibold uppercase tracking-[0.28em] text-white/65">Manage Applications</p>
         <h2 className="mt-2 text-2xl font-semibold leading-7">{program.title}</h2>
         <div className="mt-5 grid grid-cols-3 gap-4 text-center sm:grid-cols-6">
           <FinanceSummaryFigure value={countByStatus("pending_review").toString()} label="Pending Review" />
@@ -13163,10 +13294,15 @@ function useTeacherPrograms(slug: string) {
         if (nextProgramCounts[row.program_id]) nextProgramCounts[row.program_id].instructors += 1;
       }
       const hydratedTrackRows = await hydrateTracksWithLinkedSessions(supabase, programIds, trackRows ?? []);
-      const programsWithTracks = (mosquePrograms ?? []).map((program) => ({
-        ...program,
-        scheduleTracks: hydratedTrackRows.filter((track) => track.program_id === program.id),
-      }));
+      const programsWithTracks = (mosquePrograms ?? [])
+        // Keep active programs plus the viewer's own unpublished drafts (so a director can find
+        // and finish one) — but never resurface archived/cancelled (i.e. deleted) programs, which
+        // are also is_active=false but should stay gone for everyone.
+        .filter((program) => program.is_active || program.publication_status === "draft")
+        .map((program) => ({
+          ...program,
+          scheduleTracks: hydratedTrackRows.filter((track) => track.program_id === program.id),
+        }));
       if (active) {
         const nextRoleByProgramId: Record<string, TeacherProgramRole> = {};
         const nextFinanceAccessByProgramId: Record<string, boolean> = {};
@@ -14190,7 +14326,7 @@ function StudentRequestCard({
           {completeRegistrationHref ? (
             <Link
               href={completeRegistrationHref}
-              className="mt-3 inline-flex min-h-10 w-full items-center justify-center rounded-[6px] bg-[#2E6E52] px-4 text-sm font-semibold !text-white shadow-[0_8px_18px_rgba(46,110,82,0.22)] transition-colors hover:bg-[#265D45]"
+              className="mt-3 inline-flex min-h-10 w-full items-center justify-center rounded-[6px] bg-[#2E6E52] px-4 text-sm font-semibold !text-white shadow-[0_8px_18px_rgba(46,110,82,0.22)] transition-colors hover:bg-[#265D45] md:w-auto md:px-10"
             >
               Complete registration
             </Link>
@@ -15916,6 +16052,20 @@ function SidebarFact({ label, value }: { label: string; value: string }) {
   );
 }
 
+function ProgramDetailFact({ icon, label, value }: { icon: string; label: string; value: string }) {
+  return (
+    <div className="flex items-start justify-between gap-4 py-3 text-sm">
+      <dt className="flex items-center gap-2 text-[#6B747B]">
+        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#EAF7F1] text-sm" aria-hidden>
+          {icon}
+        </span>
+        {label}
+      </dt>
+      <dd className="max-w-[55%] text-right font-semibold text-[#26323A]">{value}</dd>
+    </div>
+  );
+}
+
 function ProgramFaqSection({ faqs }: { faqs: Array<Pick<ProgramFaq, "id" | "question" | "answer">> }) {
   const [openId, setOpenId] = useState("");
   return (
@@ -15954,27 +16104,95 @@ function ProgramFaqSection({ faqs }: { faqs: Array<Pick<ProgramFaq, "id" | "ques
   );
 }
 
-function ProgramScheduleOptionsDisplay({ tracks, fallbackSchedule }: { tracks: ProgramTrack[]; fallbackSchedule: string }) {
+function trackEffectivePriceCents(track: ProgramTrack, program: Program) {
+  const monthlyCents = track.pricing_override_enabled ? track.price_monthly_cents : program.price_monthly_cents;
+  const annualCents = track.pricing_override_enabled ? track.price_annual_cents : program.price_annual_cents;
+  return { monthlyCents, annualCents };
+}
+
+function trackPriceLine(track: ProgramTrack | null, program: Program): { label: string; savings: string } | null {
+  if (!program.is_paid) {
+    return { label: program.payment_kind === "manual" ? "Price determined after review" : "Free", savings: "" };
+  }
+  const { monthlyCents, annualCents } = track ? trackEffectivePriceCents(track, program) : { monthlyCents: program.price_monthly_cents, annualCents: program.price_annual_cents };
+  const offersMonthly = program.offers_monthly_payment !== false && Boolean(monthlyCents);
+  const offersAnnual = !program.is_ongoing && Boolean(program.offers_annual_payment && annualCents);
+  if (!offersMonthly && !offersAnnual) {
+    return null;
+  }
+  const label = offersMonthly ? `${formatPrice(monthlyCents)}/mo` : `${formatPrice(annualCents)} pay in full`;
+  const savings =
+    offersMonthly && offersAnnual
+      ? annualDealText({ price_monthly_cents: monthlyCents, price_annual_cents: annualCents, start_date: program.start_date, end_date: program.end_date, duration_months: program.duration_months })
+      : "";
+  return { label, savings };
+}
+
+function trackCapacityBadge(track: ProgramTrack, enrolledCountByTrackId: Record<string, number>): { label: string; tone: "full" | "low" } | null {
+  if (track.capacity == null) {
+    return null;
+  }
+  const remaining = track.capacity - (enrolledCountByTrackId[track.id] ?? 0);
+  if (remaining <= 0) {
+    return { label: "Full", tone: "full" };
+  }
+  if (remaining < 10) {
+    return { label: "Few Spots Left!", tone: "low" };
+  }
+  return null;
+}
+
+function ProgramScheduleOptionsDisplay({
+  tracks,
+  program,
+  fallbackSchedule,
+  enrolledCountByTrackId = {},
+}: {
+  tracks: ProgramTrack[];
+  program?: Program | null;
+  fallbackSchedule: string;
+  enrolledCountByTrackId?: Record<string, number>;
+}) {
   return (
     <div className="mt-4 space-y-2 border-t border-[#E6ECEF] pt-4">
-      <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">Schedule options</p>
       {tracks.length ? (
         <div className="space-y-2">
           {tracks.map((track) => {
             const schedule = scheduleSummary(track.schedule, null);
+            const price = program ? trackPriceLine(track, program) : null;
+            const capacityBadge = trackCapacityBadge(track, enrolledCountByTrackId);
             return (
-              <div key={track.id} className="rounded-[14px] bg-[#F7FAFB] p-3 ring-1 ring-[#E6ECEF]">
+              <div key={track.id} className={cn("relative overflow-hidden rounded-[14px] p-3 ring-1", capacityBadge?.tone === "full" ? "bg-[#F3F4F5] ring-[#E1E8EC] opacity-75" : "bg-[#F7FAFB] ring-[#E6ECEF]")}>
+                {capacityBadge?.tone === "low" ? (
+                  <span className="absolute right-0 top-0 rounded-bl-[10px] bg-[#C0392B] px-2 py-1 text-[10px] font-bold uppercase tracking-wide text-white">{capacityBadge.label}</span>
+                ) : null}
                 <p className="text-sm font-semibold text-[#26323A]">{track.name}</p>
                 <p className="mt-1 text-xs font-medium leading-5 text-[#17624F]">{schedule.full}</p>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  {price ? <span className="text-sm font-bold text-[#26323A]">{price.label}</span> : null}
+                  {price?.savings ? <span className="rounded-full bg-[#EAF7F1] px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[#17624F]">{price.savings}</span> : null}
+                  {capacityBadge?.tone === "full" ? <span className="rounded-full bg-[#E1E8EC] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#7B858C]">Full</span> : null}
+                </div>
               </div>
             );
           })}
         </div>
       ) : (
-        <div className="rounded-[14px] bg-[#F7FAFB] p-3 ring-1 ring-[#E6ECEF]">
-          <p className="text-sm font-semibold text-[#26323A]">Class schedule</p>
-          <p className="mt-1 text-xs font-medium leading-5 text-[#17624F]">{fallbackSchedule}</p>
-        </div>
+        (() => {
+          const price = program ? trackPriceLine(null, program) : null;
+          return (
+            <div className="rounded-[14px] bg-[#F7FAFB] p-3 ring-1 ring-[#E6ECEF]">
+              <p className="text-sm font-semibold text-[#26323A]">Class schedule</p>
+              <p className="mt-1 text-xs font-medium leading-5 text-[#17624F]">{fallbackSchedule}</p>
+              {price ? (
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <span className="text-sm font-bold text-[#26323A]">{price.label}</span>
+                  {price.savings ? <span className="rounded-full bg-[#EAF7F1] px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[#17624F]">{price.savings}</span> : null}
+                </div>
+              ) : null}
+            </div>
+          );
+        })()
       )}
     </div>
   );
@@ -16136,7 +16354,7 @@ function ChildEnrollmentSelector({
         type="button"
         onClick={onSubmit}
         disabled={busy || selectedChildIds.length === 0}
-        className="mt-3 min-h-11 w-full rounded-full bg-[#17624F] px-4 text-sm font-semibold text-white shadow-[0_10px_20px_rgba(23,98,79,0.18)] disabled:opacity-60"
+        className="mt-3 min-h-11 w-full rounded-full bg-[#17624F] px-4 text-sm font-semibold text-white shadow-[0_10px_20px_rgba(23,98,79,0.18)] disabled:opacity-60 md:w-auto md:px-10"
       >
         {busy ? "Submitting..." : "Submit Application"}
       </button>
@@ -16158,37 +16376,47 @@ function ProgramTrackSelector({
   tracks,
   selectedTrackIds,
   program,
+  enrolledCountByTrackId = {},
   onToggle,
 }: {
   tracks: ProgramTrack[];
   selectedTrackIds: string[];
   program: Pick<Program, "track_selection_mode" | "track_selection_count">;
+  enrolledCountByTrackId?: Record<string, number>;
   onToggle: (trackId: string) => void;
 }) {
   const ruleText = trackSelectionRuleText(program, tracks.length);
   return (
     <div className="mt-4 space-y-2">
-      <div className="flex items-end justify-between gap-3">
-        <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">Choose schedule</p>
-        <p className="text-right text-[11px] font-medium text-[#7B858C]">{ruleText}</p>
-      </div>
+      <p className="text-[11px] font-medium text-[#7B858C]">{ruleText}</p>
       <div className="space-y-2">
         {tracks.map((track) => {
           const selected = selectedTrackIds.includes(track.id);
           const schedule = scheduleSummary(track.schedule, null);
+          const capacityBadge = trackCapacityBadge(track, enrolledCountByTrackId);
+          const full = capacityBadge?.tone === "full";
           return (
             <button
               key={track.id}
               type="button"
-              onClick={() => onToggle(track.id)}
+              onClick={() => (full ? undefined : onToggle(track.id))}
+              disabled={full}
               className={cn(
                 "w-full rounded-[14px] border p-3 text-left transition",
-                selected ? "border-[#17624F] bg-[#EAF7F1] ring-1 ring-[#17624F]" : "border-[#D6DCE0] bg-[#F8FBFC] hover:border-[#9EC8D5]",
+                full
+                  ? "cursor-not-allowed border-[#E1E8EC] bg-[#F3F4F5] opacity-70"
+                  : selected
+                    ? "border-[#17624F] bg-[#EAF7F1] ring-1 ring-[#17624F]"
+                    : "border-[#D6DCE0] bg-[#F8FBFC] hover:border-[#9EC8D5]",
               )}
             >
-              <span className="flex items-center gap-2 text-sm font-semibold text-[#26323A]">
-                <span className={cn("flex h-5 w-5 items-center justify-center rounded-[6px] border text-[11px]", selected ? "border-[#17624F] bg-[#17624F] text-white" : "border-[#B9C3C8] bg-white text-transparent")}>✓</span>
-                {track.name}
+              <span className="flex items-center justify-between gap-2">
+                <span className="flex items-center gap-2 text-sm font-semibold text-[#26323A]">
+                  <span className={cn("flex h-5 w-5 items-center justify-center rounded-[6px] border text-[11px]", selected ? "border-[#17624F] bg-[#17624F] text-white" : "border-[#B9C3C8] bg-white text-transparent")}>✓</span>
+                  {track.name}
+                </span>
+                {full ? <span className="rounded-full bg-[#E1E8EC] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#7B858C]">Full</span> : null}
+                {capacityBadge?.tone === "low" ? <span className="rounded-full bg-[#C0392B] px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white">{capacityBadge.label}</span> : null}
               </span>
               {track.description ? <span className="mt-1 block text-xs leading-5 text-[#52616A]">{track.description}</span> : null}
               <span className="mt-1 block pl-7 text-xs font-medium text-[#17624F]">{schedule.full}</span>
@@ -16483,7 +16711,7 @@ function MyApplicationsList({
             {action.kind === "confirmation" ? (
               <Link
                 href={`/m/${slug}/registration/${row.request.id}`}
-                className="mt-3 inline-flex min-h-10 w-full items-center justify-center rounded-[6px] bg-[#2E6E52] px-4 text-sm font-semibold !text-white shadow-[0_8px_18px_rgba(46,110,82,0.22)] transition-colors hover:bg-[#265D45]"
+                className="mt-3 inline-flex min-h-10 w-full items-center justify-center rounded-[6px] bg-[#2E6E52] px-4 text-sm font-semibold !text-white shadow-[0_8px_18px_rgba(46,110,82,0.22)] transition-colors hover:bg-[#265D45] md:w-auto md:px-10"
               >
                 {action.label}
               </Link>
@@ -16667,7 +16895,7 @@ export function StudentWithdrawalRequestData({ slug, programId }: { slug: string
               The teacher will review the withdrawal request. You will be notified when it is done.
             </p>
           </div>
-          <TransitionLink href={`/m/${slug}/portal/classes`} label="Classes" className="inline-flex min-h-11 w-full items-center justify-center rounded-full bg-[#26323A] px-4 text-sm font-semibold text-white" style={{ color: "#FFFFFF" }}>
+          <TransitionLink href={`/m/${slug}/portal/classes`} label="Classes" className="inline-flex min-h-11 w-full items-center justify-center rounded-full bg-[#26323A] px-4 text-sm font-semibold text-white md:w-auto md:px-10" style={{ color: "#FFFFFF" }}>
             Back to classes
           </TransitionLink>
         </div>
@@ -16838,21 +17066,28 @@ function ProgramCard({
           </p>
         ) : null}
         <div className="grid gap-2 text-xs font-semibold">
-          <div className="flex items-center justify-between gap-3 rounded-[10px] bg-[#F5F8F9] px-3 py-2">
-            <span className="text-[#6B747B]">Registration</span>
-            <span className={cn(
-              "text-right",
-              registration.tone === "open" ? "text-[#17624F]" : registration.tone === "waitlist" ? "text-[#9B6B09]" : "text-[#6B747B]",
-            )}>
-              {registration.label}
-            </span>
+          <div className="rounded-[10px] bg-[#F5F8F9] px-3 py-2">
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-[#6B747B]">Registration</span>
+              <span className={cn(
+                "text-right",
+                registration.tone === "open" ? "text-[#17624F]" : registration.tone === "waitlist" ? "text-[#9B6B09]" : "text-[#6B747B]",
+              )}>
+                {registration.label}
+              </span>
+            </div>
+            {!relationship && registration.label === "Registration open" && program.application_close_at ? (
+              <p className="mt-1 text-right text-[#C0392B]">Closes {formatFinanceShortDate(program.application_close_at)}</p>
+            ) : null}
           </div>
-          <div className="flex items-center justify-between gap-3 rounded-[10px] bg-[#F5F8F9] px-3 py-2">
-            <span className="text-[#6B747B]">Eligibility</span>
-            <span className={cn("text-right", eligibilityTone === "positive" ? "text-[#17624F]" : eligibilityTone === "negative" ? "text-[#C83F31]" : "text-[#26323A]")}>
-              {eligibilityLabel ?? `${formatAgeRange(program.age_range_text)} · ${formatGender(program.audience_gender)}`}
-            </span>
-          </div>
+          {eligibilityLabel ? (
+            <div className="flex items-center justify-between gap-3 rounded-[10px] bg-[#F5F8F9] px-3 py-2">
+              <span className="text-[#6B747B]">Eligibility</span>
+              <span className={cn("text-right", eligibilityTone === "positive" ? "text-[#17624F]" : eligibilityTone === "negative" ? "text-[#C83F31]" : "text-[#26323A]")}>
+                {eligibilityLabel}
+              </span>
+            </div>
+          ) : null}
         </div>
       </div>
     </TransitionLink>
@@ -17870,7 +18105,7 @@ function TeacherWorkspaceTools({ slug, mode, canCreateClass, createHref }: { slu
               type="button"
               disabled={!isActiveTeacher}
               onClick={() => setShowInviteInput(true)}
-              className="min-h-11 w-full rounded-full bg-white px-4 text-sm font-semibold text-[#17624F] shadow-[0_10px_22px_rgba(10,45,36,0.16)] disabled:opacity-60"
+              className="min-h-11 w-full rounded-full bg-white px-4 text-sm font-semibold text-[#17624F] shadow-[0_10px_22px_rgba(10,45,36,0.16)] disabled:opacity-60 md:w-auto md:px-10"
             >
               Enter Code
             </button>

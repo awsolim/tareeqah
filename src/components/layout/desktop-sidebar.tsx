@@ -206,7 +206,7 @@ function useHasMounted() {
 
 function DesktopProfileLink({ mosqueSlug, accountHref }: { mosqueSlug: string; accountHref: string }) {
   const cachedSession = getCachedSessionSnapshot();
-  const [session, setSession] = useState<Session | null>(cachedSession ?? null);
+  const [session, setSession] = useState<Session | null | undefined>(cachedSession);
   const [access, setAccess] = useState<UserAccess>(() =>
     cachedSession?.user.id ? getCachedUserAccess(mosqueSlug, cachedSession.user.id) ?? emptyUserAccess : emptyUserAccess,
   );
@@ -217,6 +217,10 @@ function DesktopProfileLink({ mosqueSlug, accountHref }: { mosqueSlug: string; a
   const [profileAvatarUrl, setProfileAvatarUrl] = useState<string | null>(() => {
     const summary = cachedSession?.user.id ? getCachedProfileSummary(cachedSession.user.id) : undefined;
     return summary?.avatarUrl ?? cachedSession?.user.user_metadata?.avatar_url ?? null;
+  });
+  const [resolved, setResolved] = useState(() => {
+    if (cachedSession === null) return true;
+    return Boolean(cachedSession?.user.id && getCachedProfileSummary(cachedSession.user.id));
   });
 
   useEffect(() => {
@@ -229,6 +233,9 @@ function DesktopProfileLink({ mosqueSlug, accountHref }: { mosqueSlug: string; a
         setAccess(emptyUserAccess);
         setProfileName(null);
         setProfileAvatarUrl(null);
+        setResolved(true);
+      } else {
+        setResolved(false);
       }
     });
 
@@ -240,6 +247,7 @@ function DesktopProfileLink({ mosqueSlug, accountHref }: { mosqueSlug: string; a
           setAccess(emptyUserAccess);
           setProfileName(null);
           setProfileAvatarUrl(null);
+          setResolved(true);
         }
       }
     });
@@ -264,6 +272,7 @@ function DesktopProfileLink({ mosqueSlug, accountHref }: { mosqueSlug: string; a
         setAccess(nextAccess);
         setProfileName(profileSummary.fullName ?? session.user.user_metadata?.full_name ?? null);
         setProfileAvatarUrl(profileSummary.avatarUrl ?? session.user.user_metadata?.avatar_url ?? null);
+        setResolved(true);
       }
     });
 
@@ -272,13 +281,30 @@ function DesktopProfileLink({ mosqueSlug, accountHref }: { mosqueSlug: string; a
     };
   }, [mosqueSlug, session]);
 
+  const ready = session !== undefined && (session === null || resolved);
   const displayName = profileName || session?.user.email?.replace(/@.*/, "") || "Guest";
   const label = session ? getAccountLabel(access) : "Not signed in";
+
+  if (!ready) {
+    return (
+      <div className="flex min-h-16 items-center gap-3 rounded-3xl bg-[#F5F7F8] px-3 py-3">
+        <span className="h-11 w-11 shrink-0 animate-pulse rounded-full bg-[#E1E8EC]" />
+        <span className="min-w-0 flex-1 space-y-1.5">
+          <span className="block h-3.5 w-24 animate-pulse rounded bg-[#E1E8EC]" />
+          <span className="block h-3 w-16 animate-pulse rounded bg-[#E1E8EC]" />
+        </span>
+      </div>
+    );
+  }
 
   return (
     <Link href={accountHref} className="flex min-h-16 items-center gap-3 rounded-3xl bg-[#F5F7F8] px-3 py-3 transition-colors hover:bg-[#EEF4F5]">
       {profileAvatarUrl ? (
         <span className="h-11 w-11 shrink-0 rounded-full bg-cover bg-center" style={{ backgroundImage: `url("${profileAvatarUrl}")` }} aria-hidden />
+      ) : session === null ? (
+        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#E5F3EF] text-[#17624F]">
+          <GuestProfileIcon className="h-5 w-5" />
+        </span>
       ) : (
         <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#E5F3EF] text-sm font-semibold text-[#17624F]">
           {initials(displayName)}
@@ -290,6 +316,15 @@ function DesktopProfileLink({ mosqueSlug, accountHref }: { mosqueSlug: string; a
         <span className="block truncate text-xs text-[#6B747B]">{label}</span>
       </span>
     </Link>
+  );
+}
+
+function GuestProfileIcon({ className = "h-5 w-5" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <circle cx="12" cy="8" r="3.2" />
+      <path d="M5.5 19c1-3.2 3.2-5 6.5-5s5.5 1.8 6.5 5" />
+    </svg>
   );
 }
 
@@ -547,11 +582,11 @@ function Badge({ count }: { count: number }) {
 
 function SidebarLogo({ src, name }: { src: string | null; name: string }) {
   if (src) {
-    return <Image src={src} alt="" width={44} height={44} className="h-11 w-11 shrink-0 rounded-xl border border-[#D6DCE0] object-contain" />;
+    return <Image src={src} alt="" width={44} height={44} className="h-11 w-11 shrink-0 rounded-xl object-contain" />;
   }
 
   return (
-    <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-[#D6DCE0] bg-[#F7F8F9] text-[#2E8F7D]" aria-label={name}>
+    <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#F7F8F9] text-[#2E8F7D]" aria-label={name}>
       <MosqueIcon className="h-6 w-6" />
     </span>
   );
@@ -602,6 +637,10 @@ function SidebarIcon({ label }: { label: string }) {
         <path d="m4 8 8 6 8-6" />
       </svg>
     );
+  }
+
+  if (normalized === "Masjid") {
+    return <MosqueIcon className={className} />;
   }
 
   if (normalized === "Me" || normalized === "Settings") {
