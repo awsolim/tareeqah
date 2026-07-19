@@ -18,9 +18,6 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
 
     const body = (await request.json()) as CancelRegistrationRequestBody;
     const reason = body.reason?.trim() ?? "";
-    if (!reason) {
-      return Response.json({ error: "A reason is required to cancel this registration." }, { status: 400 });
-    }
 
     const supabase = createSupabaseServiceClient();
     const {
@@ -58,7 +55,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
       .from("enrollment_requests")
       .update({
         status: "cancelled",
-        decision_note: `Cancelled by family: ${reason}`,
+        decision_note: reason ? `Cancelled by family: ${reason}` : "Cancelled by family.",
         student_dismissed_at: now,
       })
       .eq("id", requestId);
@@ -69,8 +66,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
       studentProfileId: enrollmentRequest.student_profile_id,
       actorProfileId: user.id,
       eventType: "registration_cancelled_by_family",
-      summary: `Registration cancelled by family for ${student?.full_name || student?.email || "this student"}. Reason: ${reason}`,
-      metadata: { reason },
+      summary: `Registration cancelled by family for ${student?.full_name || student?.email || "this student"}.${reason ? ` Reason: ${reason}` : ""}`,
+      metadata: { reason: reason || null },
     });
 
     return Response.json({ ok: true });

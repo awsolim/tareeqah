@@ -22,7 +22,7 @@ import {
 } from "@/lib/client-cache";
 import { cn } from "@/lib/utils";
 
-function BottomNav({ items, inboxBadgeCount = 0 }: { items: NavItem[]; inboxBadgeCount?: number }) {
+function BottomNav({ items, inboxBadgeCount = 0, inboxActionRequired = false }: { items: NavItem[]; inboxBadgeCount?: number; inboxActionRequired?: boolean }) {
   const pathname = usePathname();
   const router = useRouter();
   const [pendingHref, setPendingHref] = useState<string | null>(null);
@@ -112,6 +112,7 @@ function BottomNav({ items, inboxBadgeCount = 0 }: { items: NavItem[]; inboxBadg
         {visibleItems.map((item, index) => {
           const active = pendingHref ? pendingHref === item.href : isNavItemActive(pathname, item);
           const badgeCount = item.label === "Inbox" ? inboxBadgeCount : 0;
+          const actionRequired = item.label === "Inbox" ? inboxActionRequired : false;
           return (
             <Link
               key={`${item.label}-${item.href}`}
@@ -135,7 +136,7 @@ function BottomNav({ items, inboxBadgeCount = 0 }: { items: NavItem[]; inboxBadg
               >
                 <span className="relative flex h-9 w-[52px] items-center justify-center">
                 <NavIcon label={item.label} active={active} />
-                {badgeCount ? <NavBadge count={badgeCount} /> : null}
+                <NavBadge count={badgeCount} actionRequired={actionRequired} />
                 </span>
               </span>
               <span className="mt-0.5 block h-4 w-full truncate text-center leading-4">{item.label}</span>
@@ -161,23 +162,30 @@ export function MobileBottomNav({
   const teacherInboxHref = mosqueSlug ? `/m/${mosqueSlug}/teacher/inbox` : "";
   const showStudentBadges = Boolean(resolvedItems.some((item) => item.label === "Inbox" && item.href === portalInboxHref));
   const showTeacherBadges = Boolean(resolvedItems.some((item) => item.label === "Inbox" && item.href === teacherInboxHref));
-  const { totalCount: studentTotalCount } = useStudentNotificationCounts(showStudentBadges ? (mosqueSlug ?? "") : "");
-  const { totalCount: teacherTotalCount } = useTeacherNotificationCounts(showTeacherBadges ? (mosqueSlug ?? "") : "");
+  const { totalCount: studentTotalCount, actionRequired: studentActionRequired } = useStudentNotificationCounts(showStudentBadges ? (mosqueSlug ?? "") : "");
+  const { totalCount: teacherTotalCount, actionRequired: teacherActionRequired } = useTeacherNotificationCounts(showTeacherBadges ? (mosqueSlug ?? "") : "");
   const inboxBadgeCount = showStudentBadges ? studentTotalCount : showTeacherBadges ? teacherTotalCount : 0;
+  const inboxActionRequired = showStudentBadges ? studentActionRequired : showTeacherBadges ? teacherActionRequired : false;
 
-  return <BottomNav items={resolvedItems} inboxBadgeCount={inboxBadgeCount} />;
+  return <BottomNav items={resolvedItems} inboxBadgeCount={inboxBadgeCount} inboxActionRequired={inboxActionRequired} />;
 }
 
 function isNavItemActive(pathname: string, item: NavItem) {
   return pathname === item.href || (item.label !== "Home" && pathname.startsWith(`${item.href}/`));
 }
 
-function NavBadge({ count }: { count: number }) {
-  return (
-    <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-[#E25241] px-1 text-[11px] font-semibold leading-none text-white shadow-[0_4px_10px_rgba(226,82,65,0.35)] ring-2 ring-white">
-      {count > 9 ? "9+" : count}
-    </span>
-  );
+function NavBadge({ count, actionRequired = false }: { count?: number; actionRequired?: boolean }) {
+  if (count) {
+    return (
+      <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-[#E25241] px-1 text-[11px] font-semibold leading-none text-white shadow-[0_4px_10px_rgba(226,82,65,0.35)] ring-2 ring-white">
+        {count > 9 ? "9+" : count}
+      </span>
+    );
+  }
+  if (actionRequired) {
+    return <span className="absolute -right-1 -top-1 h-3 w-3 rounded-full bg-[#2F8FB3] ring-2 ring-white" />;
+  }
+  return null;
 }
 
 function NavIcon({ label, active = false }: { label: string; active?: boolean }) {

@@ -75,6 +75,16 @@ export function getApplicationPaymentStatus(
   return "payment_required";
 }
 
+/**
+ * Whether payment status is worth displaying at all. For a paid program, payment status is
+ * always "not_required" until the application is approved — showing it before that point is
+ * just noise, not information. For a free program, "not_required" is a genuine, permanent fact
+ * worth showing regardless of decision status.
+ */
+export function isPaymentStatusMeaningful(request: Pick<ApplicationRequestLike, "status">, program: { is_paid: boolean } | null | undefined): boolean {
+  return !program?.is_paid || request.status === "approved";
+}
+
 export const APPLICATION_STATUS_LABELS: Record<ApplicationStatus, string> = {
   pending_review: "Pending Review",
   waitlisted: "Waitlisted",
@@ -148,25 +158,23 @@ export type ApplicationRowAction =
   | "change_price"
   | "waive_payment"
   | "copy_confirmation_link"
-  | "reopen"
-  | "view_enrollment"
-  | "add_note";
+  | "reopen";
 
 /** Which row actions are valid for a given application status — single source of truth instead of scattering conditionals in the table/menu. */
 export function getApplicationRowActions(status: ApplicationStatus): ApplicationRowAction[] {
   switch (status) {
     case "pending_review":
-      return ["view", "approve", "waitlist", "reject", "add_note"];
+      return ["view", "approve", "waitlist", "reject"];
     case "waitlisted":
-      return ["view", "approve", "reject", "add_note"];
+      return ["view", "approve", "reject"];
     case "approved_confirmation_required":
-      return ["view", "copy_confirmation_link", "change_price", "waive_payment", "cancel_approval", "add_note"];
+      return ["view", "copy_confirmation_link", "change_price", "waive_payment", "cancel_approval"];
     case "rejected":
-      return ["view", "reopen", "add_note"];
+      return ["view", "reopen"];
     case "completed_enrolled":
-      return ["view", "view_enrollment", "add_note"];
+      return ["view"];
     case "cancelled":
     default:
-      return ["view", "add_note"];
+      return ["view"];
   }
 }

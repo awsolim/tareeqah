@@ -5,7 +5,7 @@ import Link from "next/link";
 import { createPortal } from "react-dom";
 import { ChildrenManager } from "@/components/data/children-manager";
 import { TransitionLink } from "@/components/layout/transition-link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import type { CSSProperties, Dispatch, PointerEvent as ReactPointerEvent, ReactNode, RefObject, SetStateAction, WheelEvent as ReactWheelEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { EmptyState } from "@/components/data/empty-state";
@@ -22,6 +22,7 @@ import {
   getApplicationRowActions,
   getApplicationRowStatusLabel,
   getApplicationStatus,
+  isPaymentStatusMeaningful,
   paymentStatusTone,
   PAYMENT_STATUS_LABELS,
   type ApplicationRowAction,
@@ -364,6 +365,7 @@ type RequestWithContext = EnrollmentRequest & {
   program?: Program | null;
   student?: StudentDisplay | null;
   parent?: ParentDisplay | null;
+  track?: ProgramTrack | null;
 };
 type WithdrawalRequestWithContext = WithdrawalRequest & {
   program?: Program | null;
@@ -438,6 +440,8 @@ const fallbackDevSwitchAccounts: DevSwitchAccount[] = [
 const devSwitchAccountsStorageKey = "tareeqah:dev-switch-accounts";
 const seenStudentRequestsStorageKey = "tareeqah:seen-student-request-notifications";
 const seenTeacherRequestsStorageKey = "tareeqah:seen-teacher-request-notifications";
+const seenTeacherInstructorNotificationsStorageKey = "tareeqah:seen-teacher-instructor-notifications";
+const seenTeacherWithdrawalsStorageKey = "tareeqah:seen-teacher-withdrawal-notifications";
 const dismissedTeacherInstructorUpdatesStorageKey = "tareeqah:dismissed-teacher-instructor-updates";
 const editorToastStorageKey = "tareeqah:editor-toast";
 
@@ -1281,7 +1285,6 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
               ) : null}
 
               <div className="mt-4 border-t border-[#E6ECEF] pt-4">
-                <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">Registration</p>
                 {isTeacherContext || isStaffForProgram ? (
                   <div className="mt-2 flex min-h-12 w-full items-center justify-center rounded-full bg-[#EEF6F8] px-4 text-sm font-semibold text-[#2F6F83] ring-1 ring-[#CFE2E8] md:w-auto md:px-10">
                     {accountType === "admin" ? "Admin Control" : "Teaching"}
@@ -1325,7 +1328,6 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
             <section className="rounded-2xl border border-[#C8DCE2] bg-white p-4 shadow-[0_14px_34px_rgba(38,50,58,0.10)]">
               <p className="text-lg font-semibold text-[#26323A]">Schedule and Pricing</p>
               <ProgramScheduleOptionsDisplay tracks={tracks} program={program} fallbackSchedule={schedule.full} enrolledCountByTrackId={enrolledCountByTrackId} />
-              <ProgramPaymentOptionsDisplay program={program} />
               {section === "portal" && viewerHasActiveEnrollment ? (
                 <p className="mt-3 text-xs leading-5 text-[#6B747B]">
                   Go to Schedule Options from your class card to view different schedule options.
@@ -1451,7 +1453,7 @@ export function ProgramApplyData({ slug, programId }: { slug: string; programId:
       const activeTracks = tracksData ?? [];
       setTracks(activeTracks);
       setSelectedTrackIds(activeTracks[0]?.id ? [activeTracks[0].id] : []);
-      setSelectedPaymentType(defaultPaymentType(programData));
+      setSelectedPaymentType(programOfferedPaymentTypes(programData)[0] ?? "monthly");
       setMosque(mosqueData);
       setProgram(programData);
 
@@ -1725,8 +1727,8 @@ export function ProgramApplyData({ slug, programId }: { slug: string; programId:
               <Link href={programHref} className="flex min-h-11 items-center justify-center rounded-full border border-[#D6DCE0] px-5 text-sm font-semibold text-[#26323A]">
                 Back to Program
               </Link>
-              <Link href={`/m/${slug}/portal`} className="flex min-h-11 items-center justify-center rounded-full bg-[#17624F] px-5 text-sm font-semibold text-white">
-                Go to Portal
+              <Link href={`/m/${slug}/portal/classes?tab=applications`} className="flex min-h-11 items-center justify-center rounded-full bg-[#17624F] px-5 text-sm font-semibold text-white">
+                My Applications
               </Link>
             </div>
           </section>
@@ -1747,14 +1749,16 @@ export function ProgramApplyData({ slug, programId }: { slug: string; programId:
             ? applicationState.label
             : null;
 
+  const offeredPaymentTypes = programOfferedPaymentTypes(program);
+  const selectedTracks = tracks.filter((track) => selectedTrackIds.includes(track.id));
+  const selectedTrackNames = selectedTracks.map((track) => track.name).join(", ");
+  const summaryPrice = tracks.length > 0 ? trackPriceLine(selectedTracks[0] ?? null, program, selectedPaymentType) : trackPriceLine(null, program, selectedPaymentType);
+
   return (
     <div className="bg-[var(--workspace)] p-4">
       <div className="mx-auto max-w-xl space-y-5">
         <section className="rounded-[24px] bg-white p-4 shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
-          <Link href={programHref} className="text-xs font-semibold uppercase tracking-wide text-[#17624F]">
-            ← Back to program
-          </Link>
-          <div className="mt-3 flex items-center gap-3">
+          <div className="flex items-center gap-3">
             {program.thumbnail_url ? (
               <img src={program.thumbnail_url} alt="" className="h-14 w-14 shrink-0 rounded-[14px] object-cover" />
             ) : (
@@ -1794,6 +1798,12 @@ export function ProgramApplyData({ slug, programId }: { slug: string; programId:
               </DetailSection>
             ) : null}
 
+            {offeredPaymentTypes.length > 1 ? (
+              <DetailSection title="Choose payment plan">
+                <ProgramPaymentOptionSelector program={program} selectedPaymentType={selectedPaymentType} onChange={setSelectedPaymentType} />
+              </DetailSection>
+            ) : null}
+
             {tracks.length > 0 ? (
               <DetailSection title="Choose schedule">
                 <ProgramTrackSelector
@@ -1801,14 +1811,45 @@ export function ProgramApplyData({ slug, programId }: { slug: string; programId:
                   selectedTrackIds={selectedTrackIds}
                   program={program}
                   enrolledCountByTrackId={enrolledCountByTrackId}
+                  selectedPaymentType={selectedPaymentType}
                   onToggle={(trackId) => setSelectedTrackIds((current) => nextProgramTrackSelection(program, tracks, current, trackId))}
                 />
               </DetailSection>
+            ) : program.is_paid ? (
+              <DetailSection title="Price">
+                <div className="flex flex-col items-end gap-1 text-right">
+                  <TrackPriceNumber price={trackPriceLine(null, program, selectedPaymentType)} />
+                  <TrackPriceSavings price={trackPriceLine(null, program, selectedPaymentType)} />
+                </div>
+              </DetailSection>
             ) : null}
 
-            {program.is_paid ? (
-              <DetailSection title="Choose payment plan">
-                <ProgramPaymentOptionSelector program={program} selectedPaymentType={selectedPaymentType} onChange={setSelectedPaymentType} />
+            {program.is_paid || tracks.length > 0 ? (
+              <DetailSection title="Summary">
+                <div className="grid gap-2 rounded-[14px] bg-[#F7FAFB] p-3 text-sm ring-1 ring-[#E6ECEF]">
+                  {tracks.length > 0 ? (
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-[#6B747B]">Schedule</span>
+                      <span className="font-semibold text-[#26323A]">{selectedTrackNames || "No schedule selected yet"}</span>
+                    </div>
+                  ) : null}
+                  {program.is_paid ? (
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-[#6B747B]">Payment plan</span>
+                      <span className="font-semibold text-[#26323A]">{summaryPrice?.label ?? "—"}</span>
+                    </div>
+                  ) : null}
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-[#6B747B]">Start date</span>
+                    <span className="font-semibold text-[#26323A]">{program.start_date ? formatFinanceShortDate(program.start_date) : "To be announced"}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-[#6B747B]">End date</span>
+                    <span className="font-semibold text-[#26323A]">
+                      {program.is_ongoing || !program.end_date ? "Ongoing until further notice" : formatFinanceShortDate(program.end_date)}
+                    </span>
+                  </div>
+                </div>
               </DetailSection>
             ) : null}
 
@@ -2018,7 +2059,7 @@ export function RegistrationConfirmationData({ slug, requestId }: { slug: string
   }
 
   async function handleCancelRegistration() {
-    if (!program || !cancelReason.trim()) {
+    if (!program) {
       return;
     }
     setCancelBusy(true);
@@ -2164,7 +2205,7 @@ export function RegistrationConfirmationData({ slug, requestId }: { slug: string
                 <button
                   type="button"
                   onClick={() => setCancelModalOpen(true)}
-                  className="mt-3 flex min-h-10 w-full items-center justify-center text-sm font-semibold text-[#C0392B] hover:underline"
+                  className="mt-3 flex min-h-10 w-full items-center justify-center text-sm font-semibold text-[#C0392B] hover:underline md:w-auto md:mx-auto"
                 >
                   Cancel Registration
                 </button>
@@ -2193,7 +2234,7 @@ export function RegistrationConfirmationData({ slug, requestId }: { slug: string
                   This will cancel this application. If you change your mind, you will need to apply again.
                 </p>
                 <label className="mt-4 grid gap-1 text-[10px] font-semibold uppercase tracking-wide text-[#7B858C]">
-                  Reason (required)
+                  Reason (optional)
                   <textarea
                     value={cancelReason}
                     onChange={(event) => setCancelReason(event.target.value)}
@@ -2218,7 +2259,7 @@ export function RegistrationConfirmationData({ slug, requestId }: { slug: string
                   </button>
                   <button
                     type="button"
-                    disabled={cancelBusy || !cancelReason.trim()}
+                    disabled={cancelBusy}
                     onClick={handleCancelRegistration}
                     className="min-h-10 rounded-[10px] bg-[#C0392B] px-4 text-sm font-semibold text-white transition-opacity disabled:opacity-50"
                   >
@@ -2247,7 +2288,7 @@ function parseStudentClassesTab(value: string | null): StudentClassesTab {
 }
 
 export function StudentClassesData({ slug }: { slug: string }) {
-  const { mosque, programs, enrolledProgramIds, accountType, viewerProfiles, loading, enrollmentLoading, error } = useStudentPrograms(slug);
+  const { mosque, programs, enrolledProgramIds, loading, enrollmentLoading, error } = useStudentPrograms(slug);
   const { rows: applicationRows, loading: applicationsLoading } = useApplicantApplications(slug);
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -2305,8 +2346,6 @@ export function StudentClassesData({ slug }: { slug: string }) {
         emptyText="No available classes to browse right now."
         enrolledProgramIds={enrolledProgramIds}
         detailBaseHref={`/m/${mosque.slug}/portal/classes`}
-        accountType={accountType}
-        viewerProfiles={viewerProfiles}
         applicationStatusByProgramId={applicationStatusByProgramId}
       />
     );
@@ -3652,12 +3691,12 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
   const returnedRequests = requests.filter((request) => request.status !== "pending");
   const pendingWithdrawals = studentWithdrawals.filter((request) => request.status === "pending");
   const returnedWithdrawals = studentWithdrawals.filter((request) => request.status !== "pending");
-  const unseenReturnedRequestCount =
-    returnedRequests.filter((request) => !seenRequestIds.has(studentRequestNotificationKey(request))).length +
-    returnedWithdrawals.filter((request) => !seenRequestIds.has(studentWithdrawalNotificationKey(request))).length;
-  const returnedRequestIdsKey = [
-    ...returnedRequests.map(studentRequestNotificationKey),
-    ...returnedWithdrawals.map(studentWithdrawalNotificationKey),
+  const unseenRequestCount =
+    requests.filter((request) => !seenRequestIds.has(studentRequestNotificationKey(request))).length +
+    studentWithdrawals.filter((request) => !seenRequestIds.has(studentWithdrawalNotificationKey(request))).length;
+  const allRequestIdsKey = [
+    ...requests.map(studentRequestNotificationKey),
+    ...studentWithdrawals.map(studentWithdrawalNotificationKey),
   ].join("|");
   const announcementThreads = buildAnnouncementThreads(announcements, enrolledProgramsForInbox);
   const noteThreads = buildNoteThreads(notes);
@@ -3665,18 +3704,18 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
   const unreadNoteCount = notes.filter((note) => !note.seen_at).length;
 
   useEffect(() => {
-    if (!loading && tab === "requests" && returnedRequestIdsKey) {
-      setSeenRequestIds(markNotificationIdsSeen(seenStudentRequestsStorageKey, currentUserId, returnedRequestIdsKey.split("|")));
+    if (!loading && tab === "requests" && allRequestIdsKey) {
+      setSeenRequestIds(markNotificationIdsSeen(seenStudentRequestsStorageKey, currentUserId, allRequestIdsKey.split("|")));
     }
-  }, [currentUserId, loading, returnedRequestIdsKey, tab]);
+  }, [currentUserId, loading, allRequestIdsKey, tab]);
 
   function changeTab(nextTab: "announcements" | "notes" | "requests") {
     setTab(nextTab);
     setSelectedThread(null);
     if (nextTab === "requests") {
       setSeenRequestIds(markNotificationIdsSeen(seenStudentRequestsStorageKey, currentUserId, [
-        ...returnedRequests.map(studentRequestNotificationKey),
-        ...returnedWithdrawals.map(studentWithdrawalNotificationKey),
+        ...requests.map(studentRequestNotificationKey),
+        ...studentWithdrawals.map(studentWithdrawalNotificationKey),
       ]));
     }
   }
@@ -3924,7 +3963,7 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
           tabs={[
             { id: "announcements", label: "Announcements", badge: unreadAnnouncementCount },
             { id: "notes", label: "Notes", badge: unreadNoteCount },
-            { id: "requests", label: "Applications", badge: unseenReturnedRequestCount },
+            { id: "requests", label: "Applications", badge: unseenRequestCount },
           ]}
           value={tab}
           onChange={(value) => changeTab(value as "announcements" | "notes" | "requests")}
@@ -4103,8 +4142,6 @@ export function TeacherInboxData({ slug }: { slug: string }) {
   const [selectedAnnouncementTargetValue, setSelectedAnnouncementTargetValue] = useState("");
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [seenRequestIds, setSeenRequestIds] = useState<Set<string>>(new Set());
-  const [reviewTarget, setReviewTarget] = useState<{ request: RequestWithContext; action: "approved" | "waitlisted" | "rejected" } | null>(null);
-  const [reviewBusy, setReviewBusy] = useState(false);
   const [busyWithdrawalId, setBusyWithdrawalId] = useState<string | null>(null);
   const [toast, setToast] = useState<EditorToastState | null>(null);
   const [loading, setLoading] = useState(true);
@@ -4130,7 +4167,11 @@ export function TeacherInboxData({ slug }: { slug: string }) {
     }
 
     setCurrentUserId(userId);
-    setSeenRequestIds(readSeenNotificationIds(seenTeacherRequestsStorageKey, userId));
+    setSeenRequestIds(new Set([
+      ...readSeenNotificationIds(seenTeacherRequestsStorageKey, userId),
+      ...readSeenNotificationIds(seenTeacherInstructorNotificationsStorageKey, userId),
+      ...readSeenNotificationIds(seenTeacherWithdrawalsStorageKey, userId),
+    ]));
     const { data: mosque } = await supabase.from("mosques").select("id").eq("slug", slug).maybeSingle();
     if (!mosque) {
       setLoading(false);
@@ -4252,6 +4293,7 @@ export function TeacherInboxData({ slug }: { slug: string }) {
         program: teacherPrograms.find((program) => program.id === request.program_id) ?? null,
         student: (students ?? []).find((student) => student.id === request.student_profile_id) ?? null,
         parent: request.parent_profile_id ? ((parents ?? []).find((parent) => parent.id === request.parent_profile_id) as ParentDisplay | undefined) ?? null : null,
+        track: request.program_track_id ? (trackRows ?? []).find((track) => track.id === request.program_track_id) ?? null : null,
       })),
     );
     setWithdrawals(
@@ -4365,39 +4407,6 @@ export function TeacherInboxData({ slug }: { slug: string }) {
     window.dispatchEvent(new Event("tareeqah:notifications-changed"));
   }
 
-  async function reviewRequest(
-    request: RequestWithContext,
-    status: "approved" | "waitlisted" | "rejected",
-    options: { paymentType?: PaymentType; priceMonthlyCents?: number | null; priceAnnualCents?: number | null; paymentBypassed?: boolean; note?: string | null } = {},
-  ) {
-    if (!currentUserId) {
-      return;
-    }
-
-    setReviewBusy(true);
-    const endpoint = status === "approved" ? "approve" : status === "waitlisted" ? "waitlist" : "reject";
-    const result = await callApplicationAction(request.program_id, request.id, endpoint, {
-      paymentType: options.paymentType,
-      priceMonthlyCents: options.priceMonthlyCents,
-      priceAnnualCents: options.priceAnnualCents,
-      paymentBypassed: options.paymentBypassed,
-      note: options.note,
-    });
-
-    if (!result.ok) {
-      setReviewBusy(false);
-      setError(result.error);
-      return;
-    }
-
-    queueEnrollmentRequestReviewedEmail(request.id);
-    window.dispatchEvent(new Event("tareeqah:notifications-changed"));
-    await loadTeacherInbox();
-    setReviewBusy(false);
-    setReviewTarget(null);
-    setToast({ tone: "success", message: status === "approved" ? "Application accepted." : status === "waitlisted" ? "Application waitlisted." : "Application rejected." });
-  }
-
   async function reviewWithdrawal(request: WithdrawalRequestWithContext, status: "approved" | "rejected") {
     setBusyWithdrawalId(request.id);
     const supabase = createSupabaseBrowserClient();
@@ -4432,7 +4441,8 @@ export function TeacherInboxData({ slug }: { slug: string }) {
       return;
     }
     markNotificationIdsSeen(dismissedTeacherInstructorUpdatesStorageKey, currentUserId, instructorNotificationIds);
-    setSeenRequestIds(markNotificationIdsSeen(seenTeacherRequestsStorageKey, currentUserId, instructorNotificationIds));
+    const updated = markNotificationIdsSeen(seenTeacherInstructorNotificationsStorageKey, currentUserId, instructorNotificationIds);
+    setSeenRequestIds((current) => new Set([...current, ...updated]));
     setInstructorNotifications([]);
   }
 
@@ -4443,6 +4453,7 @@ export function TeacherInboxData({ slug }: { slug: string }) {
   const pastWithdrawals = withdrawals.filter((request) => request.status !== "pending");
   const unseenInstructorCount = instructorNotifications.filter((notification) => !seenRequestIds.has(teacherInstructorNotificationKey(notification))).length;
   const unseenPendingRequestCount = [...pendingRequests, ...completedAdmissionRequests].filter((request) => !seenRequestIds.has(teacherRequestNotificationKey(request))).length;
+  const unseenWithdrawalCount = pendingWithdrawals.filter((request) => !seenRequestIds.has(studentWithdrawalNotificationKey(request))).length;
   const selectedProgram = programs.find((program) => program.id === selectedProgramId);
   const announcementTargetOptions = programs.flatMap((program) => [
     { value: announcementTargetValue(program.id, null), label: announcementTargetLabel(program, null) },
@@ -4451,31 +4462,48 @@ export function TeacherInboxData({ slug }: { slug: string }) {
       label: announcementTargetLabel(program, track),
     })),
   ]);
-  const requestNotificationIds = [...pendingRequests, ...completedAdmissionRequests].map(teacherRequestNotificationKey);
+  const requestNotificationIds = requests.map(teacherRequestNotificationKey);
   const instructorNotificationIds = instructorNotifications.map(teacherInstructorNotificationKey);
+  const withdrawalNotificationIds = pendingWithdrawals.map(studentWithdrawalNotificationKey);
   const pendingRequestIdsKey = requestNotificationIds.join("|");
   const instructorIdsKey = instructorNotificationIds.join("|");
+  const withdrawalIdsKey = withdrawalNotificationIds.join("|");
 
   useEffect(() => {
     if (!loading && tab === "requests" && pendingRequestIdsKey) {
-      setSeenRequestIds(markNotificationIdsSeen(seenTeacherRequestsStorageKey, currentUserId, pendingRequestIdsKey.split("|")));
+      const updated = markNotificationIdsSeen(seenTeacherRequestsStorageKey, currentUserId, pendingRequestIdsKey.split("|"));
+      setSeenRequestIds((current) => new Set([...current, ...updated]));
     }
   }, [currentUserId, loading, pendingRequestIdsKey, tab]);
 
   useEffect(() => {
     if (!loading && tab === "instructors" && instructorIdsKey) {
-      setSeenRequestIds(markNotificationIdsSeen(seenTeacherRequestsStorageKey, currentUserId, instructorIdsKey.split("|")));
+      const updated = markNotificationIdsSeen(seenTeacherInstructorNotificationsStorageKey, currentUserId, instructorIdsKey.split("|"));
+      setSeenRequestIds((current) => new Set([...current, ...updated]));
     }
   }, [currentUserId, instructorIdsKey, loading, tab]);
+
+  useEffect(() => {
+    if (!loading && tab === "withdrawals" && withdrawalIdsKey) {
+      const updated = markNotificationIdsSeen(seenTeacherWithdrawalsStorageKey, currentUserId, withdrawalIdsKey.split("|"));
+      setSeenRequestIds((current) => new Set([...current, ...updated]));
+    }
+  }, [currentUserId, withdrawalIdsKey, loading, tab]);
 
   function changeTab(nextTab: "requests" | "withdrawals" | "instructors") {
     setTab(nextTab);
     router.replace(`/m/${slug}/teacher/inbox?tab=${nextTab}`, { scroll: false });
     if (nextTab === "requests") {
-      setSeenRequestIds(markNotificationIdsSeen(seenTeacherRequestsStorageKey, currentUserId, requestNotificationIds));
+      const updated = markNotificationIdsSeen(seenTeacherRequestsStorageKey, currentUserId, requestNotificationIds);
+      setSeenRequestIds((current) => new Set([...current, ...updated]));
     }
     if (nextTab === "instructors") {
-      setSeenRequestIds(markNotificationIdsSeen(seenTeacherRequestsStorageKey, currentUserId, instructorNotificationIds));
+      const updated = markNotificationIdsSeen(seenTeacherInstructorNotificationsStorageKey, currentUserId, instructorNotificationIds);
+      setSeenRequestIds((current) => new Set([...current, ...updated]));
+    }
+    if (nextTab === "withdrawals") {
+      const updated = markNotificationIdsSeen(seenTeacherWithdrawalsStorageKey, currentUserId, withdrawalNotificationIds);
+      setSeenRequestIds((current) => new Set([...current, ...updated]));
     }
   }
 
@@ -4485,8 +4513,8 @@ export function TeacherInboxData({ slug }: { slug: string }) {
       <div className="md:hidden">
         <FloatingInboxTabs
           tabs={[
-            { id: "requests", label: "Applications", badge: unseenPendingRequestCount },
-            { id: "withdrawals", label: "Withdrawals", badge: pendingWithdrawals.length },
+            { id: "requests", label: "Applications", badge: unseenPendingRequestCount, actionRequired: pendingRequests.length > 0 },
+            { id: "withdrawals", label: "Withdrawals", badge: unseenWithdrawalCount, actionRequired: pendingWithdrawals.length > 0 },
             { id: "instructors", label: "Instructors", badge: unseenInstructorCount },
           ]}
           value={tab}
@@ -4506,9 +4534,7 @@ export function TeacherInboxData({ slug }: { slug: string }) {
                   <TeacherRequestCard
                     key={request.id}
                     request={request}
-                    onAccept={() => setReviewTarget({ request, action: "approved" })}
-                    onWaitlist={() => setReviewTarget({ request, action: "waitlisted" })}
-                    onReject={() => setReviewTarget({ request, action: "rejected" })}
+                    viewHref={`/m/${slug}/teacher/classes/${request.program_id}/applications?requestId=${request.id}`}
                   />
                 ))
               ) : (
@@ -4518,7 +4544,13 @@ export function TeacherInboxData({ slug }: { slug: string }) {
             <TeacherRequestSection title="Past Requests" count={pastRequests.length} action={pastRequests.length ? <ClearAllButton onClick={clearAllPastRequests} /> : null}>
               {pastRequests.length ? (
                 pastRequests.map((request) => (
-                  <TeacherRequestCard key={request.id} request={request} reviewed onClear={() => clearPastRequest(request.id)} />
+                  <TeacherRequestCard
+                    key={request.id}
+                    request={request}
+                    reviewed
+                    onClear={() => clearPastRequest(request.id)}
+                    viewHref={`/m/${slug}/teacher/classes/${request.program_id}/applications?requestId=${request.id}`}
+                  />
                 ))
               ) : (
                 <MiniEmpty text="Reviewed requests will appear here." />
@@ -4562,18 +4594,6 @@ export function TeacherInboxData({ slug }: { slug: string }) {
           </TeacherRequestSection>
         )}
       </div>
-      {reviewTarget ? (
-        <ApplicationDecisionModal
-          target={reviewTarget}
-          busy={reviewBusy}
-          onClose={() => {
-            if (!reviewBusy) {
-              setReviewTarget(null);
-            }
-          }}
-          onSubmit={(options) => reviewRequest(reviewTarget.request, reviewTarget.action, options)}
-        />
-      ) : null}
     </div>
   );
 }
@@ -10131,6 +10151,7 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
         program: programData,
         student: (profileRows ?? []).find((profile) => profile.id === request.student_profile_id) ?? null,
         parent: request.parent_profile_id ? ((parentRows ?? []).find((parent) => parent.id === request.parent_profile_id) as ParentDisplay | undefined) ?? null : null,
+        track: request.program_track_id ? (trackRows ?? []).find((track) => track.id === request.program_track_id) ?? null : null,
       })),
     );
     setLoading(false);
@@ -11842,12 +11863,10 @@ const APPLICATION_ACTION_LABELS: Record<ApplicationRowAction, string> = {
   waive_payment: "Waive Payment",
   copy_confirmation_link: "Copy Registration Confirmation Link",
   reopen: "Reopen Application",
-  view_enrollment: "View Enrollment",
-  add_note: "Add Note",
 };
 
 export function ProgramApplicationsData({ slug, programId, mode = "teacher" }: { slug: string; programId: string; mode?: "teacher" | "admin" }) {
-  const router = useRouter();
+  const searchParams = useSearchParams();
   const [program, setProgram] = useState<Program | null>(null);
   const [rows, setRows] = useState<ApplicationRow[]>([]);
   const [auditEvents, setAuditEvents] = useState<ProgramFinanceAuditEvent[]>([]);
@@ -11859,7 +11878,6 @@ export function ProgramApplicationsData({ slug, programId, mode = "teacher" }: {
   const [tracks, setTracks] = useState<ProgramTrack[]>([]);
   const [decisionTarget, setDecisionTarget] = useState<{ row: ApplicationRow; action: "approved" | "waitlisted" | "rejected" } | null>(null);
   const [detailsTarget, setDetailsTarget] = useState<ApplicationRow | null>(null);
-  const [noteTarget, setNoteTarget] = useState<ApplicationRow | null>(null);
   const [changePriceTarget, setChangePriceTarget] = useState<ApplicationRow | null>(null);
   const [confirmActionTarget, setConfirmActionTarget] = useState<{ row: ApplicationRow; action: "cancel_approval" | "waive_payment" | "reopen" } | null>(null);
   const [loading, setLoading] = useState(true);
@@ -11873,6 +11891,23 @@ export function ProgramApplicationsData({ slug, programId, mode = "teacher" }: {
     return () => window.clearTimeout(timeout);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [programId, slug, mode]);
+
+  useEffect(() => {
+    if (loading) {
+      return;
+    }
+    const requestId = searchParams.get("requestId");
+    if (!requestId) {
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      const match = rows.find((row) => row.request.id === requestId);
+      if (match) {
+        setDetailsTarget(match);
+      }
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, [loading, rows, searchParams]);
 
   async function loadApplications() {
     setLoading(true);
@@ -11999,8 +12034,6 @@ export function ProgramApplicationsData({ slug, programId, mode = "teacher" }: {
     return <EmptyState title="Applications unavailable" text={error} />;
   }
 
-  const basePath = mode === "admin" ? `/m/${slug}/admin/programs` : `/m/${slug}/teacher/classes`;
-
   async function handleCopyConfirmationLink(row: ApplicationRow) {
     const url = `${window.location.origin}/m/${slug}/registration/${row.request.id}`;
     try {
@@ -12008,6 +12041,36 @@ export function ProgramApplicationsData({ slug, programId, mode = "teacher" }: {
       setToast({ tone: "success", message: "Registration confirmation link copied." });
     } catch {
       setToast({ tone: "error", message: "Could not copy link." });
+    }
+  }
+
+  function handleApplicationAction(row: ApplicationRow, action: ApplicationRowAction) {
+    if (action === "view") {
+      setDetailsTarget(row);
+      return;
+    }
+    if (action === "approve") {
+      setDecisionTarget({ row, action: "approved" });
+      return;
+    }
+    if (action === "waitlist") {
+      setDecisionTarget({ row, action: "waitlisted" });
+      return;
+    }
+    if (action === "reject") {
+      setDecisionTarget({ row, action: "rejected" });
+      return;
+    }
+    if (action === "cancel_approval" || action === "waive_payment" || action === "reopen") {
+      setConfirmActionTarget({ row, action });
+      return;
+    }
+    if (action === "change_price") {
+      setChangePriceTarget(row);
+      return;
+    }
+    if (action === "copy_confirmation_link") {
+      void handleCopyConfirmationLink(row);
     }
   }
 
@@ -12117,53 +12180,23 @@ export function ProgramApplicationsData({ slug, programId, mode = "teacher" }: {
                       </span>
                     </td>
                     <td className="px-4 py-4">
-                      <span className={cn("rounded-full px-2.5 py-1 text-xs font-semibold", programStatusBadgeToneClass(paymentStatusTone(payStatus)))}>
-                        {PAYMENT_STATUS_LABELS[payStatus]}
-                      </span>
+                      {isPaymentStatusMeaningful(row.request, program) ? (
+                        <span className={cn("rounded-full px-2.5 py-1 text-xs font-semibold", programStatusBadgeToneClass(paymentStatusTone(payStatus)))}>
+                          {PAYMENT_STATUS_LABELS[payStatus]}
+                        </span>
+                      ) : (
+                        <span className="text-[#9AA4AA]">—</span>
+                      )}
                     </td>
                     <td className="px-4 py-4 text-[#52616A]">{formatFinanceDate(row.request.requested_at)}</td>
                     <td className="px-4 py-4">
-                      <ApplicationRowActionMenu
-                        row={row}
-                        status={status}
-                        onSelect={(action) => {
-                          if (action === "view") {
-                            setDetailsTarget(row);
-                            return;
-                          }
-                          if (action === "approve") {
-                            setDecisionTarget({ row, action: "approved" });
-                            return;
-                          }
-                          if (action === "waitlist") {
-                            setDecisionTarget({ row, action: "waitlisted" });
-                            return;
-                          }
-                          if (action === "reject") {
-                            setDecisionTarget({ row, action: "rejected" });
-                            return;
-                          }
-                          if (action === "cancel_approval" || action === "waive_payment" || action === "reopen") {
-                            setConfirmActionTarget({ row, action });
-                            return;
-                          }
-                          if (action === "change_price") {
-                            setChangePriceTarget(row);
-                            return;
-                          }
-                          if (action === "add_note") {
-                            setNoteTarget(row);
-                            return;
-                          }
-                          if (action === "copy_confirmation_link") {
-                            void handleCopyConfirmationLink(row);
-                            return;
-                          }
-                          if (action === "view_enrollment") {
-                            router.push(`${basePath}/${programId}/students?from=applications&studentId=${row.request.student_profile_id}`);
-                          }
-                        }}
-                      />
+                      <button
+                        type="button"
+                        onClick={() => setDetailsTarget(row)}
+                        className="inline-flex min-h-9 items-center justify-center rounded-full bg-[#EEF6F7] px-3 text-xs font-semibold text-[#17624F] transition-colors hover:bg-[#E3F0F0]"
+                      >
+                        View
+                      </button>
                     </td>
                   </tr>
                 );
@@ -12204,7 +12237,7 @@ export function ProgramApplicationsData({ slug, programId, mode = "teacher" }: {
 
       {decisionTarget ? (
         <ApplicationDecisionModal
-          target={{ request: { ...decisionTarget.row.request, program, student: decisionTarget.row.student, parent: decisionTarget.row.parent }, action: decisionTarget.action }}
+          target={{ request: { ...decisionTarget.row.request, program, student: decisionTarget.row.student, parent: decisionTarget.row.parent, track: decisionTarget.row.track }, action: decisionTarget.action }}
           onClose={() => setDecisionTarget(null)}
           onSubmit={async (options) => {
             const endpoint = decisionTarget.action === "approved" ? "approve" : decisionTarget.action === "waitlisted" ? "waitlist" : "reject";
@@ -12221,11 +12254,18 @@ export function ProgramApplicationsData({ slug, programId, mode = "teacher" }: {
       ) : null}
 
       {detailsTarget ? (
-        <ApplicationDetailsDrawer row={detailsTarget} program={program} slug={slug} mode={mode} onClose={() => setDetailsTarget(null)} />
-      ) : null}
-
-      {noteTarget ? (
-        <ApplicationAddNoteModal row={noteTarget} program={program} onClose={() => setNoteTarget(null)} onSuccess={() => void loadApplications()} />
+        <ApplicationDetailsDrawer
+          row={detailsTarget}
+          program={program}
+          slug={slug}
+          mode={mode}
+          onClose={() => setDetailsTarget(null)}
+          onAction={(action) => {
+            const row = detailsTarget;
+            setDetailsTarget(null);
+            handleApplicationAction(row, action);
+          }}
+        />
       ) : null}
 
       {changePriceTarget ? (
@@ -12245,109 +12285,20 @@ export function ProgramApplicationsData({ slug, programId, mode = "teacher" }: {
   );
 }
 
-function ApplicationRowActionMenu({ row, status, onSelect }: { row: ApplicationRow; status: RequestApplicationStatus; onSelect: (action: ApplicationRowAction) => void }) {
-  const [open, setOpen] = useState(false);
-  const [menuPosition, setMenuPosition] = useState<{ top: number; left: number } | null>(null);
-  const buttonRef = useRef<HTMLButtonElement | null>(null);
-  const studentName = row.student?.full_name || "student";
-  const actions = getApplicationRowActions(status);
-
-  function updateMenuPosition() {
-    const button = buttonRef.current;
-    if (!button) {
-      return;
-    }
-    const rect = button.getBoundingClientRect();
-    const menuWidth = 260;
-    const menuHeight = 280;
-    const gap = 8;
-    const left = Math.max(12, Math.min(window.innerWidth - menuWidth - 12, rect.right - menuWidth));
-    const below = rect.bottom + gap;
-    const top = below + menuHeight > window.innerHeight ? Math.max(12, rect.top - menuHeight - gap) : below;
-    setMenuPosition({ top, left });
-  }
-
-  useEffect(() => {
-    if (!open) {
-      return;
-    }
-    updateMenuPosition();
-    function closeOnPointerDown(event: MouseEvent) {
-      const target = event.target as Node | null;
-      if (target && buttonRef.current?.contains(target)) {
-        return;
-      }
-      const menu = document.getElementById(`application-action-menu-${row.request.id}`);
-      if (target && menu?.contains(target)) {
-        return;
-      }
-      setOpen(false);
-    }
-    window.addEventListener("resize", updateMenuPosition);
-    window.addEventListener("scroll", updateMenuPosition, true);
-    document.addEventListener("mousedown", closeOnPointerDown);
-    return () => {
-      window.removeEventListener("resize", updateMenuPosition);
-      window.removeEventListener("scroll", updateMenuPosition, true);
-      document.removeEventListener("mousedown", closeOnPointerDown);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, row.request.id]);
-
-  return (
-    <div className="inline-flex justify-end">
-      <button
-        ref={buttonRef}
-        type="button"
-        onClick={() => {
-          updateMenuPosition();
-          setOpen((current) => !current);
-        }}
-        className="flex h-9 w-9 items-center justify-center rounded-full bg-[#F1F5F6] text-[#26323A] transition-colors hover:bg-[#E3ECEF]"
-        aria-label={`Open application actions for ${studentName}`}
-      >
-        <MoreVerticalIcon />
-      </button>
-      {open && menuPosition
-        ? createPortal(
-            <div
-              id={`application-action-menu-${row.request.id}`}
-              className="fixed z-[80] w-[260px] rounded-[18px] border border-[#E1E8EC] bg-white p-1.5 text-sm shadow-[0_22px_60px_rgba(38,50,58,0.20)]"
-              style={{ top: menuPosition.top, left: menuPosition.left }}
-            >
-              {actions.map((action) => (
-                <button
-                  key={action}
-                  type="button"
-                  onClick={() => {
-                    setOpen(false);
-                    onSelect(action);
-                  }}
-                  className="flex min-h-10 w-full items-center rounded-[13px] px-3 text-left font-semibold text-[#52616A] transition-colors hover:bg-[#F4F8F9] hover:text-[#26323A]"
-                >
-                  {APPLICATION_ACTION_LABELS[action]}
-                </button>
-              ))}
-            </div>,
-            document.body,
-          )
-        : null}
-    </div>
-  );
-}
-
 function ApplicationDetailsDrawer({
   row,
   program,
   slug,
   mode,
   onClose,
+  onAction,
 }: {
   row: ApplicationRow;
   program: Program;
   slug: string;
   mode: "teacher" | "admin";
   onClose: () => void;
+  onAction: (action: ApplicationRowAction) => void;
 }) {
   const [studentEvents, setStudentEvents] = useState<ProgramFinanceAuditEvent[] | null>(null);
   const [eventsLoading, setEventsLoading] = useState(true);
@@ -12381,6 +12332,9 @@ function ApplicationDetailsDrawer({
   const status = getApplicationStatus(row.request);
   const payStatus = getApplicationPaymentStatus(row.request, program, row.subscription);
   const basePath = mode === "admin" ? `/m/${slug}/admin/programs` : `/m/${slug}/teacher/classes`;
+  const availableActions = getApplicationRowActions(status).filter((action) => action !== "view");
+  const decisionActions = availableActions.filter((action): action is "approve" | "waitlist" | "reject" => action === "approve" || action === "waitlist" || action === "reject");
+  const secondaryActions = availableActions.filter((action) => action !== "approve" && action !== "waitlist" && action !== "reject");
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex justify-end bg-[#26323A]/35 backdrop-blur-sm">
@@ -12411,12 +12365,14 @@ function ApplicationDetailsDrawer({
                 {getApplicationRowStatusLabel(status, payStatus)}
               </span>
             </div>
-            <div className="flex items-center justify-between">
-              <span className="text-[#6B747B]">Payment status</span>
-              <span className={cn("rounded-full px-2.5 py-1 text-xs font-semibold", programStatusBadgeToneClass(paymentStatusTone(payStatus)))}>
-                {PAYMENT_STATUS_LABELS[payStatus]}
-              </span>
-            </div>
+            {isPaymentStatusMeaningful(row.request, program) ? (
+              <div className="flex items-center justify-between">
+                <span className="text-[#6B747B]">Payment status</span>
+                <span className={cn("rounded-full px-2.5 py-1 text-xs font-semibold", programStatusBadgeToneClass(paymentStatusTone(payStatus)))}>
+                  {PAYMENT_STATUS_LABELS[payStatus]}
+                </span>
+              </div>
+            ) : null}
           </section>
 
           <section className="grid gap-1 rounded-[16px] border border-[#E1E8EC] bg-[#FAFCFC] p-3 text-sm">
@@ -12486,85 +12442,54 @@ function ApplicationDetailsDrawer({
           </section>
         </div>
 
-        <div className="mt-auto border-t border-[#EEF2F4] px-5 py-4">
-          <Link href={`${basePath}/${program.id}/students?from=applications&studentId=${row.request.student_profile_id}`} className="text-sm font-semibold text-[#17624F] hover:underline">
-            Manage class enrollment →
-          </Link>
-        </div>
-      </div>
-    </div>,
-    document.body,
-  );
-}
-
-function ApplicationAddNoteModal({
-  row,
-  program,
-  onClose,
-  onSuccess,
-}: {
-  row: ApplicationRow;
-  program: Program;
-  onClose: () => void;
-  onSuccess: () => void;
-}) {
-  const [note, setNote] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function handleSave() {
-    const text = note.trim();
-    if (!text) {
-      setError("Enter a note before saving.");
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    const result = await callApplicationAction(program.id, row.request.id, "note", { note: text });
-    setBusy(false);
-    if (!result.ok) {
-      setError(result.error);
-      return;
-    }
-    onSuccess();
-    onClose();
-  }
-
-  return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#26323A]/35 px-5 backdrop-blur-sm">
-      <div className="w-full max-w-md rounded-[28px] bg-white p-5 text-[#26323A] shadow-[0_24px_70px_rgba(38,50,58,0.22)]">
-        <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">{program.title}</p>
-        <h2 className="mt-1 text-xl font-semibold">Add Note</h2>
-        <p className="mt-2 text-sm leading-6 text-[#6B747B]">{row.student?.full_name || "Student"} - Internal note, visible only to Directors and Admins.</p>
-
-        <textarea
-          value={note}
-          onChange={(event) => setNote(event.target.value)}
-          disabled={busy}
-          rows={4}
-          placeholder="e.g. Parent requested a payment plan adjustment."
-          className="mt-4 w-full rounded-[14px] border border-[#B9C3C8] px-3 py-2 text-sm font-semibold outline-none focus:border-[#2F8FB3] disabled:opacity-60"
-        />
-
-        <div className="mt-5 flex items-center justify-between gap-3">
-          <p className="flex-1 text-xs font-semibold text-[#C0392B]">{error ?? ""}</p>
-          <div className="flex shrink-0 gap-2">
-            <button type="button" onClick={onClose} className="min-h-10 px-3 text-sm font-semibold text-[#6B747B]">Close</button>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={handleSave}
-              className="min-h-10 rounded-[10px] bg-[#26323A] px-4 text-sm font-semibold text-white transition-opacity disabled:opacity-50"
-            >
-              {busy ? "Saving..." : "Save note"}
-            </button>
+        {availableActions.length ? (
+          <div className="mt-auto space-y-2 border-t border-[#EEF2F4] px-5 py-4">
+            {decisionActions.length ? (
+              <div className={cn("grid gap-2", decisionActions.length === 3 ? "grid-cols-3" : decisionActions.length === 2 ? "grid-cols-2" : "grid-cols-1")}>
+                {decisionActions.map((action) => (
+                  <button
+                    key={action}
+                    type="button"
+                    onClick={() => onAction(action)}
+                    className={cn(
+                      "min-h-10 rounded-[9px] px-2 text-xs font-semibold transition-colors",
+                      action === "approve"
+                        ? "bg-[#E2F6E8] text-[#258A43] hover:bg-[#D4F0DD]"
+                        : action === "waitlist"
+                          ? "bg-[#FFF4D6] text-[#8A6418] hover:bg-[#FFE9A8]"
+                          : "bg-[#FCE8E4] text-[#C83F31] hover:bg-[#F9D8D1]",
+                    )}
+                  >
+                    {APPLICATION_ACTION_LABELS[action]}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            {secondaryActions.length ? (
+              <div className="flex flex-wrap gap-x-4 gap-y-2">
+                {secondaryActions.map((action) => (
+                  <button key={action} type="button" onClick={() => onAction(action)} className="text-sm font-semibold text-[#17624F] hover:underline">
+                    {APPLICATION_ACTION_LABELS[action]}
+                  </button>
+                ))}
+              </div>
+            ) : null}
           </div>
-        </div>
+        ) : null}
+
+        {status === "completed_enrolled" ? (
+          <div className="border-t border-[#EEF2F4] px-5 py-4">
+            <Link href={`${basePath}/${program.id}/students?from=applications&studentId=${row.request.student_profile_id}`} className="text-sm font-semibold text-[#17624F] hover:underline">
+              View student in class list →
+            </Link>
+          </div>
+        ) : null}
       </div>
     </div>,
     document.body,
   );
 }
+
 
 function ApplicationChangePriceModal({
   row,
@@ -13734,6 +13659,7 @@ async function fetchParentChildren(
 }
 
 export function useStudentNotificationCounts(slug: string) {
+  const pathname = usePathname();
   const cachedCounts = notificationCountsCache.get(slug);
   const [announcementCount, setAnnouncementCount] = useState(cachedCounts?.announcementCount ?? 0);
   const [noteCount, setNoteCount] = useState(cachedCounts?.noteCount ?? 0);
@@ -13784,14 +13710,12 @@ export function useStudentNotificationCounts(slug: string) {
               .select("id, status, reviewed_at, requested_at")
               .eq("mosque_id", mosque.id)
               .eq("parent_profile_id", userId)
-              .neq("status", "pending")
               .is("student_dismissed_at", null)
           : supabase
               .from("enrollment_requests")
               .select("id, status, reviewed_at, requested_at")
               .eq("mosque_id", mosque.id)
               .eq("student_profile_id", userId)
-              .neq("status", "pending")
               .is("student_dismissed_at", null),
         profile?.account_type === "parent"
           ? supabase
@@ -13799,14 +13723,12 @@ export function useStudentNotificationCounts(slug: string) {
               .select("id, status, reviewed_at, requested_at")
               .eq("mosque_id", mosque.id)
               .or(`parent_profile_id.eq.${userId},requested_by.eq.${userId}`)
-              .neq("status", "pending")
               .is("student_dismissed_at", null)
           : supabase
               .from("withdrawal_requests")
               .select("id, status, reviewed_at, requested_at")
               .eq("mosque_id", mosque.id)
               .eq("student_profile_id", userId)
-              .neq("status", "pending")
               .is("student_dismissed_at", null),
         targetStudentIds.length
           ? supabase.from("program_student_notes").select("id, seen_at").in("student_profile_id", targetStudentIds)
@@ -13856,38 +13778,43 @@ export function useStudentNotificationCounts(slug: string) {
       active = false;
       window.removeEventListener("tareeqah:notifications-changed", load);
     };
-  }, [slug]);
+  }, [slug, pathname]);
 
-  return { announcementCount, noteCount, requestCount, totalCount: announcementCount + noteCount + requestCount };
+  return { announcementCount, noteCount, requestCount, totalCount: announcementCount + noteCount + requestCount, actionRequired: false };
 }
 
 export function useTeacherNotificationCounts(slug: string) {
+  const pathname = usePathname();
   const [requestCount, setRequestCount] = useState(0);
+  const [actionRequired, setActionRequired] = useState(false);
 
   useEffect(() => {
     const supabase = createSupabaseBrowserClient();
     let active = true;
 
+    function reset() {
+      if (active) {
+        setRequestCount(0);
+        setActionRequired(false);
+      }
+    }
+
     async function load() {
       if (!slug) {
-        setRequestCount(0);
+        reset();
         return;
       }
 
       const { data: sessionData } = await supabase.auth.getSession();
       const userId = sessionData.session?.user.id;
       if (!userId) {
-        if (active) {
-          setRequestCount(0);
-        }
+        reset();
         return;
       }
 
       const { data: mosque } = await supabase.from("mosques").select("id").eq("slug", slug).maybeSingle();
       if (!mosque) {
-        if (active) {
-          setRequestCount(0);
-        }
+        reset();
         return;
       }
 
@@ -13901,9 +13828,7 @@ export function useTeacherNotificationCounts(slug: string) {
         .map((program) => program.id);
 
       if (programIds.length === 0) {
-        if (active) {
-          setRequestCount(0);
-        }
+        reset();
         return;
       }
 
@@ -13914,7 +13839,12 @@ export function useTeacherNotificationCounts(slug: string) {
           .in("program_id", programIds)
           .is("teacher_dismissed_at", null)
           .or("status.eq.pending,admission_completed_at.not.is.null"),
-        supabase.from("withdrawal_requests").select("id").in("program_id", programIds).eq("status", "pending").is("teacher_dismissed_at", null),
+        supabase
+          .from("withdrawal_requests")
+          .select("id, status, reviewed_at, requested_at")
+          .in("program_id", programIds)
+          .eq("status", "pending")
+          .is("teacher_dismissed_at", null),
         supabase
           .from("program_teachers")
           .select("id, teacher_profile_id")
@@ -13927,6 +13857,9 @@ export function useTeacherNotificationCounts(slug: string) {
           .in("program_id", programIds),
       ]);
       const seenRequestIds = readSeenNotificationIds(seenTeacherRequestsStorageKey, userId);
+      const seenInstructorIds = readSeenNotificationIds(seenTeacherInstructorNotificationsStorageKey, userId);
+      const dismissedInstructorIds = readSeenNotificationIds(dismissedTeacherInstructorUpdatesStorageKey, userId);
+      const seenWithdrawalIds = readSeenNotificationIds(seenTeacherWithdrawalsStorageKey, userId);
       if (active) {
         const unseenApplications = (rows ?? []).filter((row) => !seenRequestIds.has(teacherRequestNotificationKey(row))).length;
         const joinedAssignmentIdsWithEvents = new Set((instructorEventRows ?? []).filter((event) => event.event_type === "joined" && event.assignment_id).map((event) => event.assignment_id as string));
@@ -13938,8 +13871,13 @@ export function useTeacherNotificationCounts(slug: string) {
         const fallbackInstructorNotifications = (instructorRows ?? [])
           .filter((row) => !joinedAssignmentIdsWithEvents.has(row.id))
           .map((row) => ({ id: row.id, event_type: "joined" as const, teacher_profile_id: row.teacher_profile_id }));
-        const unseenInstructors = [...eventInstructorNotifications, ...fallbackInstructorNotifications].filter((row) => !seenRequestIds.has(teacherInstructorNotificationKey(row))).length;
-        setRequestCount(unseenApplications + unseenInstructors + (withdrawalRows ?? []).length);
+        const unseenInstructors = [...eventInstructorNotifications, ...fallbackInstructorNotifications]
+          .filter((row) => !dismissedInstructorIds.has(teacherInstructorNotificationKey(row)))
+          .filter((row) => !seenInstructorIds.has(teacherInstructorNotificationKey(row))).length;
+        const unseenWithdrawals = (withdrawalRows ?? []).filter((row) => !seenWithdrawalIds.has(studentWithdrawalNotificationKey(row))).length;
+        setRequestCount(unseenApplications + unseenInstructors + unseenWithdrawals);
+        const hasPendingApplication = (rows ?? []).some((row) => !row.admission_completed_at);
+        setActionRequired(hasPendingApplication || Boolean((withdrawalRows ?? []).length));
       }
     }
 
@@ -13956,9 +13894,9 @@ export function useTeacherNotificationCounts(slug: string) {
       window.removeEventListener("tareeqah:notifications-changed", load);
       subscription.unsubscribe();
     };
-  }, [slug]);
+  }, [slug, pathname]);
 
-  return { requestCount, totalCount: requestCount };
+  return { requestCount, actionRequired, totalCount: requestCount };
 }
 
 function FloatingInboxTabs({
@@ -13966,7 +13904,7 @@ function FloatingInboxTabs({
   value,
   onChange,
 }: {
-  tabs: Array<{ id: string; label: string; badge?: number }>;
+  tabs: Array<{ id: string; label: string; badge?: number; actionRequired?: boolean }>;
   value: string;
   onChange: (value: string) => void;
 }) {
@@ -13985,7 +13923,10 @@ function FloatingInboxTabs({
                 active ? "border-b-2 border-[#2F8FB3] text-[#2F8FB3]" : "text-[#6B747B]",
               )}
             >
-              <span className="block whitespace-nowrap text-center">{tab.label}</span>
+              <span className="inline-flex items-center justify-center gap-1 whitespace-nowrap text-center">
+                {tab.label}
+                {!tab.badge && tab.actionRequired ? <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[#2F8FB3]" /> : null}
+              </span>
               {tab.badge ? <NotificationBadge count={tab.badge} className="right-0 top-1" /> : null}
             </button>
           );
@@ -13994,12 +13935,18 @@ function FloatingInboxTabs({
   );
 }
 
-function NotificationBadge({ count, className = "" }: { count: number; className?: string }) {
-  return (
-    <span className={cn("absolute flex h-5 min-w-5 items-center justify-center rounded-full bg-[#E25241] px-1 text-[11px] font-semibold leading-none text-white shadow-[0_4px_10px_rgba(226,82,65,0.35)] ring-2 ring-white", className)}>
-      {count > 9 ? "9+" : count}
-    </span>
-  );
+function NotificationBadge({ count, actionRequired, className = "" }: { count?: number; actionRequired?: boolean; className?: string }) {
+  if (count) {
+    return (
+      <span className={cn("absolute flex h-5 min-w-5 items-center justify-center rounded-full bg-[#E25241] px-1 text-[11px] font-semibold leading-none text-white shadow-[0_4px_10px_rgba(226,82,65,0.35)] ring-2 ring-white", className)}>
+        {count > 9 ? "9+" : count}
+      </span>
+    );
+  }
+  if (actionRequired) {
+    return <span className={cn("absolute h-2.5 w-2.5 rounded-full bg-[#2F8FB3] ring-2 ring-white", className)} />;
+  }
+  return null;
 }
 
 function InboxSection({ title, count, children, action }: { title: string; count: number; children: ReactNode; action?: ReactNode }) {
@@ -14596,6 +14543,7 @@ function TeacherRequestCard({
   onWaitlist,
   onReject,
   onClear,
+  viewHref,
 }: {
   request: RequestWithContext;
   reviewed?: boolean;
@@ -14603,6 +14551,7 @@ function TeacherRequestCard({
   onWaitlist?: () => void;
   onReject?: () => void;
   onClear?: () => void;
+  viewHref?: string;
 }) {
   const [expanded, setExpanded] = useState(false);
   const studentName = request.student?.full_name ?? "Student";
@@ -14661,7 +14610,13 @@ function TeacherRequestCard({
                   </>
                 )}
               </dl>
-              {!reviewed ? (
+              {viewHref ? (
+                <div className="mt-4">
+                  <Link href={viewHref} className="flex min-h-10 items-center justify-center rounded-[9px] bg-[#EEF6F7] px-2 text-xs font-semibold text-[#17624F] transition-colors hover:bg-[#E3F0F0]">
+                    View Application
+                  </Link>
+                </div>
+              ) : !reviewed && (onAccept || onReject) ? (
                 <div className={cn("mt-4 grid gap-2", onWaitlist ? "grid-cols-3" : "grid-cols-2")}>
                   <button type="button" onClick={onAccept} className="min-h-10 rounded-[9px] bg-[#E2F6E8] px-2 text-xs font-semibold text-[#258A43] transition-colors hover:bg-[#D4F0DD]">
                     Accept
@@ -14737,10 +14692,6 @@ function WithdrawalRequestCard({
             ) : null}
             <dt className="font-semibold uppercase tracking-wide text-[#8A949B]">Reason</dt>
             <dd className="whitespace-pre-wrap text-[#26323A]">{request.reason?.trim() || "No reason provided."}</dd>
-            <dt className="font-semibold uppercase tracking-wide text-[#8A949B]">No refund</dt>
-            <dd className="text-[#26323A]">{request.understands_no_refund ? "Acknowledged" : "Not acknowledged"}</dd>
-            <dt className="font-semibold uppercase tracking-wide text-[#8A949B]">Immediate exit</dt>
-            <dd className="text-[#26323A]">{request.understands_immediate_exit ? "Acknowledged" : "Not acknowledged"}</dd>
             <dt className="font-semibold uppercase tracking-wide text-[#8A949B]">Billing</dt>
             <dd className="text-[#26323A]">
               {hasStripeSubscription
@@ -14802,16 +14753,11 @@ function ApplicationDecisionModal({
   const requestedPaymentType = target.request.payment_type === "annual" ? "annual" : "monthly";
   const programOptions = target.request.program ? programPaymentOptions(target.request.program) : [];
   const allowedPaymentTypes = programOptions.length ? programOptions.map((option) => option.type) : (["monthly"] as PaymentType[]);
-  const initialPaymentType = allowedPaymentTypes.includes(requestedPaymentType) ? requestedPaymentType : allowedPaymentTypes[0] ?? "monthly";
-  const defaultPriceCents =
-    initialPaymentType === "annual"
-      ? target.request.approved_price_annual_cents ?? target.request.program?.price_annual_cents ?? 0
-      : target.request.approved_price_monthly_cents ?? target.request.program?.price_monthly_cents ?? 0;
+  const billingMode = allowedPaymentTypes.includes(requestedPaymentType) ? requestedPaymentType : allowedPaymentTypes[0] ?? "monthly";
+  const defaultPriceCents = requestEffectivePriceCents(billingMode, target.request);
   const defaultPrice = (defaultPriceCents / 100).toFixed(2).replace(/\.00$/, "");
   const [price, setPrice] = useState(defaultPrice === "0" ? "" : defaultPrice);
   const [bypassPayment, setBypassPayment] = useState(false);
-  const [billingMode, setBillingMode] = useState<PaymentType>(initialPaymentType);
-  const [note, setNote] = useState("");
   const studentName = target.request.student?.full_name?.trim() || "this student";
   const title = target.action === "approved" ? "Accept application" : target.action === "waitlisted" ? "Waitlist application" : "Reject application";
   const defaultNote =
@@ -14822,6 +14768,7 @@ function ApplicationDecisionModal({
         : bypassPayment
           ? "Your application was accepted and you have been admitted. Payment By-passed."
           : "Your application was accepted. Complete checkout to activate enrollment.";
+  const [note, setNote] = useState(defaultNote);
 
   function submit() {
     const numericPrice = Math.max(0, Math.round(Number(price || "0") * 100));
@@ -14832,15 +14779,6 @@ function ApplicationDecisionModal({
       priceAnnualCents: target.action === "approved" && !bypassPayment && billingMode === "annual" ? numericPrice : null,
       note: note.trim() || defaultNote,
     });
-  }
-
-  function priceForMode(mode: PaymentType) {
-    const cents =
-      mode === "annual"
-        ? target.request.approved_price_annual_cents ?? target.request.program?.price_annual_cents ?? 0
-        : target.request.approved_price_monthly_cents ?? target.request.program?.price_monthly_cents ?? 0;
-    const value = (cents / 100).toFixed(2).replace(/\.00$/, "");
-    return value === "0" ? "" : value;
   }
 
   return (
@@ -14858,20 +14796,9 @@ function ApplicationDecisionModal({
             </label>
             {!bypassPayment ? (
               <>
-                <div className="grid grid-cols-2 overflow-hidden rounded-[12px] border border-[#D6DCE0]">
-                  {allowedPaymentTypes.map((mode) => (
-                    <button
-                      key={mode}
-                      type="button"
-                      onClick={() => {
-                        setBillingMode(mode);
-                        setPrice(priceForMode(mode));
-                      }}
-                      className={cn("min-h-10 text-sm font-semibold", billingMode === mode ? "bg-[#17624F] text-white" : "bg-white text-[#52616A]")}
-                    >
-                      {mode === "monthly" ? "Monthly" : "Pay in Full"}
-                    </button>
-                  ))}
+                <div>
+                  <span className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">Payment plan chosen by applicant</span>
+                  <p className="mt-1 text-sm font-semibold text-[#26323A]">{billingMode === "monthly" ? "Monthly" : "Pay in Full"}</p>
                 </div>
                 <label className="block">
                   <span className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">{billingMode === "monthly" ? "Monthly price" : "Pay in Full price"}</span>
@@ -14888,7 +14815,6 @@ function ApplicationDecisionModal({
           <textarea
             value={note}
             onChange={(event) => setNote(event.target.value)}
-            placeholder={defaultNote}
             className="mt-1 min-h-28 w-full resize-none rounded-[14px] border border-[#B9C3C8] px-3 py-2 text-sm leading-6 outline-none focus:border-[#2F8FB3]"
           />
         </label>
@@ -16110,7 +16036,15 @@ function trackEffectivePriceCents(track: ProgramTrack, program: Program) {
   return { monthlyCents, annualCents };
 }
 
-function trackPriceLine(track: ProgramTrack | null, program: Program): { label: string; savings: string } | null {
+function requestEffectivePriceCents(paymentType: PaymentType, request: RequestWithContext) {
+  const useOverride = request.track?.pricing_override_enabled;
+  if (paymentType === "annual") {
+    return request.approved_price_annual_cents ?? (useOverride ? request.track?.price_annual_cents : request.program?.price_annual_cents) ?? 0;
+  }
+  return request.approved_price_monthly_cents ?? (useOverride ? request.track?.price_monthly_cents : request.program?.price_monthly_cents) ?? 0;
+}
+
+function trackPriceLine(track: ProgramTrack | null, program: Program, forType?: PaymentType): { label: string; savings: string } | null {
   if (!program.is_paid) {
     return { label: program.payment_kind === "manual" ? "Price determined after review" : "Free", savings: "" };
   }
@@ -16120,12 +16054,37 @@ function trackPriceLine(track: ProgramTrack | null, program: Program): { label: 
   if (!offersMonthly && !offersAnnual) {
     return null;
   }
-  const label = offersMonthly ? `${formatPrice(monthlyCents)}/mo` : `${formatPrice(annualCents)} pay in full`;
+  const useAnnual =
+    forType === "annual" && offersAnnual
+      ? true
+      : forType === "monthly" && offersMonthly
+        ? false
+        : !offersMonthly && offersAnnual;
+  const label = useAnnual ? `${formatPrice(annualCents)} pay in full` : `${formatPrice(monthlyCents)}/mo`;
   const savings =
     offersMonthly && offersAnnual
       ? annualDealText({ price_monthly_cents: monthlyCents, price_annual_cents: annualCents, start_date: program.start_date, end_date: program.end_date, duration_months: program.duration_months })
       : "";
   return { label, savings };
+}
+
+function TrackPriceNumber({ price }: { price: { label: string; savings: string } | null }) {
+  if (!price) {
+    return null;
+  }
+  return <span className="shrink-0 font-mono text-2xl font-black leading-none tracking-tight tabular-nums text-[#17624F]">{price.label}</span>;
+}
+
+function TrackPriceSavings({ price }: { price: { label: string; savings: string } | null }) {
+  if (!price?.savings) {
+    return null;
+  }
+  return (
+    <span className="flex w-[108px] shrink-0 items-start justify-end gap-1 text-right text-[11px] font-medium leading-snug text-[#5B9A85]">
+      <span aria-hidden>✦</span>
+      {price.savings}
+    </span>
+  );
 }
 
 function trackCapacityBadge(track: ProgramTrack, enrolledCountByTrackId: Record<string, number>): { label: string; tone: "full" | "low" } | null {
@@ -16158,7 +16117,7 @@ function ProgramScheduleOptionsDisplay({
       {tracks.length ? (
         <div className="space-y-2">
           {tracks.map((track) => {
-            const schedule = scheduleSummary(track.schedule, null);
+            const scheduleLines = scheduleSessionLines(track.schedule, null);
             const price = program ? trackPriceLine(track, program) : null;
             const capacityBadge = trackCapacityBadge(track, enrolledCountByTrackId);
             return (
@@ -16166,13 +16125,19 @@ function ProgramScheduleOptionsDisplay({
                 {capacityBadge?.tone === "low" ? (
                   <span className="absolute right-0 top-0 rounded-bl-[10px] bg-[#C0392B] px-2 py-1 text-[10px] font-bold uppercase tracking-wide text-white">{capacityBadge.label}</span>
                 ) : null}
-                <p className="text-sm font-semibold text-[#26323A]">{track.name}</p>
-                <p className="mt-1 text-xs font-medium leading-5 text-[#17624F]">{schedule.full}</p>
-                <div className="mt-2 flex flex-wrap items-center gap-2">
-                  {price ? <span className="text-sm font-bold text-[#26323A]">{price.label}</span> : null}
-                  {price?.savings ? <span className="rounded-full bg-[#EAF7F1] px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[#17624F]">{price.savings}</span> : null}
-                  {capacityBadge?.tone === "full" ? <span className="rounded-full bg-[#E1E8EC] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#7B858C]">Full</span> : null}
+                <div className="flex items-start justify-between gap-3">
+                  <p className="min-w-0 flex-1 text-sm font-semibold text-[#26323A]">{track.name}</p>
+                  <TrackPriceNumber price={price} />
                 </div>
+                <div className="mt-1 flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1 space-y-0.5">
+                    {scheduleLines.map((line) => (
+                      <p key={line} className="text-xs font-medium leading-5 text-[#17624F]">{line}</p>
+                    ))}
+                  </div>
+                  <TrackPriceSavings price={price} />
+                </div>
+                {capacityBadge?.tone === "full" ? <span className="mt-2 inline-block rounded-full bg-[#E1E8EC] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#7B858C]">Full</span> : null}
               </div>
             );
           })}
@@ -16180,16 +16145,21 @@ function ProgramScheduleOptionsDisplay({
       ) : (
         (() => {
           const price = program ? trackPriceLine(null, program) : null;
+          const scheduleLines = fallbackSchedule ? [fallbackSchedule] : ["Schedule will be announced"];
           return (
             <div className="rounded-[14px] bg-[#F7FAFB] p-3 ring-1 ring-[#E6ECEF]">
-              <p className="text-sm font-semibold text-[#26323A]">Class schedule</p>
-              <p className="mt-1 text-xs font-medium leading-5 text-[#17624F]">{fallbackSchedule}</p>
-              {price ? (
-                <div className="mt-2 flex flex-wrap items-center gap-2">
-                  <span className="text-sm font-bold text-[#26323A]">{price.label}</span>
-                  {price.savings ? <span className="rounded-full bg-[#EAF7F1] px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[#17624F]">{price.savings}</span> : null}
+              <div className="flex items-start justify-between gap-3">
+                <p className="min-w-0 flex-1 text-sm font-semibold text-[#26323A]">Class schedule</p>
+                <TrackPriceNumber price={price} />
+              </div>
+              <div className="mt-1 flex items-start justify-between gap-3">
+                <div className="min-w-0 flex-1 space-y-0.5">
+                  {scheduleLines.map((line) => (
+                    <p key={line} className="text-xs font-medium leading-5 text-[#17624F]">{line}</p>
+                  ))}
                 </div>
-              ) : null}
+                <TrackPriceSavings price={price} />
+              </div>
             </div>
           );
         })()
@@ -16239,6 +16209,8 @@ function ProgramPaymentOptionsDisplay({ program }: { program: Program }) {
   );
 }
 
+const PAYMENT_TYPE_LABEL: Record<PaymentType, string> = { monthly: "Monthly", annual: "Pay in Full" };
+
 function ProgramPaymentOptionSelector({
   program,
   selectedPaymentType,
@@ -16248,38 +16220,28 @@ function ProgramPaymentOptionSelector({
   selectedPaymentType: PaymentType;
   onChange: (type: PaymentType) => void;
 }) {
-  const options = programPaymentOptions(program);
-  if (!program.is_paid || options.length <= 1) {
+  const offeredTypes = programOfferedPaymentTypes(program);
+  if (offeredTypes.length <= 1) {
     return null;
   }
   return (
     <div className="space-y-2">
-      <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">Choose payment</p>
-      {options.map((option) => {
-        const selected = option.type === selectedPaymentType;
+      {offeredTypes.map((type) => {
+        const selected = type === selectedPaymentType;
         return (
           <button
-            key={option.type}
+            key={type}
             type="button"
-            onClick={() => onChange(option.type)}
+            onClick={() => onChange(type)}
             className={cn(
-              "w-full rounded-[14px] border p-3 text-left transition",
+              "flex w-full items-center gap-2 rounded-[14px] border p-3 text-left transition",
               selected ? "border-[#17624F] bg-[#EAF7F1] ring-1 ring-[#17624F]" : "border-[#D6DCE0] bg-[#F8FBFC] hover:border-[#9EC8D5]",
             )}
           >
-            <span className="flex items-start gap-2">
-              <span className={cn("mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-[6px] border text-[11px]", selected ? "border-[#17624F] bg-[#17624F] text-white" : "border-[#B9C3C8] bg-white text-transparent")}>
-                <CheckIcon />
-              </span>
-              <span className="min-w-0 flex-1">
-                <span className="flex items-center justify-between gap-2">
-                  <span className="text-sm font-semibold text-[#26323A]">{option.title}</span>
-                  <span className="text-xs font-bold text-[#17624F]">{option.price}</span>
-                </span>
-                {option.badge ? <span className="mt-1 inline-flex rounded-full bg-white px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[#17624F]">{option.badge}</span> : null}
-                <span className="mt-1 block text-xs leading-5 text-[#6B747B]">{option.subtitle}</span>
-              </span>
+            <span className={cn("flex h-5 w-5 shrink-0 items-center justify-center rounded-[6px] border text-[11px]", selected ? "border-[#17624F] bg-[#17624F] text-white" : "border-[#B9C3C8] bg-white text-transparent")}>
+              <CheckIcon />
             </span>
+            <span className="text-sm font-semibold text-[#26323A]">{PAYMENT_TYPE_LABEL[type]}</span>
           </button>
         );
       })}
@@ -16377,12 +16339,14 @@ function ProgramTrackSelector({
   selectedTrackIds,
   program,
   enrolledCountByTrackId = {},
+  selectedPaymentType,
   onToggle,
 }: {
   tracks: ProgramTrack[];
   selectedTrackIds: string[];
-  program: Pick<Program, "track_selection_mode" | "track_selection_count">;
+  program: Program;
   enrolledCountByTrackId?: Record<string, number>;
+  selectedPaymentType?: PaymentType;
   onToggle: (trackId: string) => void;
 }) {
   const ruleText = trackSelectionRuleText(program, tracks.length);
@@ -16392,9 +16356,10 @@ function ProgramTrackSelector({
       <div className="space-y-2">
         {tracks.map((track) => {
           const selected = selectedTrackIds.includes(track.id);
-          const schedule = scheduleSummary(track.schedule, null);
+          const scheduleLines = scheduleSessionLines(track.schedule, null);
           const capacityBadge = trackCapacityBadge(track, enrolledCountByTrackId);
           const full = capacityBadge?.tone === "full";
+          const price = trackPriceLine(track, program, selectedPaymentType);
           return (
             <button
               key={track.id}
@@ -16402,24 +16367,31 @@ function ProgramTrackSelector({
               onClick={() => (full ? undefined : onToggle(track.id))}
               disabled={full}
               className={cn(
-                "w-full rounded-[14px] border p-3 text-left transition",
+                "relative w-full overflow-hidden rounded-[14px] p-3 text-left ring-1 transition",
                 full
-                  ? "cursor-not-allowed border-[#E1E8EC] bg-[#F3F4F5] opacity-70"
+                  ? "cursor-not-allowed bg-[#F3F4F5] opacity-75 ring-[#E1E8EC]"
                   : selected
-                    ? "border-[#17624F] bg-[#EAF7F1] ring-1 ring-[#17624F]"
-                    : "border-[#D6DCE0] bg-[#F8FBFC] hover:border-[#9EC8D5]",
+                    ? "bg-[#EAF7F1] ring-2 ring-[#17624F]"
+                    : "bg-[#F7FAFB] ring-[#E6ECEF] hover:ring-[#9EC8D5]",
               )}
             >
-              <span className="flex items-center justify-between gap-2">
-                <span className="flex items-center gap-2 text-sm font-semibold text-[#26323A]">
-                  <span className={cn("flex h-5 w-5 items-center justify-center rounded-[6px] border text-[11px]", selected ? "border-[#17624F] bg-[#17624F] text-white" : "border-[#B9C3C8] bg-white text-transparent")}>✓</span>
-                  {track.name}
-                </span>
-                {full ? <span className="rounded-full bg-[#E1E8EC] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#7B858C]">Full</span> : null}
-                {capacityBadge?.tone === "low" ? <span className="rounded-full bg-[#C0392B] px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white">{capacityBadge.label}</span> : null}
+              {capacityBadge?.tone === "low" ? (
+                <span className="absolute right-0 top-0 rounded-bl-[10px] bg-[#C0392B] px-2 py-1 text-[10px] font-bold uppercase tracking-wide text-white">{capacityBadge.label}</span>
+              ) : null}
+              <span className="flex items-start justify-between gap-3">
+                <span className="min-w-0 flex-1 text-sm font-semibold text-[#26323A]">{track.name}</span>
+                <TrackPriceNumber price={price} />
               </span>
               {track.description ? <span className="mt-1 block text-xs leading-5 text-[#52616A]">{track.description}</span> : null}
-              <span className="mt-1 block pl-7 text-xs font-medium text-[#17624F]">{schedule.full}</span>
+              <span className="mt-1 flex items-start justify-between gap-3">
+                <span className="block min-w-0 flex-1 space-y-0.5">
+                  {scheduleLines.map((line) => (
+                    <span key={line} className="block text-xs font-medium leading-5 text-[#17624F]">{line}</span>
+                  ))}
+                </span>
+                <TrackPriceSavings price={price} />
+              </span>
+              {full ? <span className="mt-2 inline-block rounded-full bg-[#E1E8EC] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#7B858C]">Full</span> : null}
             </button>
           );
         })}
@@ -16579,8 +16551,6 @@ function ProgramCardGrid({
   emptyText,
   enrolledProgramIds = [],
   detailBaseHref,
-  accountType,
-  viewerProfiles = [],
   applicationStatusByProgramId,
 }: {
   programs: ProgramWithTeacher[];
@@ -16588,8 +16558,6 @@ function ProgramCardGrid({
   emptyText: string;
   enrolledProgramIds?: string[];
   detailBaseHref?: string;
-  accountType?: string | null;
-  viewerProfiles?: StudentDisplay[];
   applicationStatusByProgramId?: Record<string, ApplicantApplicationRow>;
 }) {
   if (programs.length === 0) {
@@ -16599,14 +16567,6 @@ function ProgramCardGrid({
   return (
     <div className="grid gap-4 bg-[var(--workspace)] p-4 md:grid-cols-2 lg:grid-cols-3">
       {programs.map((program) => {
-        const eligibleCount = viewerProfiles.filter((profile) => isProfileEligibleForProgram(profile, program).eligible).length;
-        const eligibilityLabel = accountType === "parent" && viewerProfiles.length
-          ? `${eligibleCount}/${viewerProfiles.length} family members (including you) are eligible for this program.`
-          : viewerProfiles.length
-            ? eligibleCount > 0 ? "You are eligible." : "You are not eligible."
-            : undefined;
-        const eligibilityTone: "positive" | "negative" | undefined =
-          accountType !== "parent" && viewerProfiles.length ? (eligibleCount > 0 ? "positive" : "negative") : undefined;
         const applicationRow = applicationStatusByProgramId?.[program.id];
         const enrolled = enrolledProgramIds.includes(program.id);
         const relationship = enrolled
@@ -16620,8 +16580,6 @@ function ProgramCardGrid({
             program={program}
             enrolled={enrolled}
             detailHref={`${detailBaseHref ?? `/m/${mosqueSlug}/programs`}/${program.id}`}
-            eligibilityLabel={eligibilityLabel}
-            eligibilityTone={eligibilityTone}
             relationship={relationship}
           />
         );
@@ -17027,15 +16985,11 @@ function ProgramCard({
   program,
   detailHref,
   enrolled = false,
-  eligibilityLabel,
-  eligibilityTone,
   relationship,
 }: {
   program: ProgramWithTeacher;
   detailHref: string;
   enrolled?: boolean;
-  eligibilityLabel?: string;
-  eligibilityTone?: "positive" | "negative";
   relationship?: { label: string; tone: "open" | "waitlist" | "closed" } | null;
 }) {
   const registration = relationship ?? programRegistrationLabel(program);
@@ -17080,14 +17034,6 @@ function ProgramCard({
               <p className="mt-1 text-right text-[#C0392B]">Closes {formatFinanceShortDate(program.application_close_at)}</p>
             ) : null}
           </div>
-          {eligibilityLabel ? (
-            <div className="flex items-center justify-between gap-3 rounded-[10px] bg-[#F5F8F9] px-3 py-2">
-              <span className="text-[#6B747B]">Eligibility</span>
-              <span className={cn("text-right", eligibilityTone === "positive" ? "text-[#17624F]" : eligibilityTone === "negative" ? "text-[#C83F31]" : "text-[#26323A]")}>
-                {eligibilityLabel}
-              </span>
-            </div>
-          ) : null}
         </div>
       </div>
     </TransitionLink>
@@ -17756,7 +17702,7 @@ function TeacherClassCard({
         <div className="divide-y divide-[#E3E8EC] border-t border-[#E3E8EC]">
           <TeacherActionLink href={publicHref} icon={<ExternalLinkIcon />} label="View Public Page" previewLabel="Class Details" />
           <TeacherActionLink href={`${classBasePath}/${program.id}/students`} icon={<StudentsIcon />} label="Students" count={counts?.students} />
-          {isDirector ? <TeacherActionLink href={`${classBasePath}/${program.id}/applications`} icon={<ClipboardIcon />} label="Manage Applications" count={counts?.applications} /> : null}
+          {isDirector ? <TeacherActionLink href={`${classBasePath}/${program.id}/applications`} icon={<ClipboardIcon />} label="Manage Applications" count={counts?.applications} urgent /> : null}
           {isDirector ? <TeacherActionLink href={`${classBasePath}/${program.id}/instructors`} icon={<InstructorManageIcon />} label="Instructors" count={counts?.instructors} /> : null}
           <TeacherActionLink href={`${classBasePath}/${program.id}/announcement`} icon={<MegaphoneIcon />} label="Announcement" />
           {canManageFinances ? <TeacherActionLink href={`${classBasePath}/${program.id}/finances`} icon={<FinanceIcon />} label="Manage Finances" /> : null}
@@ -17795,22 +17741,22 @@ function programLessonColor(programId: string) {
   return `hsl(${hue} ${saturation}% ${lightness}%)`;
 }
 
-function TeacherActionLink({ href, icon, label, previewLabel, count }: { href: string; icon: ReactNode; label: string; previewLabel?: string; count?: number }) {
+function TeacherActionLink({ href, icon, label, previewLabel, count, urgent }: { href: string; icon: ReactNode; label: string; previewLabel?: string; count?: number; urgent?: boolean }) {
   return (
     <TransitionLink href={href} label={previewLabel ?? label} className="group flex min-h-[58px] items-center gap-3 text-sm font-semibold text-[#26323A] transition hover:bg-[#F7FAFB]">
       <span className="flex h-10 w-10 shrink-0 items-center justify-center text-[#26323A] transition group-hover:text-[#17624F]" aria-hidden>
         {icon}
       </span>
       <span className="min-w-0 flex-1 text-left leading-5">{label}</span>
-      {count ? <ActionRowCount count={count} /> : null}
+      {count ? <ActionRowCount count={count} urgent={urgent} /> : null}
       <ChevronRightIcon className="text-[#9AA4AA]" />
     </TransitionLink>
   );
 }
 
-function ActionRowCount({ count }: { count: number }) {
+function ActionRowCount({ count, urgent }: { count: number; urgent?: boolean }) {
   return (
-    <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-[#EDF1F2] px-1.5 text-[11px] font-semibold leading-none text-[#6B747B]">
+    <span className={cn("flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[11px] font-semibold leading-none", urgent ? "bg-[#C0392B] text-white" : "bg-[#EDF1F2] text-[#6B747B]")}>
       {count > 99 ? "99+" : count}
     </span>
   );
@@ -19067,7 +19013,7 @@ function formatPrice(cents: number | null) {
     return "Free";
   }
 
-  return new Intl.NumberFormat("en-US", {
+  return new Intl.NumberFormat("en-CA", {
     style: "currency",
     currency: "CAD",
     maximumFractionDigits: 0,
@@ -19081,6 +19027,20 @@ type ProgramPaymentOptionsInput = Pick<
 
 function programPayInFullDurationMonths(program: Pick<Program, "start_date" | "end_date" | "duration_months">) {
   return monthsBetweenDates(program.start_date ?? "", program.end_date ?? "") ?? program.duration_months ?? null;
+}
+
+function programOfferedPaymentTypes(program: Pick<Program, "is_paid" | "offers_monthly_payment" | "offers_annual_payment" | "is_ongoing">): PaymentType[] {
+  if (!program.is_paid) {
+    return [];
+  }
+  const types: PaymentType[] = [];
+  if (program.offers_monthly_payment !== false) {
+    types.push("monthly");
+  }
+  if (!program.is_ongoing && program.offers_annual_payment) {
+    types.push("annual");
+  }
+  return types;
 }
 
 function programPaymentOptions(program: ProgramPaymentOptionsInput) {
@@ -19132,8 +19092,7 @@ function annualDealText(program: Pick<Program, "price_monthly_cents" | "price_an
     return "";
   }
   const savings = monthlyTotal - annual;
-  const percent = Math.round((savings / monthlyTotal) * 100);
-  return `Save ${formatPrice(savings)}${percent > 0 ? ` ` : ""}`;
+  return `Save ${formatPrice(savings)} by paying in full`;
 }
 
 function mosqueSlugLabel(mosque: Pick<Mosque, "slug" | "name"> | null | undefined) {
@@ -19153,12 +19112,7 @@ function monthlyDealText(program: Pick<Program, "price_monthly_cents" | "price_a
   if (!monthlyTotal || !annual || monthlyTotal >= annual) {
     return "";
   }
-  return `Save ${formatPrice(annual - monthlyTotal)}`;
-}
-
-function defaultPaymentType(program: ProgramPaymentOptionsInput): PaymentType {
-  const options = programPaymentOptions(program);
-  return options[0]?.type ?? "monthly";
+  return `Save ${formatPrice(annual - monthlyTotal)} by paying monthly`;
 }
 
 function getWhatsAppHref(phoneNumber: string | null | undefined) {
@@ -19472,6 +19426,17 @@ function scheduleSummary(schedule: Json | null, notes: string | null) {
   const time = scheduleTime(schedule);
   const full = notes || (time === "TBA" ? day : `${day}, ${time}`);
   return { day, time, full };
+}
+
+function scheduleSessionLines(schedule: Json | null, notes: string | null): string[] {
+  if (notes) {
+    return [notes];
+  }
+  const rows = parseProgramSchedule(schedule);
+  if (rows.length === 0) {
+    return ["Schedule will be announced"];
+  }
+  return rows.map((row) => `${row.day}, ${formatScheduleRange(row.start, row.end)}`);
 }
 
 function mockProgramDescription(title: string) {

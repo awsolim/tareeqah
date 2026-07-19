@@ -48,9 +48,10 @@ export function DesktopSidebar({
   const teacherInboxHref = `/m/${mosqueSlug}/teacher/inbox`;
   const showStudentBadges = Boolean((mobileNavItems ?? navItems).some((item) => item.label === "Inbox" && item.href === portalInboxHref));
   const showTeacherBadges = Boolean((mobileNavItems ?? navItems).some((item) => item.label === "Inbox" && item.href === teacherInboxHref));
-  const { totalCount: studentTotalCount } = useStudentNotificationCounts(showStudentBadges ? mosqueSlug : "");
-  const { totalCount: teacherTotalCount } = useTeacherNotificationCounts(showTeacherBadges ? mosqueSlug : "");
+  const { totalCount: studentTotalCount, actionRequired: studentActionRequired } = useStudentNotificationCounts(showStudentBadges ? mosqueSlug : "");
+  const { totalCount: teacherTotalCount, actionRequired: teacherActionRequired } = useTeacherNotificationCounts(showTeacherBadges ? mosqueSlug : "");
   const inboxBadgeCount = showStudentBadges ? studentTotalCount : showTeacherBadges ? teacherTotalCount : 0;
+  const inboxActionRequired = showStudentBadges ? studentActionRequired : showTeacherBadges ? teacherActionRequired : false;
 
   const visibleItems = useMemo(() => buildDesktopItems(section, mosqueSlug), [section, mosqueSlug]);
   const accountHref = accountHrefForSection(section, mosqueSlug);
@@ -91,14 +92,16 @@ export function DesktopSidebar({
 
         {visibleItems.map((item) => {
           const active = isNavItemActive(pathname, item);
-          const badgeCount = item.label === "Inbox" || item.label === "Announcements" ? inboxBadgeCount : 0;
+          const isInboxItem = item.label === "Inbox" || item.label === "Announcements";
+          const badgeCount = isInboxItem ? inboxBadgeCount : 0;
+          const actionRequired = isInboxItem ? inboxActionRequired : false;
           const label = desktopLabel(item.label);
           const subItems = buildDesktopSubItems(label, section, mosqueSlug, accountHref);
           const subItemActive = subItems.some((subItem) => isHrefActive(pathname, searchParams, subItem.href));
 
           if (label === "Me" || subItems.length) {
             return (
-              <DesktopNavGroup key={`${item.label}-${item.href}`} item={item} active={active || subItemActive} badgeCount={badgeCount}>
+              <DesktopNavGroup key={`${item.label}-${item.href}`} item={item} active={active || subItemActive} badgeCount={badgeCount} actionRequired={actionRequired}>
                 {label === "Me" ? (
                   <DesktopAccountSubnav mosqueSlug={mosqueSlug} accountHref={accountHref} />
                 ) : (
@@ -119,7 +122,7 @@ export function DesktopSidebar({
             >
               <SidebarIcon label={item.label} />
               <span className="min-w-0 flex-1 truncate">{label}</span>
-              {badgeCount ? <Badge count={badgeCount} /> : null}
+              <Badge count={badgeCount} actionRequired={actionRequired} />
             </Link>
           );
         })}
@@ -133,7 +136,7 @@ export function DesktopSidebar({
   );
 }
 
-function DesktopNavGroup({ item, active, badgeCount, children }: { item: NavItem; active: boolean; badgeCount: number; children: ReactNode }) {
+function DesktopNavGroup({ item, active, badgeCount, actionRequired = false, children }: { item: NavItem; active: boolean; badgeCount: number; actionRequired?: boolean; children: ReactNode }) {
   const [open, setOpen] = useState(active);
   const label = desktopLabel(item.label);
 
@@ -156,7 +159,7 @@ function DesktopNavGroup({ item, active, badgeCount, children }: { item: NavItem
       >
         <SidebarIcon label={item.label} />
         <span className="min-w-0 flex-1 truncate">{label}</span>
-        {badgeCount ? <Badge count={badgeCount} /> : null}
+        <Badge count={badgeCount} actionRequired={actionRequired} />
         <SidebarChevron expanded={open} />
       </button>
       {open ? <div className="mt-1 border-l border-[#D6DCE0] pl-4">{children}</div> : null}
@@ -576,8 +579,14 @@ function isHrefActive(pathname: string, searchParams: SearchParamReader, href: s
   return true;
 }
 
-function Badge({ count }: { count: number }) {
-  return <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-[#E25241] px-1 text-[11px] font-semibold leading-none text-white">{count > 9 ? "9+" : count}</span>;
+function Badge({ count, actionRequired = false }: { count?: number; actionRequired?: boolean }) {
+  if (count) {
+    return <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-[#E25241] px-1 text-[11px] font-semibold leading-none text-white">{count > 9 ? "9+" : count}</span>;
+  }
+  if (actionRequired) {
+    return <span className="h-2.5 w-2.5 rounded-full bg-[#2F8FB3]" />;
+  }
+  return null;
 }
 
 function SidebarLogo({ src, name }: { src: string | null; name: string }) {
