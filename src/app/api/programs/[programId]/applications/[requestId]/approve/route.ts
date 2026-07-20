@@ -9,6 +9,7 @@ type ApproveRequestBody = {
   priceMonthlyCents?: number | null;
   priceAnnualCents?: number | null;
   paymentBypassed?: boolean;
+  paymentBypassedExternal?: boolean;
   note?: string | null;
 };
 
@@ -56,6 +57,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
     }
 
     const paymentBypassed = Boolean(body.paymentBypassed);
+    const paymentBypassedExternal = paymentBypassed && Boolean(body.paymentBypassedExternal);
     const approvalPaymentType = body.paymentType ?? (enrollmentRequest.payment_type === "annual" ? "annual" : "monthly");
     const approvalPrice = approvalPaymentType === "annual" ? body.priceAnnualCents : body.priceMonthlyCents;
     if (program.is_paid && !paymentBypassed && (approvalPrice ?? 0) < 50) {
@@ -79,6 +81,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
         approved_price_monthly_cents: paymentBypassed ? 0 : approvalPaymentType === "monthly" ? body.priceMonthlyCents ?? program.price_monthly_cents ?? null : null,
         approved_price_annual_cents: paymentBypassed ? 0 : approvalPaymentType === "annual" ? body.priceAnnualCents ?? program.price_annual_cents ?? null : null,
         payment_bypassed: paymentBypassed,
+        payment_bypass_external: paymentBypassedExternal,
         // Enrollment never activates on approval alone — only after the parent/student
         // completes Registration Confirmation (free/waived) or Stripe payment (paid).
         admission_completed_at: null,
@@ -92,7 +95,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
     const { data: student } = await supabase.from("profiles").select("full_name, email").eq("id", enrollmentRequest.student_profile_id).maybeSingle();
     const label = student?.full_name || student?.email || "this student";
     const summary = paymentBypassed
-      ? `Application approved for ${label} — payment waived.`
+      ? paymentBypassedExternal
+        ? `Application approved for ${label} — payment marked as paid externally.`
+        : `Application approved for ${label} — payment waived.`
       : program.is_paid
         ? `Application approved for ${label} at $${((approvalPrice ?? 0) / 100).toFixed(2)} ${approvalPaymentType === "annual" ? "(Pay in Full)" : "/month"}.`
         : `Application approved for ${label}.`;
@@ -102,7 +107,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
       actorProfileId: user.id,
       eventType: "application_approved",
       summary,
-      metadata: { paymentType: approvalPaymentType, paymentBypassed },
+      metadata: { paymentType: approvalPaymentType, paymentBypassed, paymentBypassedExternal },
     });
 
     return Response.json({ ok: true });

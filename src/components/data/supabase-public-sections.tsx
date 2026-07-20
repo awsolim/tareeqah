@@ -17,6 +17,7 @@ import type { Database, Json } from "@/lib/supabase/types";
 import { cn } from "@/lib/utils";
 import { deriveLifecycleStatus, getApplicationButtonState, getProgramPrimaryCta, getProgramStatusBadges, isPubliclyListed, toProgramStatusFields, validateProgramStatusCombination, type ApplicationStatus as ProgramApplicationStatus, type LifecycleStatus as ProgramLifecycleStatus, type PublicationStatus as ProgramPublicationStatus, type ProgramStatusFields } from "@/lib/programs/status";
 import {
+  applicationNeedsAction,
   applicationStatusTone,
   getApplicationPaymentStatus,
   getApplicationRowActions,
@@ -103,7 +104,7 @@ type ProgramBuilderStatus = {
   location: string;
   room: string;
   roomArea: string;
-  paymentKind: "free" | "tareeqah" | "manual";
+  paymentKind: "free" | "tareeqah";
   billingStartBehavior: "on_payment" | "program_start";
   billingEndBehavior: "manual_cancel" | "program_end" | "fixed_months";
   billingDurationMonths: string;
@@ -439,10 +440,6 @@ const fallbackDevSwitchAccounts: DevSwitchAccount[] = [
 
 const devSwitchAccountsStorageKey = "tareeqah:dev-switch-accounts";
 const seenStudentRequestsStorageKey = "tareeqah:seen-student-request-notifications";
-const seenTeacherRequestsStorageKey = "tareeqah:seen-teacher-request-notifications";
-const seenTeacherInstructorNotificationsStorageKey = "tareeqah:seen-teacher-instructor-notifications";
-const seenTeacherWithdrawalsStorageKey = "tareeqah:seen-teacher-withdrawal-notifications";
-const dismissedTeacherInstructorUpdatesStorageKey = "tareeqah:dismissed-teacher-instructor-updates";
 const editorToastStorageKey = "tareeqah:editor-toast";
 
 function getAnnouncementTargetTrackIds(announcement: Pick<AnnouncementWithContext, "target_program_track_ids">) {
@@ -533,6 +530,52 @@ function markNotificationIdsSeen(storageKey: string, userId: string | null | und
 
   window.dispatchEvent(new Event("tareeqah:notifications-changed"));
   return nextSeen;
+}
+
+/**
+ * Durable, per-account notification "seen"/"dismissed" state for the teacher Inbox
+ * (applications, withdrawals, instructors) — replaces the localStorage-only tracking above
+ * for these categories, since that couldn't follow an account across browsers/devices.
+ */
+async function fetchTeacherNotificationState(userId: string | null | undefined): Promise<{ seen: Set<string>; dismissed: Set<string> }> {
+  if (!userId) {
+    return { seen: new Set(), dismissed: new Set() };
+  }
+  const supabase = createSupabaseBrowserClient();
+  const { data } = await supabase.from("teacher_notification_state").select("notification_key, seen_at, dismissed_at").eq("user_id", userId);
+  const seen = new Set((data ?? []).filter((row) => row.seen_at).map((row) => row.notification_key));
+  const dismissed = new Set((data ?? []).filter((row) => row.dismissed_at).map((row) => row.notification_key));
+  return { seen, dismissed };
+}
+
+async function markTeacherNotificationsSeen(userId: string | null | undefined, keys: string[]) {
+  if (!userId || keys.length === 0) {
+    return;
+  }
+  const supabase = createSupabaseBrowserClient();
+  const now = new Date().toISOString();
+  await supabase
+    .from("teacher_notification_state")
+    .upsert(
+      keys.map((key) => ({ user_id: userId, notification_key: key, seen_at: now })),
+      { onConflict: "user_id,notification_key" },
+    );
+  window.dispatchEvent(new Event("tareeqah:notifications-changed"));
+}
+
+async function markTeacherNotificationsDismissed(userId: string | null | undefined, keys: string[]) {
+  if (!userId || keys.length === 0) {
+    return;
+  }
+  const supabase = createSupabaseBrowserClient();
+  const now = new Date().toISOString();
+  await supabase
+    .from("teacher_notification_state")
+    .upsert(
+      keys.map((key) => ({ user_id: userId, notification_key: key, seen_at: now, dismissed_at: now })),
+      { onConflict: "user_id,notification_key" },
+    );
+  window.dispatchEvent(new Event("tareeqah:notifications-changed"));
 }
 
 function studentRequestNotificationKey(request: Pick<EnrollmentRequest, "id" | "status" | "reviewed_at" | "requested_at">) {
@@ -4142,6 +4185,7 @@ export function TeacherInboxData({ slug }: { slug: string }) {
   const [selectedAnnouncementTargetValue, setSelectedAnnouncementTargetValue] = useState("");
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [seenRequestIds, setSeenRequestIds] = useState<Set<string>>(new Set());
+  const [dismissedNotificationIds, setDismissedNotificationIds] = useState<Set<string>>(new Set());
   const [busyWithdrawalId, setBusyWithdrawalId] = useState<string | null>(null);
   const [toast, setToast] = useState<EditorToastState | null>(null);
   const [loading, setLoading] = useState(true);
@@ -4161,17 +4205,16 @@ export function TeacherInboxData({ slug }: { slug: string }) {
     if (!userId) {
       setCurrentUserId(null);
       setSeenRequestIds(new Set());
+      setDismissedNotificationIds(new Set());
       setCanReviewRequests(false);
       setLoading(false);
       return;
     }
 
     setCurrentUserId(userId);
-    setSeenRequestIds(new Set([
-      ...readSeenNotificationIds(seenTeacherRequestsStorageKey, userId),
-      ...readSeenNotificationIds(seenTeacherInstructorNotificationsStorageKey, userId),
-      ...readSeenNotificationIds(seenTeacherWithdrawalsStorageKey, userId),
-    ]));
+    const { seen: initialSeenIds, dismissed: initialDismissedIds } = await fetchTeacherNotificationState(userId);
+    setSeenRequestIds(initialSeenIds);
+    setDismissedNotificationIds(initialDismissedIds);
     const { data: mosque } = await supabase.from("mosques").select("id").eq("slug", slug).maybeSingle();
     if (!mosque) {
       setLoading(false);
@@ -4329,11 +4372,8 @@ export function TeacherInboxData({ slug }: { slug: string }) {
         program: teacherPrograms.find((program) => program.id === notification.program_id) ?? null,
         instructor: notification.teacher_profile_id ? ((instructorProfiles ?? []).find((profile) => profile.id === notification.teacher_profile_id) as Profile | undefined) ?? null : null,
       }));
-    const dismissedInstructorUpdateIds = readSeenNotificationIds(dismissedTeacherInstructorUpdatesStorageKey, userId);
     setInstructorNotifications(
-      [...instructorEventNotifications, ...fallbackJoinNotifications]
-        .filter((notification) => !dismissedInstructorUpdateIds.has(teacherInstructorNotificationKey(notification)))
-        .sort((a, b) => Date.parse(b.created_at ?? "0") - Date.parse(a.created_at ?? "0")),
+      [...instructorEventNotifications, ...fallbackJoinNotifications].sort((a, b) => Date.parse(b.created_at ?? "0") - Date.parse(a.created_at ?? "0")),
     );
     setLoading(false);
   }
@@ -4436,14 +4476,41 @@ export function TeacherInboxData({ slug }: { slug: string }) {
     await loadTeacherInbox();
   }
 
-  function clearAllInstructorUpdates() {
-    if (!instructorNotificationIds.length) {
+  async function clearPastWithdrawal(requestId: string) {
+    setError(null);
+    const { error: clearError } = await createSupabaseBrowserClient()
+      .from("withdrawal_requests")
+      .update({ teacher_dismissed_at: new Date().toISOString() })
+      .eq("id", requestId);
+
+    if (clearError) {
+      setError(clearError.message);
       return;
     }
-    markNotificationIdsSeen(dismissedTeacherInstructorUpdatesStorageKey, currentUserId, instructorNotificationIds);
-    const updated = markNotificationIdsSeen(seenTeacherInstructorNotificationsStorageKey, currentUserId, instructorNotificationIds);
-    setSeenRequestIds((current) => new Set([...current, ...updated]));
-    setInstructorNotifications([]);
+
+    setWithdrawals((current) => current.filter((request) => request.id !== requestId));
+    window.dispatchEvent(new Event("tareeqah:notifications-changed"));
+  }
+
+  async function clearAllPastWithdrawals() {
+    const pastWithdrawalIds = pastWithdrawals.map((request) => request.id);
+    if (!pastWithdrawalIds.length) {
+      return;
+    }
+
+    setError(null);
+    const { error: clearError } = await createSupabaseBrowserClient()
+      .from("withdrawal_requests")
+      .update({ teacher_dismissed_at: new Date().toISOString() })
+      .in("id", pastWithdrawalIds);
+
+    if (clearError) {
+      setError(clearError.message);
+      return;
+    }
+
+    setWithdrawals((current) => current.filter((request) => !pastWithdrawalIds.includes(request.id)));
+    window.dispatchEvent(new Event("tareeqah:notifications-changed"));
   }
 
   const pendingRequests = requests.filter((request) => request.status === "pending");
@@ -4451,7 +4518,11 @@ export function TeacherInboxData({ slug }: { slug: string }) {
   const completedAdmissionRequests = pastRequests.filter((request) => request.admission_completed_at && !request.teacher_dismissed_at);
   const pendingWithdrawals = withdrawals.filter((request) => request.status === "pending");
   const pastWithdrawals = withdrawals.filter((request) => request.status !== "pending");
-  const unseenInstructorCount = instructorNotifications.filter((notification) => !seenRequestIds.has(teacherInstructorNotificationKey(notification))).length;
+  const newInstructorNotifications = instructorNotifications.filter((notification) => !seenRequestIds.has(teacherInstructorNotificationKey(notification)));
+  const pastInstructorNotifications = instructorNotifications.filter(
+    (notification) => seenRequestIds.has(teacherInstructorNotificationKey(notification)) && !dismissedNotificationIds.has(teacherInstructorNotificationKey(notification)),
+  );
+  const unseenInstructorCount = newInstructorNotifications.length;
   const unseenPendingRequestCount = [...pendingRequests, ...completedAdmissionRequests].filter((request) => !seenRequestIds.has(teacherRequestNotificationKey(request))).length;
   const unseenWithdrawalCount = pendingWithdrawals.filter((request) => !seenRequestIds.has(studentWithdrawalNotificationKey(request))).length;
   const selectedProgram = programs.find((program) => program.id === selectedProgramId);
@@ -4463,48 +4534,60 @@ export function TeacherInboxData({ slug }: { slug: string }) {
     })),
   ]);
   const requestNotificationIds = requests.map(teacherRequestNotificationKey);
-  const instructorNotificationIds = instructorNotifications.map(teacherInstructorNotificationKey);
+  const newInstructorNotificationIds = newInstructorNotifications.map(teacherInstructorNotificationKey);
   const withdrawalNotificationIds = pendingWithdrawals.map(studentWithdrawalNotificationKey);
   const pendingRequestIdsKey = requestNotificationIds.join("|");
-  const instructorIdsKey = instructorNotificationIds.join("|");
+  const instructorIdsKey = newInstructorNotificationIds.join("|");
   const withdrawalIdsKey = withdrawalNotificationIds.join("|");
 
   useEffect(() => {
     if (!loading && tab === "requests" && pendingRequestIdsKey) {
-      const updated = markNotificationIdsSeen(seenTeacherRequestsStorageKey, currentUserId, pendingRequestIdsKey.split("|"));
-      setSeenRequestIds((current) => new Set([...current, ...updated]));
+      const keys = pendingRequestIdsKey.split("|");
+      setSeenRequestIds((current) => new Set([...current, ...keys]));
+      void markTeacherNotificationsSeen(currentUserId, keys);
     }
   }, [currentUserId, loading, pendingRequestIdsKey, tab]);
 
   useEffect(() => {
     if (!loading && tab === "instructors" && instructorIdsKey) {
-      const updated = markNotificationIdsSeen(seenTeacherInstructorNotificationsStorageKey, currentUserId, instructorIdsKey.split("|"));
-      setSeenRequestIds((current) => new Set([...current, ...updated]));
+      const keys = instructorIdsKey.split("|");
+      setSeenRequestIds((current) => new Set([...current, ...keys]));
+      void markTeacherNotificationsSeen(currentUserId, keys);
     }
   }, [currentUserId, instructorIdsKey, loading, tab]);
 
   useEffect(() => {
     if (!loading && tab === "withdrawals" && withdrawalIdsKey) {
-      const updated = markNotificationIdsSeen(seenTeacherWithdrawalsStorageKey, currentUserId, withdrawalIdsKey.split("|"));
-      setSeenRequestIds((current) => new Set([...current, ...updated]));
+      const keys = withdrawalIdsKey.split("|");
+      setSeenRequestIds((current) => new Set([...current, ...keys]));
+      void markTeacherNotificationsSeen(currentUserId, keys);
     }
   }, [currentUserId, withdrawalIdsKey, loading, tab]);
 
   function changeTab(nextTab: "requests" | "withdrawals" | "instructors") {
     setTab(nextTab);
     router.replace(`/m/${slug}/teacher/inbox?tab=${nextTab}`, { scroll: false });
-    if (nextTab === "requests") {
-      const updated = markNotificationIdsSeen(seenTeacherRequestsStorageKey, currentUserId, requestNotificationIds);
-      setSeenRequestIds((current) => new Set([...current, ...updated]));
+    if (nextTab === "requests" && requestNotificationIds.length) {
+      setSeenRequestIds((current) => new Set([...current, ...requestNotificationIds]));
+      void markTeacherNotificationsSeen(currentUserId, requestNotificationIds);
     }
-    if (nextTab === "instructors") {
-      const updated = markNotificationIdsSeen(seenTeacherInstructorNotificationsStorageKey, currentUserId, instructorNotificationIds);
-      setSeenRequestIds((current) => new Set([...current, ...updated]));
+    if (nextTab === "instructors" && newInstructorNotificationIds.length) {
+      setSeenRequestIds((current) => new Set([...current, ...newInstructorNotificationIds]));
+      void markTeacherNotificationsSeen(currentUserId, newInstructorNotificationIds);
     }
-    if (nextTab === "withdrawals") {
-      const updated = markNotificationIdsSeen(seenTeacherWithdrawalsStorageKey, currentUserId, withdrawalNotificationIds);
-      setSeenRequestIds((current) => new Set([...current, ...updated]));
+    if (nextTab === "withdrawals" && withdrawalNotificationIds.length) {
+      setSeenRequestIds((current) => new Set([...current, ...withdrawalNotificationIds]));
+      void markTeacherNotificationsSeen(currentUserId, withdrawalNotificationIds);
     }
+  }
+
+  function clearAllInstructorUpdates() {
+    const keys = pastInstructorNotifications.map(teacherInstructorNotificationKey);
+    if (!keys.length) {
+      return;
+    }
+    setDismissedNotificationIds((current) => new Set([...current, ...keys]));
+    void markTeacherNotificationsDismissed(currentUserId, keys);
   }
 
   return (
@@ -4574,24 +4657,54 @@ export function TeacherInboxData({ slug }: { slug: string }) {
                 <MiniEmpty text="No withdrawal requests are waiting for review." />
               )}
             </TeacherRequestSection>
-            <TeacherRequestSection title="Past Withdrawals" count={pastWithdrawals.length}>
+            <TeacherRequestSection
+              title="Past Withdrawals"
+              count={pastWithdrawals.length}
+              action={pastWithdrawals.length ? <ClearAllButton onClick={clearAllPastWithdrawals} /> : null}
+            >
               {pastWithdrawals.length ? (
-                pastWithdrawals.map((request) => <WithdrawalRequestCard key={request.id} request={request} reviewed />)
+                pastWithdrawals.map((request) => (
+                  <WithdrawalRequestCard key={request.id} request={request} reviewed onClear={() => clearPastWithdrawal(request.id)} />
+                ))
               ) : (
                 <MiniEmpty text="Reviewed withdrawal requests will appear here." />
               )}
             </TeacherRequestSection>
           </>
         ) : (
-          <TeacherRequestSection title="Instructor Updates" count={instructorNotifications.length} action={instructorNotifications.length ? <ClearAllButton onClick={clearAllInstructorUpdates} /> : null}>
-            {instructorNotifications.length ? (
-              instructorNotifications.map((notification) => (
-                <InstructorLifecycleNotificationCard key={`${notification.event_type}:${notification.id}`} notification={notification} slug={slug} />
-              ))
-            ) : (
-              <MiniEmpty text="Instructor joins and resignations will appear here." />
-            )}
-          </TeacherRequestSection>
+          <>
+            <TeacherRequestSection title="New" count={newInstructorNotifications.length}>
+              {newInstructorNotifications.length ? (
+                newInstructorNotifications.map((notification) => (
+                  <InstructorLifecycleNotificationCard key={`${notification.event_type}:${notification.id}`} notification={notification} slug={slug} />
+                ))
+              ) : (
+                <MiniEmpty text="Instructor joins and resignations will appear here." />
+              )}
+            </TeacherRequestSection>
+            <TeacherRequestSection
+              title="Past"
+              count={pastInstructorNotifications.length}
+              action={pastInstructorNotifications.length ? <ClearAllButton onClick={clearAllInstructorUpdates} /> : null}
+            >
+              {pastInstructorNotifications.length ? (
+                pastInstructorNotifications.map((notification) => (
+                  <InstructorLifecycleNotificationCard
+                    key={`${notification.event_type}:${notification.id}`}
+                    notification={notification}
+                    slug={slug}
+                    onClear={() => {
+                      const key = teacherInstructorNotificationKey(notification);
+                      setDismissedNotificationIds((current) => new Set([...current, key]));
+                      void markTeacherNotificationsDismissed(currentUserId, [key]);
+                    }}
+                  />
+                ))
+              ) : (
+                <MiniEmpty text="Reviewed updates will appear here." />
+              )}
+            </TeacherRequestSection>
+          </>
         )}
       </div>
     </div>
@@ -6322,7 +6435,6 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
               <select value={builderStatus.paymentKind} onChange={(event) => { const value = event.target.value as ProgramBuilderStatus["paymentKind"]; setBuilderStatus((current) => ({ ...current, paymentKind: value })); setIsPaid(value === "tareeqah"); }} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
                 <option value="free">Free</option>
                 <option value="tareeqah">Paid through Tareeqah</option>
-                <option value="manual">Handled outside Tareeqah</option>
               </select>
             </label>
             <ProgramApplicationAvailabilityFields builderStatus={builderStatus} setBuilderStatus={setBuilderStatus} />
@@ -6683,7 +6795,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
           location: programRow.location ?? "",
           room: programRow.room ?? "",
           roomArea: programRow.room_area ?? "",
-          paymentKind: ["free", "tareeqah", "manual"].includes(programRow.payment_kind) ? programRow.payment_kind as ProgramBuilderStatus["paymentKind"] : (programRow.is_paid ? "tareeqah" : "free"),
+          paymentKind: ["free", "tareeqah"].includes(programRow.payment_kind) ? programRow.payment_kind as ProgramBuilderStatus["paymentKind"] : (programRow.is_paid ? "tareeqah" : "free"),
           billingStartBehavior: ["on_payment", "program_start"].includes(programRow.billing_start_behavior) ? programRow.billing_start_behavior as ProgramBuilderStatus["billingStartBehavior"] : "on_payment",
           billingEndBehavior: ["manual_cancel", "program_end", "fixed_months"].includes(programRow.billing_end_behavior) ? programRow.billing_end_behavior as ProgramBuilderStatus["billingEndBehavior"] : "fixed_months",
           billingDurationMonths: programRow.billing_duration_months ? String(programRow.billing_duration_months) : "",
@@ -7305,7 +7417,6 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
               <select value={builderStatus.paymentKind} onChange={(event) => { const value = event.target.value as ProgramBuilderStatus["paymentKind"]; setBuilderStatus((current) => ({ ...current, paymentKind: value })); setIsPaid(value === "tareeqah"); }} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]">
                 <option value="free">Free</option>
                 <option value="tareeqah">Paid through Tareeqah</option>
-                <option value="manual">Handled outside Tareeqah</option>
               </select>
             </label>
             <ProgramApplicationAvailabilityFields builderStatus={builderStatus} setBuilderStatus={setBuilderStatus} />
@@ -10225,7 +10336,7 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
   async function reviewWaitlistedRequest(
     request: RequestWithContext,
     status: "approved" | "rejected",
-    options: { paymentType?: PaymentType; priceMonthlyCents?: number | null; priceAnnualCents?: number | null; paymentBypassed?: boolean; note?: string | null } = {},
+    options: { paymentType?: PaymentType; priceMonthlyCents?: number | null; priceAnnualCents?: number | null; paymentBypassed?: boolean; paymentBypassedExternal?: boolean; note?: string | null } = {},
   ) {
     if (!currentUserId || !program) {
       return;
@@ -10239,6 +10350,7 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
       priceMonthlyCents: options.priceMonthlyCents,
       priceAnnualCents: options.priceAnnualCents,
       paymentBypassed: options.paymentBypassed,
+      paymentBypassedExternal: options.paymentBypassedExternal,
       note: options.note,
     });
 
@@ -10960,7 +11072,7 @@ export function ProgramFinancesData({ slug, programId, mode = "teacher" }: { slu
       <div className="rounded-[28px] bg-[#17624F] p-5 text-white shadow-[0_18px_45px_rgba(23,98,79,0.22)]">
         <div className="grid gap-5 md:grid-cols-[1fr_auto] md:items-end">
           <div>
-            <h2 className="mt-2 text-2xl font-semibold leading-7">{program.title}</h2>
+            <h2 className="mt-0 text-2xl font-semibold leading-7">{program.title}</h2>
           </div>
           <div className="grid grid-cols-3 gap-4 text-center">
             <FinanceSummaryFigure value={rows.length.toString()} label="Total records" />
@@ -10979,11 +11091,11 @@ export function ProgramFinancesData({ slug, programId, mode = "teacher" }: { slu
         <FinanceSelect
           label="Payment status"
           value={payStatusFilter}
-          options={["paid", "awaiting payment", "no payment required", "waived", "past due", "payment failed", "checkout sent", "needs billing decision"]}
+          options={["paid", "awaiting payment", "no payment required", "waived", "paid externally", "past due", "payment failed", "checkout sent", "needs billing decision"]}
           onChange={setPayStatusFilter}
         />
         <FinanceSelect label="Subscription" value={subStatusFilter} options={["n/a", "active", "paused", "ending", "past due", "ended"]} labels={{ "n/a": "N/A" }} onChange={setSubStatusFilter} />
-        <FinanceSelect label="Payment type" value={paymentFilter} options={["waived", "monthly", "pay in full"]} labels={{ "pay in full": "Pay in Full" }} onChange={setPaymentFilter} />
+        <FinanceSelect label="Payment type" value={paymentFilter} options={["waived", "paid externally", "monthly", "pay in full"]} labels={{ "pay in full": "Pay in Full" }} onChange={setPaymentFilter} />
         <FinanceSelect label="Type" value={typeFilter} options={["adult", "child"]} labels={{ adult: "Adult student", child: "Child student" }} onChange={setTypeFilter} />
         <FinanceSelect label="Gender" value={genderFilter} options={["male", "female"]} labels={{ male: "Brothers", female: "Sisters" }} onChange={setGenderFilter} />
       </div>
@@ -11831,20 +11943,20 @@ type ApplicationRow = {
 
 function applicationPaymentPlanLabel(row: ApplicationRow, program: Program | null) {
   if (!program?.is_paid) {
-    return program?.payment_kind === "manual" ? "Price determined after review" : "Free";
+    return "Free";
   }
   if (row.request.payment_bypassed) {
-    return "Waived after approval";
+    return row.request.payment_bypass_external ? "Paid externally" : "Waived after approval";
   }
   return row.request.payment_type === "annual" ? "Pay in Full" : "Monthly subscription";
 }
 
 function applicationListedPrice(row: ApplicationRow, program: Program | null) {
   if (row.request.payment_bypassed) {
-    return "Waived";
+    return row.request.payment_bypass_external ? "Paid externally" : "Waived";
   }
   if (!program?.is_paid) {
-    return program?.payment_kind === "manual" ? "—" : "Free";
+    return "Free";
   }
   const isAnnual = row.request.payment_type === "annual";
   const cents = isAnnual
@@ -11875,6 +11987,7 @@ export function ProgramApplicationsData({ slug, programId, mode = "teacher" }: {
   const [payStatusFilter, setPayStatusFilter] = useState("all");
   const [trackFilter, setTrackFilter] = useState("all");
   const [planFilter, setPlanFilter] = useState("all");
+  const [needsActionOnly, setNeedsActionOnly] = useState(false);
   const [tracks, setTracks] = useState<ProgramTrack[]>([]);
   const [decisionTarget, setDecisionTarget] = useState<{ row: ApplicationRow; action: "approved" | "waitlisted" | "rejected" } | null>(null);
   const [detailsTarget, setDetailsTarget] = useState<ApplicationRow | null>(null);
@@ -11987,6 +12100,9 @@ export function ProgramApplicationsData({ slug, programId, mode = "teacher" }: {
       const status = getApplicationStatus(row.request);
       const payStatus = getApplicationPaymentStatus(row.request, program, row.subscription);
       const plan = applicationPaymentPlanLabel(row, program);
+      if (needsActionOnly && !applicationNeedsAction(status)) {
+        return false;
+      }
       if (statusFilter !== "all" && status !== statusFilter) {
         return false;
       }
@@ -12008,7 +12124,7 @@ export function ProgramApplicationsData({ slug, programId, mode = "teacher" }: {
         .toLowerCase()
         .includes(query);
     });
-  }, [payStatusFilter, planFilter, program, rows, search, statusFilter, trackFilter]);
+  }, [needsActionOnly, payStatusFilter, planFilter, program, rows, search, statusFilter, trackFilter]);
 
   const countByStatus = (status: RequestApplicationStatus) => rows.filter((row) => getApplicationStatus(row.request) === status).length;
   const approvedRows = rows.filter((row) => getApplicationStatus(row.request) === "approved_confirmation_required");
@@ -12089,58 +12205,75 @@ export function ProgramApplicationsData({ slug, programId, mode = "teacher" }: {
         </div>
       </div>
 
-      <div className="flex flex-wrap gap-3">
-        <label className="flex min-h-11 min-w-[220px] flex-1 items-center gap-2 rounded-[14px] border border-[#D6DCE0] bg-[#F8FAFB] px-3 text-[#6B747B]">
-          <SearchIcon />
-          <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search students, parents" className="min-w-0 flex-1 bg-transparent text-sm font-semibold text-[#26323A] outline-none placeholder:text-[#9AA4AA]" />
-        </label>
-        <FinanceSelect
-          label="Application status"
-          value={statusFilter}
-          options={["pending_review", "waitlisted", "rejected", "approved_confirmation_required", "completed_enrolled", "cancelled"]}
-          labels={{
-            pending_review: "Pending Review",
-            waitlisted: "Waitlisted",
-            rejected: "Rejected",
-            approved_confirmation_required: "Approved",
-            completed_enrolled: "Completed / Enrolled",
-            cancelled: "Cancelled",
-          }}
-          onChange={setStatusFilter}
-        />
-        <FinanceSelect
-          label="Payment status"
-          value={payStatusFilter}
-          options={["not_required", "waived", "payment_required", "checkout_pending", "paid", "active_subscription", "past_due", "failed", "ended"]}
-          labels={{
-            not_required: "Not required",
-            waived: "Waived",
-            payment_required: "Payment required",
-            checkout_pending: "Awaiting payment",
-            paid: "Paid",
-            active_subscription: "Subscription active",
-            past_due: "Past due",
-            failed: "Failed",
-            ended: "Ended",
-          }}
-          onChange={setPayStatusFilter}
-        />
-        {tracks.length ? (
+      <div className="space-y-3">
+        <div className="flex gap-2">
+          <label className="flex h-11 min-w-0 flex-1 items-center gap-2 rounded-[14px] border border-[#D6DCE0] bg-[#F8FAFB] px-3 text-[#6B747B] sm:min-w-[220px]">
+            <SearchIcon />
+            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search students, parents" className="min-w-0 flex-1 bg-transparent text-sm font-semibold text-[#26323A] outline-none placeholder:text-[#9AA4AA]" />
+          </label>
+          <button
+            type="button"
+            onClick={() => setNeedsActionOnly((current) => !current)}
+            className={cn(
+              "flex h-11 shrink-0 items-center gap-1.5 rounded-[14px] border px-3 text-sm font-semibold transition-colors",
+              needsActionOnly ? "border-[#2F8FB3] bg-[#EAF5F9] text-[#2F8FB3]" : "border-[#D6DCE0] bg-white text-[#6B747B] hover:bg-[#F8FAFB]",
+            )}
+          >
+            <span className={cn("h-2 w-2 shrink-0 rounded-full", needsActionOnly ? "bg-[#2F8FB3]" : "bg-[#D6DCE0]")} />
+            <span className="sm:hidden">Action</span>
+            <span className="hidden sm:inline">Needs Action</span>
+          </button>
+        </div>
+        <div className="grid grid-cols-2 gap-3 sm:flex sm:flex-wrap">
           <FinanceSelect
-            label="Track"
-            value={trackFilter}
-            options={tracks.map((track) => track.id)}
-            labels={Object.fromEntries(tracks.map((track) => [track.id, track.name]))}
-            onChange={setTrackFilter}
+            label="Application status"
+            value={statusFilter}
+            options={["pending_review", "waitlisted", "rejected", "approved_confirmation_required", "completed_enrolled", "cancelled"]}
+            labels={{
+              pending_review: "Pending Review",
+              waitlisted: "Waitlisted",
+              rejected: "Rejected",
+              approved_confirmation_required: "Approved",
+              completed_enrolled: "Completed / Enrolled",
+              cancelled: "Cancelled",
+            }}
+            onChange={setStatusFilter}
           />
-        ) : null}
-        <FinanceSelect
-          label="Payment plan"
-          value={planFilter}
-          options={["free", "monthly subscription", "pay in full", "waived after approval", "price determined after review"]}
-          labels={{ "pay in full": "Pay in Full" }}
-          onChange={setPlanFilter}
-        />
+          <FinanceSelect
+            label="Payment status"
+            value={payStatusFilter}
+            options={["not_required", "waived", "paid_externally", "payment_required", "checkout_pending", "paid", "active_subscription", "past_due", "failed", "ended"]}
+            labels={{
+              not_required: "Not required",
+              waived: "Waived",
+              paid_externally: "Paid Externally",
+              payment_required: "Payment required",
+              checkout_pending: "Awaiting payment",
+              paid: "Paid",
+              active_subscription: "Subscription active",
+              past_due: "Past due",
+              failed: "Failed",
+              ended: "Ended",
+            }}
+            onChange={setPayStatusFilter}
+          />
+          {tracks.length ? (
+            <FinanceSelect
+              label="Track"
+              value={trackFilter}
+              options={tracks.map((track) => track.id)}
+              labels={Object.fromEntries(tracks.map((track) => [track.id, track.name]))}
+              onChange={setTrackFilter}
+            />
+          ) : null}
+          <FinanceSelect
+            label="Payment plan"
+            value={planFilter}
+            options={["free", "monthly subscription", "pay in full", "waived", "paid externally"]}
+            labels={{ "pay in full": "Pay in Full" }}
+            onChange={setPlanFilter}
+          />
+        </div>
       </div>
 
       <div className="flex items-center justify-between px-1 text-sm font-semibold text-[#6B747B]">
@@ -12161,8 +12294,13 @@ export function ProgramApplicationsData({ slug, programId, mode = "teacher" }: {
               {filteredRows.map((row) => {
                 const status = getApplicationStatus(row.request);
                 const payStatus = getApplicationPaymentStatus(row.request, program, row.subscription);
+                const needsAction = applicationNeedsAction(status);
                 return (
-                  <tr key={row.request.id} className="align-middle">
+                  <tr
+                    key={row.request.id}
+                    onClick={() => setDetailsTarget(row)}
+                    className={cn("cursor-pointer align-middle transition-colors hover:bg-[#F7FAFB]", needsAction ? "bg-[#EEF7FA]" : "")}
+                  >
                     <td className="px-4 py-4">
                       <p className="font-semibold text-[#26323A]">{row.student?.full_name || "Student"}</p>
                       <p className="mt-0.5 text-xs text-[#7B858C]">{row.parent ? "Child Student" : "Adult Student"}{row.student?.age ? ` · Age ${row.student.age}` : ""}</p>
@@ -12190,13 +12328,7 @@ export function ProgramApplicationsData({ slug, programId, mode = "teacher" }: {
                     </td>
                     <td className="px-4 py-4 text-[#52616A]">{formatFinanceDate(row.request.requested_at)}</td>
                     <td className="px-4 py-4">
-                      <button
-                        type="button"
-                        onClick={() => setDetailsTarget(row)}
-                        className="inline-flex min-h-9 items-center justify-center rounded-full bg-[#EEF6F7] px-3 text-xs font-semibold text-[#17624F] transition-colors hover:bg-[#E3F0F0]"
-                      >
-                        View
-                      </button>
+                      <ChevronRightIcon />
                     </td>
                   </tr>
                 );
@@ -12338,112 +12470,168 @@ function ApplicationDetailsDrawer({
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex justify-end bg-[#26323A]/35 backdrop-blur-sm">
-      <div className="flex h-full w-full max-w-md flex-col overflow-y-auto bg-white text-[#26323A] shadow-[0_24px_70px_rgba(38,50,58,0.22)]">
-        <div className="flex items-center justify-between border-b border-[#EEF2F4] px-5 py-4">
+      <div className="flex h-full w-full max-w-md flex-col bg-white text-[#26323A] shadow-[0_24px_70px_rgba(38,50,58,0.22)]">
+        <div className="flex shrink-0 items-center justify-between border-b border-[#EEF2F4] px-4 py-3">
           <div>
             <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">{program.title}</p>
-            <h2 className="mt-1 text-lg font-semibold">{row.student?.full_name || "Student"}</h2>
+            <h2 className="mt-0.5 text-base font-semibold">{row.student?.full_name || "Student"}</h2>
           </div>
-          <button type="button" onClick={onClose} className="flex h-9 w-9 items-center justify-center rounded-full bg-[#F1F5F6] text-[#26323A] hover:bg-[#E3ECEF]">
+          <button type="button" onClick={onClose} className="flex h-8 w-8 items-center justify-center rounded-full bg-[#F1F5F6] text-[#26323A] hover:bg-[#E3ECEF]">
             <XIcon />
           </button>
         </div>
 
-        <div className="space-y-5 px-5 py-5">
-          <section className="grid gap-1 text-sm">
-            <div className="flex items-center justify-between">
-              <span className="text-[#6B747B]">Student type</span>
-              <span className="font-semibold">{row.parent ? "Child Student" : "Adult Student"}</span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-[#6B747B]">Parent/Guardian</span>
-              <span className="font-semibold">{row.parent?.full_name || "Self"}</span>
-            </div>
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+          <div className="space-y-3 text-xs">
             <div className="flex items-center justify-between">
               <span className="text-[#6B747B]">Application status</span>
-              <span className={cn("rounded-full px-2.5 py-1 text-xs font-semibold", programStatusBadgeToneClass(applicationStatusTone(status)))}>
+              <span className={cn("rounded-full px-2 py-0.5 text-[11px] font-semibold", programStatusBadgeToneClass(applicationStatusTone(status)))}>
                 {getApplicationRowStatusLabel(status, payStatus)}
               </span>
             </div>
-            {isPaymentStatusMeaningful(row.request, program) ? (
-              <div className="flex items-center justify-between">
-                <span className="text-[#6B747B]">Payment status</span>
-                <span className={cn("rounded-full px-2.5 py-1 text-xs font-semibold", programStatusBadgeToneClass(paymentStatusTone(payStatus)))}>
-                  {PAYMENT_STATUS_LABELS[payStatus]}
-                </span>
-              </div>
-            ) : null}
-          </section>
 
-          <section className="grid gap-1 rounded-[16px] border border-[#E1E8EC] bg-[#FAFCFC] p-3 text-sm">
-            <div className="flex items-center justify-between">
-              <span className="text-[#6B747B]">Track/Schedule</span>
-              <span className="font-semibold">{row.track ? row.track.name : "—"}</span>
-            </div>
-            {row.track ? (
-              <div className="flex items-center justify-between">
-                <span className="text-[#6B747B]">Schedule</span>
-                <span className="font-semibold">{scheduleSummary(row.track.schedule, null).full}</span>
-              </div>
-            ) : null}
-            <div className="flex items-center justify-between">
-              <span className="text-[#6B747B]">Location</span>
-              <span className="font-semibold">{row.track?.location || program.location || "—"}</span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-[#6B747B]">Payment plan</span>
-              <span className="font-semibold">{applicationPaymentPlanLabel(row, program)}</span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-[#6B747B]">Listed price</span>
-              <span className="font-semibold">{applicationListedPrice(row, program)}</span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-[#6B747B]">Submitted</span>
-              <span className="font-semibold">{formatFinanceDate(row.request.requested_at)}</span>
-            </div>
-            {row.request.reviewed_at ? (
-              <div className="flex items-center justify-between">
-                <span className="text-[#6B747B]">Reviewed</span>
-                <span className="font-semibold">
-                  {formatFinanceDate(row.request.reviewed_at)} by {row.approver?.full_name || row.approver?.email || "staff"}
-                </span>
-              </div>
-            ) : null}
-            {row.request.decision_note ? (
-              <div className="pt-1">
-                <p className="text-[#6B747B]">Decision note</p>
-                <p className="mt-0.5 font-semibold">{row.request.decision_note}</p>
-              </div>
-            ) : null}
-          </section>
-
-          <section className="space-y-2">
-            <h3 className="text-sm font-semibold text-[#26323A]">Audit Trail</h3>
-            {eventsLoading ? (
-              <div className="rounded-[14px] border border-dashed border-[#D6DCE0] bg-[#F8FAFB] p-3 text-sm font-semibold text-[#6B747B]">Loading activity...</div>
-            ) : !studentEvents?.length ? (
-              <div className="rounded-[14px] border border-dashed border-[#D6DCE0] bg-[#F8FAFB] p-3 text-sm font-semibold text-[#6B747B]">No activity for this application yet.</div>
-            ) : (
-              <div className="divide-y divide-[#EEF2F4]">
-                {studentEvents.map((event) => (
-                  <div key={event.id} className="py-2.5">
-                    <div className="flex items-center gap-2">
-                      {event.event_type === "manual_note" ? (
-                        <span className={cn("rounded-full px-2 py-0.5 text-[10px] font-semibold", programStatusBadgeToneClass("neutral"))}>Note</span>
-                      ) : null}
-                      <p className="text-sm font-semibold text-[#26323A]">{event.summary}</p>
+            <section className="space-y-1.5">
+              <h3 className="text-xs font-semibold text-[#26323A]">Applicant Information</h3>
+              <div className="grid gap-1 rounded-[12px] border border-[#E1E8EC] bg-[#FAFCFC] p-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[#6B747B]">Student type</span>
+                  <span className="font-semibold">{row.parent ? "Child Student" : "Adult Student"}</span>
+                </div>
+                {row.parent ? (
+                  <>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[#6B747B]">Child</span>
+                      <span className="font-semibold">{row.student?.full_name || "—"}</span>
                     </div>
-                    <p className="mt-0.5 text-xs text-[#7B858C]">{formatFinanceDate(event.created_at)}</p>
-                  </div>
-                ))}
+                    <div className="flex items-center justify-between">
+                      <span className="text-[#6B747B]">Child Age</span>
+                      <span className="font-semibold">{displayAge(row.student)}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[#6B747B]">Gender</span>
+                      <span className="font-semibold">{row.student?.gender || "—"}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[#6B747B]">Parent</span>
+                      <span className="font-semibold">{row.parent.full_name || "—"}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[#6B747B]">Parent Email</span>
+                      <span className="font-semibold">{row.parent.email || "—"}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[#6B747B]">Parent Phone</span>
+                      <span className="font-semibold">{row.parent.phone_number || "—"}</span>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[#6B747B]">Student</span>
+                      <span className="font-semibold">{row.student?.full_name || "—"}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[#6B747B]">Email</span>
+                      <span className="font-semibold">{row.student?.email || "—"}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[#6B747B]">Phone</span>
+                      <span className="font-semibold">{row.student?.phone_number || "—"}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[#6B747B]">Age</span>
+                      <span className="font-semibold">{displayAge(row.student)}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[#6B747B]">Gender</span>
+                      <span className="font-semibold">{row.student?.gender || "—"}</span>
+                    </div>
+                  </>
+                )}
               </div>
-            )}
-          </section>
+            </section>
+
+            <section className="space-y-1.5">
+              <h3 className="text-xs font-semibold text-[#26323A]">Program Details</h3>
+              <div className="grid gap-1 rounded-[12px] border border-[#E1E8EC] bg-[#FAFCFC] p-2.5">
+                {isPaymentStatusMeaningful(row.request, program) ? (
+                  <div className="flex items-center justify-between">
+                    <span className="text-[#6B747B]">Payment status</span>
+                    <span className={cn("rounded-full px-2 py-0.5 text-[11px] font-semibold", programStatusBadgeToneClass(paymentStatusTone(payStatus)))}>
+                      {PAYMENT_STATUS_LABELS[payStatus]}
+                    </span>
+                  </div>
+                ) : null}
+                <div className="flex items-center justify-between">
+                  <span className="text-[#6B747B]">Track/Schedule</span>
+                  <span className="font-semibold">{row.track ? row.track.name : "—"}</span>
+                </div>
+                {row.track ? (
+                  <div className="flex items-center justify-between">
+                    <span className="text-[#6B747B]">Schedule</span>
+                    <span className="font-semibold">{scheduleSummary(row.track.schedule, null).full}</span>
+                  </div>
+                ) : null}
+                <div className="flex items-center justify-between">
+                  <span className="text-[#6B747B]">Location</span>
+                  <span className="font-semibold">{row.track?.location || program.location || "—"}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-[#6B747B]">Payment plan</span>
+                  <span className="font-semibold">{applicationPaymentPlanLabel(row, program)}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-[#6B747B]">Listed price</span>
+                  <span className="font-semibold">{applicationListedPrice(row, program)}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-[#6B747B]">Submitted</span>
+                  <span className="font-semibold">{formatFinanceDate(row.request.requested_at)}</span>
+                </div>
+                {row.request.reviewed_at ? (
+                  <div className="flex items-center justify-between">
+                    <span className="text-[#6B747B]">Reviewed</span>
+                    <span className="font-semibold">
+                      {formatFinanceDate(row.request.reviewed_at)} by {row.approver?.full_name || row.approver?.email || "staff"}
+                    </span>
+                  </div>
+                ) : null}
+                {row.request.decision_note ? (
+                  <div className="pt-1">
+                    <p className="text-[#6B747B]">Decision note</p>
+                    <p className="mt-0.5 font-semibold">{row.request.decision_note}</p>
+                  </div>
+                ) : null}
+              </div>
+            </section>
+
+            <section className="space-y-1.5">
+              <h3 className="text-xs font-semibold text-[#26323A]">Audit Trail</h3>
+              {eventsLoading ? (
+                <div className="rounded-[12px] border border-dashed border-[#D6DCE0] bg-[#F8FAFB] p-2.5 font-semibold text-[#6B747B]">Loading activity...</div>
+              ) : !studentEvents?.length ? (
+                <div className="rounded-[12px] border border-dashed border-[#D6DCE0] bg-[#F8FAFB] p-2.5 font-semibold text-[#6B747B]">No activity for this application yet.</div>
+              ) : (
+                <div className="divide-y divide-[#EEF2F4]">
+                  {studentEvents.map((event) => (
+                    <div key={event.id} className="py-2">
+                      <div className="flex items-center gap-2">
+                        {event.event_type === "manual_note" ? (
+                          <span className={cn("rounded-full px-2 py-0.5 text-[10px] font-semibold", programStatusBadgeToneClass("neutral"))}>Note</span>
+                        ) : null}
+                        <p className="font-semibold text-[#26323A]">{event.summary}</p>
+                      </div>
+                      <p className="mt-0.5 text-[11px] text-[#7B858C]">{formatFinanceDate(event.created_at)}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+          </div>
         </div>
 
         {availableActions.length ? (
-          <div className="mt-auto space-y-2 border-t border-[#EEF2F4] px-5 py-4">
+          <div className="shrink-0 space-y-2 border-t border-[#EEF2F4] px-4 py-3">
             {decisionActions.length ? (
               <div className={cn("grid gap-2", decisionActions.length === 3 ? "grid-cols-3" : decisionActions.length === 2 ? "grid-cols-2" : "grid-cols-1")}>
                 {decisionActions.map((action) => (
@@ -12452,7 +12640,7 @@ function ApplicationDetailsDrawer({
                     type="button"
                     onClick={() => onAction(action)}
                     className={cn(
-                      "min-h-10 rounded-[9px] px-2 text-xs font-semibold transition-colors",
+                      "min-h-9 rounded-[9px] px-2 text-xs font-semibold transition-colors",
                       action === "approve"
                         ? "bg-[#E2F6E8] text-[#258A43] hover:bg-[#D4F0DD]"
                         : action === "waitlist"
@@ -12468,7 +12656,7 @@ function ApplicationDetailsDrawer({
             {secondaryActions.length ? (
               <div className="flex flex-wrap gap-x-4 gap-y-2">
                 {secondaryActions.map((action) => (
-                  <button key={action} type="button" onClick={() => onAction(action)} className="text-sm font-semibold text-[#17624F] hover:underline">
+                  <button key={action} type="button" onClick={() => onAction(action)} className="text-xs font-semibold text-[#17624F] hover:underline">
                     {APPLICATION_ACTION_LABELS[action]}
                   </button>
                 ))}
@@ -12478,8 +12666,8 @@ function ApplicationDetailsDrawer({
         ) : null}
 
         {status === "completed_enrolled" ? (
-          <div className="border-t border-[#EEF2F4] px-5 py-4">
-            <Link href={`${basePath}/${program.id}/students?from=applications&studentId=${row.request.student_profile_id}`} className="text-sm font-semibold text-[#17624F] hover:underline">
+          <div className="shrink-0 border-t border-[#EEF2F4] px-4 py-3">
+            <Link href={`${basePath}/${program.id}/students?from=applications&studentId=${row.request.student_profile_id}`} className="text-xs font-semibold text-[#17624F] hover:underline">
               View student in class list →
             </Link>
           </div>
@@ -12606,6 +12794,7 @@ function ApplicationConfirmActionModal({
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [external, setExternal] = useState(false);
 
   const config = {
     cancel_approval: {
@@ -12631,7 +12820,10 @@ function ApplicationConfirmActionModal({
   async function handleConfirm() {
     setBusy(true);
     setError(null);
-    const result = await callApplicationAction(program.id, row.request.id, config.endpoint, { note: note.trim() || undefined });
+    const result = await callApplicationAction(program.id, row.request.id, config.endpoint, {
+      note: note.trim() || undefined,
+      external: action === "waive_payment" ? external : undefined,
+    });
     setBusy(false);
     if (!result.ok) {
       setError(result.error);
@@ -12647,6 +12839,31 @@ function ApplicationConfirmActionModal({
         <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">{program.title}</p>
         <h2 className="mt-1 text-xl font-semibold">{config.title}</h2>
         <p className="mt-2 text-sm leading-6 text-[#6B747B]">{row.student?.full_name || "Student"} - {config.text}</p>
+
+        {action === "waive_payment" ? (
+          <div className="mt-4 grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => setExternal(false)}
+              className={cn(
+                "min-h-10 rounded-[9px] px-2 text-xs font-semibold transition-colors",
+                !external ? "bg-[#EEF3F5] text-[#26323A]" : "bg-white text-[#6B747B] ring-1 ring-inset ring-[#D6DCE0]",
+              )}
+            >
+              Waived — no payment
+            </button>
+            <button
+              type="button"
+              onClick={() => setExternal(true)}
+              className={cn(
+                "min-h-10 rounded-[9px] px-2 text-xs font-semibold transition-colors",
+                external ? "bg-[#E2F6E8] text-[#258A43]" : "bg-white text-[#6B747B] ring-1 ring-inset ring-[#D6DCE0]",
+              )}
+            >
+              Paid externally
+            </button>
+          </div>
+        ) : null}
 
         {action !== "reopen" ? (
           <textarea
@@ -12683,14 +12900,20 @@ function financePaymentType(row: FinanceEnrollmentRow, program: Program | null) 
   if (!program?.is_paid) {
     return "Free";
   }
-  if (row.request?.payment_bypassed || row.subscription?.payment_waived) {
+  if (row.request?.payment_bypassed) {
+    return row.request.payment_bypass_external ? "Paid Externally" : "Waived";
+  }
+  if (row.subscription?.payment_waived) {
     return "Waived";
   }
   return (row.subscription?.payment_type ?? row.request?.payment_type) === "annual" ? "Pay in Full" : "Monthly";
 }
 
 function financePrice(row: FinanceEnrollmentRow, program: Program | null) {
-  if (row.request?.payment_bypassed || row.subscription?.payment_waived) {
+  if (row.request?.payment_bypassed) {
+    return row.request.payment_bypass_external ? "Paid Externally" : "Waived";
+  }
+  if (row.subscription?.payment_waived) {
     return "Waived";
   }
   if ((row.subscription?.payment_type ?? row.request?.payment_type) === "annual") {
@@ -12735,7 +12958,10 @@ function financePaymentStatus(row: FinanceEnrollmentRow, program: Program | null
   if (!program?.is_paid) {
     return "No payment required";
   }
-  if (row.request?.payment_bypassed || row.subscription?.payment_waived || row.subscription?.payment_paused) {
+  if (row.request?.payment_bypassed) {
+    return row.request.payment_bypass_external ? "Paid Externally" : "Waived";
+  }
+  if (row.subscription?.payment_waived || row.subscription?.payment_paused) {
     return "Waived";
   }
   const stripeStatus = row.subscription?.status?.toLowerCase();
@@ -13856,12 +14082,9 @@ export function useTeacherNotificationCounts(slug: string) {
           .select("id, assignment_id, teacher_profile_id, event_type")
           .in("program_id", programIds),
       ]);
-      const seenRequestIds = readSeenNotificationIds(seenTeacherRequestsStorageKey, userId);
-      const seenInstructorIds = readSeenNotificationIds(seenTeacherInstructorNotificationsStorageKey, userId);
-      const dismissedInstructorIds = readSeenNotificationIds(dismissedTeacherInstructorUpdatesStorageKey, userId);
-      const seenWithdrawalIds = readSeenNotificationIds(seenTeacherWithdrawalsStorageKey, userId);
+      const { seen: seenIds, dismissed: dismissedIds } = await fetchTeacherNotificationState(userId);
       if (active) {
-        const unseenApplications = (rows ?? []).filter((row) => !seenRequestIds.has(teacherRequestNotificationKey(row))).length;
+        const unseenApplications = (rows ?? []).filter((row) => !seenIds.has(teacherRequestNotificationKey(row))).length;
         const joinedAssignmentIdsWithEvents = new Set((instructorEventRows ?? []).filter((event) => event.event_type === "joined" && event.assignment_id).map((event) => event.assignment_id as string));
         const eventInstructorNotifications: Array<Pick<InstructorLifecycleNotification, "id" | "event_type" | "teacher_profile_id">> = (instructorEventRows ?? []).map((event) => ({
           id: event.id,
@@ -13872,9 +14095,9 @@ export function useTeacherNotificationCounts(slug: string) {
           .filter((row) => !joinedAssignmentIdsWithEvents.has(row.id))
           .map((row) => ({ id: row.id, event_type: "joined" as const, teacher_profile_id: row.teacher_profile_id }));
         const unseenInstructors = [...eventInstructorNotifications, ...fallbackInstructorNotifications]
-          .filter((row) => !dismissedInstructorIds.has(teacherInstructorNotificationKey(row)))
-          .filter((row) => !seenInstructorIds.has(teacherInstructorNotificationKey(row))).length;
-        const unseenWithdrawals = (withdrawalRows ?? []).filter((row) => !seenWithdrawalIds.has(studentWithdrawalNotificationKey(row))).length;
+          .filter((row) => !dismissedIds.has(teacherInstructorNotificationKey(row)))
+          .filter((row) => !seenIds.has(teacherInstructorNotificationKey(row))).length;
+        const unseenWithdrawals = (withdrawalRows ?? []).filter((row) => !seenIds.has(studentWithdrawalNotificationKey(row))).length;
         setRequestCount(unseenApplications + unseenInstructors + unseenWithdrawals);
         const hasPendingApplication = (rows ?? []).some((row) => !row.admission_completed_at);
         setActionRequired(hasPendingApplication || Boolean((withdrawalRows ?? []).length));
@@ -14508,7 +14731,15 @@ function TeacherAnnouncementBubble({ announcement, readers = [], showSeenDetails
   );
 }
 
-function InstructorLifecycleNotificationCard({ notification, slug }: { notification: InstructorLifecycleNotification; slug: string }) {
+function InstructorLifecycleNotificationCard({
+  notification,
+  slug,
+  onClear,
+}: {
+  notification: InstructorLifecycleNotification;
+  slug: string;
+  onClear?: () => void;
+}) {
   const instructorName = notification.instructor?.full_name?.trim() || notification.instructor?.email || "Instructor";
   const programTitle = notification.program?.title ?? "this class";
   const actionText = notification.event_type === "resigned" ? "has resigned from" : "has become an instructor of";
@@ -14531,6 +14762,11 @@ function InstructorLifecycleNotificationCard({ notification, slug }: { notificat
             </TransitionLink>
           </div>
         </div>
+        {onClear ? (
+          <button type="button" onClick={onClear} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[#7B858C] transition-colors hover:bg-[#FCEDEC] hover:text-[#C83F31]" aria-label="Clear notification">
+            <XIcon />
+          </button>
+        ) : null}
       </div>
     </article>
   );
@@ -14645,12 +14881,14 @@ function WithdrawalRequestCard({
   busy = false,
   onApprove,
   onReject,
+  onClear,
 }: {
   request: WithdrawalRequestWithContext;
   reviewed?: boolean;
   busy?: boolean;
   onApprove?: () => void;
   onReject?: () => void;
+  onClear?: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const studentName = request.student?.full_name?.trim() || "Student";
@@ -14672,6 +14910,27 @@ function WithdrawalRequestCard({
             </div>
             <div className="flex shrink-0 items-center gap-2">
               <span className={cn("rounded-full px-2.5 py-1 text-xs font-semibold", request.status === "pending" ? "bg-[#FFF7E6] text-[#996800]" : "bg-[#EEF3F5] text-[#52616A]")}>{statusText}</span>
+              {reviewed && onClear ? (
+                <span
+                  role="button"
+                  tabIndex={0}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onClear();
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      onClear();
+                    }
+                  }}
+                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[#7B858C] transition-colors hover:bg-[#FCEDEC] hover:text-[#C83F31]"
+                  aria-label="Clear withdrawal"
+                >
+                  <XIcon />
+                </span>
+              ) : null}
               <ChevronIcon expanded={expanded} />
             </div>
           </div>
@@ -14748,7 +15007,7 @@ function ApplicationDecisionModal({
   target: { request: RequestWithContext; action: "approved" | "waitlisted" | "rejected" };
   busy?: boolean;
   onClose: () => void;
-  onSubmit: (options: { paymentType?: PaymentType; priceMonthlyCents?: number | null; priceAnnualCents?: number | null; paymentBypassed?: boolean; note?: string | null }) => void;
+  onSubmit: (options: { paymentType?: PaymentType; priceMonthlyCents?: number | null; priceAnnualCents?: number | null; paymentBypassed?: boolean; paymentBypassedExternal?: boolean; note?: string | null }) => void;
 }) {
   const requestedPaymentType = target.request.payment_type === "annual" ? "annual" : "monthly";
   const programOptions = target.request.program ? programPaymentOptions(target.request.program) : [];
@@ -14758,6 +15017,7 @@ function ApplicationDecisionModal({
   const defaultPrice = (defaultPriceCents / 100).toFixed(2).replace(/\.00$/, "");
   const [price, setPrice] = useState(defaultPrice === "0" ? "" : defaultPrice);
   const [bypassPayment, setBypassPayment] = useState(false);
+  const [bypassExternal, setBypassExternal] = useState(false);
   const studentName = target.request.student?.full_name?.trim() || "this student";
   const title = target.action === "approved" ? "Accept application" : target.action === "waitlisted" ? "Waitlist application" : "Reject application";
   const defaultNote =
@@ -14774,6 +15034,7 @@ function ApplicationDecisionModal({
     const numericPrice = Math.max(0, Math.round(Number(price || "0") * 100));
     onSubmit({
       paymentBypassed: target.action === "approved" ? bypassPayment : false,
+      paymentBypassedExternal: target.action === "approved" && bypassPayment ? bypassExternal : false,
       paymentType: billingMode,
       priceMonthlyCents: target.action === "approved" && !bypassPayment && billingMode === "monthly" ? numericPrice : null,
       priceAnnualCents: target.action === "approved" && !bypassPayment && billingMode === "annual" ? numericPrice : null,
@@ -14791,9 +15052,42 @@ function ApplicationDecisionModal({
         {target.action === "approved" ? (
           <div className="mt-5 space-y-3">
             <label className="flex items-center gap-2 text-sm font-semibold text-[#26323A]">
-              <input type="checkbox" checked={bypassPayment} onChange={(event) => setBypassPayment(event.target.checked)} />
+              <input
+                type="checkbox"
+                checked={bypassPayment}
+                onChange={(event) => {
+                  setBypassPayment(event.target.checked);
+                  if (!event.target.checked) {
+                    setBypassExternal(false);
+                  }
+                }}
+              />
               Bypass payment process
             </label>
+            {bypassPayment ? (
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setBypassExternal(false)}
+                  className={cn(
+                    "min-h-10 rounded-[9px] px-2 text-xs font-semibold transition-colors",
+                    !bypassExternal ? "bg-[#EEF3F5] text-[#26323A]" : "bg-white text-[#6B747B] ring-1 ring-inset ring-[#D6DCE0]",
+                  )}
+                >
+                  Waived — no payment
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBypassExternal(true)}
+                  className={cn(
+                    "min-h-10 rounded-[9px] px-2 text-xs font-semibold transition-colors",
+                    bypassExternal ? "bg-[#E2F6E8] text-[#258A43]" : "bg-white text-[#6B747B] ring-1 ring-inset ring-[#D6DCE0]",
+                  )}
+                >
+                  Paid externally
+                </button>
+              </div>
+            ) : null}
             {!bypassPayment ? (
               <>
                 <div>
@@ -16046,7 +16340,7 @@ function requestEffectivePriceCents(paymentType: PaymentType, request: RequestWi
 
 function trackPriceLine(track: ProgramTrack | null, program: Program, forType?: PaymentType): { label: string; savings: string } | null {
   if (!program.is_paid) {
-    return { label: program.payment_kind === "manual" ? "Price determined after review" : "Free", savings: "" };
+    return { label: "Free", savings: "" };
   }
   const { monthlyCents, annualCents } = track ? trackEffectivePriceCents(track, program) : { monthlyCents: program.price_monthly_cents, annualCents: program.price_annual_cents };
   const offersMonthly = program.offers_monthly_payment !== false && Boolean(monthlyCents);
@@ -16170,17 +16464,6 @@ function ProgramScheduleOptionsDisplay({
 
 function ProgramPaymentOptionsDisplay({ program }: { program: Program }) {
   const options = programPaymentOptions(program);
-  if (!program.is_paid && program.payment_kind === "manual") {
-    return (
-      <div className="mt-4 space-y-2 border-t border-[#E6ECEF] pt-4">
-        <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">Price options</p>
-        <div className="rounded-[14px] bg-[#F7FAFB] p-3 ring-1 ring-[#E6ECEF]">
-          <p className="text-sm font-semibold text-[#26323A]">Price determined after review</p>
-          <p className="mt-1 text-xs leading-5 text-[#6B747B]">Final price confirmed after application review.</p>
-        </div>
-      </div>
-    );
-  }
   if (!program.is_paid) {
     return (
       <div className="mt-4 space-y-2 border-t border-[#E6ECEF] pt-4">

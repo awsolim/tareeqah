@@ -7,7 +7,7 @@
 
 export type ApplicationStatus = "pending_review" | "waitlisted" | "rejected" | "approved_confirmation_required" | "completed_enrolled" | "cancelled";
 
-export type ApplicationPaymentStatus = "not_required" | "waived" | "payment_required" | "checkout_pending" | "paid" | "active_subscription" | "past_due" | "failed" | "ended";
+export type ApplicationPaymentStatus = "not_required" | "waived" | "paid_externally" | "payment_required" | "checkout_pending" | "paid" | "active_subscription" | "past_due" | "failed" | "ended";
 
 export type BadgeTone = "neutral" | "positive" | "warning" | "danger";
 
@@ -15,6 +15,7 @@ type ApplicationRequestLike = {
   status: string;
   admission_completed_at: string | null;
   payment_bypassed: boolean;
+  payment_bypass_external: boolean;
 };
 
 /** Derives the review/registration process state from the request's raw status + completion timestamp. */
@@ -36,7 +37,7 @@ export function getApplicationStatus(request: ApplicationRequestLike): Applicati
 
 /** Derives the money/subscription state — independent of application status except that payment only becomes relevant once approved. */
 export function getApplicationPaymentStatus(
-  request: Pick<ApplicationRequestLike, "payment_bypassed" | "status">,
+  request: Pick<ApplicationRequestLike, "payment_bypassed" | "payment_bypass_external" | "status">,
   program: { is_paid: boolean } | null | undefined,
   subscription: { status: string | null } | null | undefined,
 ): ApplicationPaymentStatus {
@@ -44,7 +45,7 @@ export function getApplicationPaymentStatus(
     return "not_required";
   }
   if (request.payment_bypassed) {
-    return "waived";
+    return request.payment_bypass_external ? "paid_externally" : "waived";
   }
   if (request.status !== "approved") {
     return "not_required";
@@ -97,6 +98,7 @@ export const APPLICATION_STATUS_LABELS: Record<ApplicationStatus, string> = {
 export const PAYMENT_STATUS_LABELS: Record<ApplicationPaymentStatus, string> = {
   not_required: "Not required",
   waived: "Waived",
+  paid_externally: "Paid Externally",
   payment_required: "Payment required",
   checkout_pending: "Awaiting payment",
   paid: "Paid",
@@ -134,6 +136,7 @@ export function paymentStatusTone(status: ApplicationPaymentStatus): BadgeTone {
   switch (status) {
     case "paid":
     case "active_subscription":
+    case "paid_externally":
       return "positive";
     case "payment_required":
     case "checkout_pending":
@@ -177,4 +180,9 @@ export function getApplicationRowActions(status: ApplicationStatus): Application
     default:
       return ["view"];
   }
+}
+
+/** Whether this application is still awaiting an actual decision (pending or waitlisted). */
+export function applicationNeedsAction(status: ApplicationStatus): boolean {
+  return status === "pending_review" || status === "waitlisted";
 }

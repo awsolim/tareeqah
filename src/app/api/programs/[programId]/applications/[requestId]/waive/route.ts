@@ -6,6 +6,7 @@ export const runtime = "nodejs";
 
 type WaiveRequestBody = {
   note?: string | null;
+  external?: boolean;
 };
 
 export async function POST(request: Request, { params }: { params: Promise<{ programId: string; requestId: string }> }) {
@@ -47,10 +48,12 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
     }
 
     const note = body.note?.trim() || null;
+    const external = Boolean(body.external);
     const { error: updateError } = await supabase
       .from("enrollment_requests")
       .update({
         payment_bypassed: true,
+        payment_bypass_external: external,
         approved_price_monthly_cents: 0,
         approved_price_annual_cents: 0,
         decision_note: note ?? enrollmentRequest.decision_note,
@@ -61,12 +64,16 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
     }
 
     const { data: student } = await supabase.from("profiles").select("full_name, email").eq("id", enrollmentRequest.student_profile_id).maybeSingle();
+    const label = student?.full_name || student?.email || "this student";
     await recordFinanceAuditEvent(supabase, {
       programId,
       studentProfileId: enrollmentRequest.student_profile_id,
       actorProfileId: user.id,
       eventType: "application_payment_waived",
-      summary: `Payment waived for ${student?.full_name || student?.email || "this student"}. Registration confirmation is still required.`,
+      summary: external
+        ? `Payment marked as paid externally for ${label}. Registration confirmation is still required.`
+        : `Payment waived for ${label}. Registration confirmation is still required.`,
+      metadata: { external },
     });
 
     return Response.json({ ok: true });

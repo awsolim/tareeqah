@@ -197,7 +197,7 @@ export async function POST(request: Request) {
     const lifecycleStatus = pickAllowed(body.lifecycleStatus, ["upcoming", "active", "paused", "completed", "cancelled", "archived"], "upcoming");
     const applicationMode = pickAllowed(body.applicationMode, ["application_required", "open_enrollment", "invite_only", "hidden_private"], "application_required");
     const durationType = pickAllowed(body.durationType, ["ongoing", "fixed_months"], "ongoing");
-    const paymentKind = pickAllowed(body.paymentKind, ["free", "tareeqah", "manual"], "free");
+    const paymentKind = pickAllowed(body.paymentKind, ["free", "tareeqah"], "free");
     const isPaid = paymentKind === "tareeqah";
     const offersMonthlyPayment = isPaid ? body.offersMonthlyPayment !== false : false;
     const offersAnnualPayment = isPaid ? Boolean(body.offersAnnualPayment) : false;

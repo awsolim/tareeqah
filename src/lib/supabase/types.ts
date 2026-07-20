@@ -163,6 +163,19 @@ export type Database = {
         Update: Partial<Database["public"]["Tables"]["program_instructor_events"]["Row"]>;
         Relationships: [];
       };
+      teacher_notification_state: {
+        Row: {
+          id: string;
+          user_id: string;
+          notification_key: string;
+          seen_at: string | null;
+          dismissed_at: string | null;
+          created_at: string;
+        };
+        Insert: Partial<Database["public"]["Tables"]["teacher_notification_state"]["Row"]>;
+        Update: Partial<Database["public"]["Tables"]["teacher_notification_state"]["Row"]>;
+        Relationships: [];
+      };
       enrollment_requests: {
         Row: {
           id: string;
@@ -180,6 +193,7 @@ export type Database = {
           approved_price_monthly_cents: number | null;
           approved_price_annual_cents: number | null;
           payment_bypassed: boolean;
+          payment_bypass_external: boolean;
           decision_note: string | null;
           admission_completed_at: string | null;
           student_dismissed_at: string | null;
