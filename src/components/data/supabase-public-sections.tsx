@@ -439,7 +439,6 @@ const fallbackDevSwitchAccounts: DevSwitchAccount[] = [
 ];
 
 const devSwitchAccountsStorageKey = "tareeqah:dev-switch-accounts";
-const seenStudentRequestsStorageKey = "tareeqah:seen-student-request-notifications";
 const editorToastStorageKey = "tareeqah:editor-toast";
 
 function getAnnouncementTargetTrackIds(announcement: Pick<AnnouncementWithContext, "target_program_track_ids">) {
@@ -493,51 +492,13 @@ function announcementTargetLabel(program: Pick<Program, "title">, track: Program
   return track ? `${program.title} - ${track.name}` : `${program.title} - All Tracks`;
 }
 
-function readSeenNotificationIds(storageKey: string, userId: string | null | undefined) {
-  if (typeof window === "undefined" || !userId) {
-    return new Set<string>();
-  }
-
-  try {
-    const parsed: unknown = JSON.parse(window.localStorage.getItem(storageKey) ?? "{}");
-    if (!parsed || typeof parsed !== "object" || !(userId in parsed)) {
-      return new Set<string>();
-    }
-
-    const ids = (parsed as Record<string, unknown>)[userId];
-    return new Set(Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : []);
-  } catch {
-    return new Set<string>();
-  }
-}
-
-function markNotificationIdsSeen(storageKey: string, userId: string | null | undefined, ids: string[]) {
-  if (typeof window === "undefined" || !userId || ids.length === 0) {
-    return readSeenNotificationIds(storageKey, userId);
-  }
-
-  const nextSeen = readSeenNotificationIds(storageKey, userId);
-  ids.forEach((id) => nextSeen.add(id));
-
-  try {
-    const parsed: unknown = JSON.parse(window.localStorage.getItem(storageKey) ?? "{}");
-    const byUser = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
-    byUser[userId] = Array.from(nextSeen).slice(-200);
-    window.localStorage.setItem(storageKey, JSON.stringify(byUser));
-  } catch {
-    // Notification badges are convenience state; ignore storage failures.
-  }
-
-  window.dispatchEvent(new Event("tareeqah:notifications-changed"));
-  return nextSeen;
-}
-
 /**
- * Durable, per-account notification "seen"/"dismissed" state for the teacher Inbox
- * (applications, withdrawals, instructors) — replaces the localStorage-only tracking above
- * for these categories, since that couldn't follow an account across browsers/devices.
+ * Durable, per-account notification "seen"/"dismissed" state — replaces the localStorage-only
+ * tracking above, which couldn't follow an account across browsers/devices. Shared by both the
+ * teacher Inbox (applications, withdrawals, instructors) and the student/parent Inbox
+ * (applications, withdrawals); the table is generic (user_id + notification_key), not role-specific.
  */
-async function fetchTeacherNotificationState(userId: string | null | undefined): Promise<{ seen: Set<string>; dismissed: Set<string> }> {
+async function fetchNotificationState(userId: string | null | undefined): Promise<{ seen: Set<string>; dismissed: Set<string> }> {
   if (!userId) {
     return { seen: new Set(), dismissed: new Set() };
   }
@@ -548,7 +509,7 @@ async function fetchTeacherNotificationState(userId: string | null | undefined):
   return { seen, dismissed };
 }
 
-async function markTeacherNotificationsSeen(userId: string | null | undefined, keys: string[]) {
+async function markNotificationsSeen(userId: string | null | undefined, keys: string[]) {
   if (!userId || keys.length === 0) {
     return;
   }
@@ -563,7 +524,7 @@ async function markTeacherNotificationsSeen(userId: string | null | undefined, k
   window.dispatchEvent(new Event("tareeqah:notifications-changed"));
 }
 
-async function markTeacherNotificationsDismissed(userId: string | null | undefined, keys: string[]) {
+async function markNotificationsDismissed(userId: string | null | undefined, keys: string[]) {
   if (!userId || keys.length === 0) {
     return;
   }
@@ -3426,7 +3387,8 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
     }
 
     setCurrentUserId(userId);
-    setSeenRequestIds(readSeenNotificationIds(seenStudentRequestsStorageKey, userId));
+    const { seen: initialSeenRequestIds } = await fetchNotificationState(userId);
+    setSeenRequestIds(initialSeenRequestIds);
 
     const { data: mosque } = await supabase.from("mosques").select("id").eq("slug", slug).maybeSingle();
     if (!mosque) {
@@ -3748,7 +3710,9 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
 
   useEffect(() => {
     if (!loading && tab === "requests" && allRequestIdsKey) {
-      setSeenRequestIds(markNotificationIdsSeen(seenStudentRequestsStorageKey, currentUserId, allRequestIdsKey.split("|")));
+      const keys = allRequestIdsKey.split("|");
+      setSeenRequestIds((current) => new Set([...current, ...keys]));
+      void markNotificationsSeen(currentUserId, keys);
     }
   }, [currentUserId, loading, allRequestIdsKey, tab]);
 
@@ -3756,10 +3720,12 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
     setTab(nextTab);
     setSelectedThread(null);
     if (nextTab === "requests") {
-      setSeenRequestIds(markNotificationIdsSeen(seenStudentRequestsStorageKey, currentUserId, [
+      const keys = [
         ...requests.map(studentRequestNotificationKey),
         ...studentWithdrawals.map(studentWithdrawalNotificationKey),
-      ]));
+      ];
+      setSeenRequestIds((current) => new Set([...current, ...keys]));
+      void markNotificationsSeen(currentUserId, keys);
     }
   }
 
@@ -4212,7 +4178,7 @@ export function TeacherInboxData({ slug }: { slug: string }) {
     }
 
     setCurrentUserId(userId);
-    const { seen: initialSeenIds, dismissed: initialDismissedIds } = await fetchTeacherNotificationState(userId);
+    const { seen: initialSeenIds, dismissed: initialDismissedIds } = await fetchNotificationState(userId);
     setSeenRequestIds(initialSeenIds);
     setDismissedNotificationIds(initialDismissedIds);
     const { data: mosque } = await supabase.from("mosques").select("id").eq("slug", slug).maybeSingle();
@@ -4544,7 +4510,7 @@ export function TeacherInboxData({ slug }: { slug: string }) {
     if (!loading && tab === "requests" && pendingRequestIdsKey) {
       const keys = pendingRequestIdsKey.split("|");
       setSeenRequestIds((current) => new Set([...current, ...keys]));
-      void markTeacherNotificationsSeen(currentUserId, keys);
+      void markNotificationsSeen(currentUserId, keys);
     }
   }, [currentUserId, loading, pendingRequestIdsKey, tab]);
 
@@ -4552,7 +4518,7 @@ export function TeacherInboxData({ slug }: { slug: string }) {
     if (!loading && tab === "instructors" && instructorIdsKey) {
       const keys = instructorIdsKey.split("|");
       setSeenRequestIds((current) => new Set([...current, ...keys]));
-      void markTeacherNotificationsSeen(currentUserId, keys);
+      void markNotificationsSeen(currentUserId, keys);
     }
   }, [currentUserId, instructorIdsKey, loading, tab]);
 
@@ -4560,7 +4526,7 @@ export function TeacherInboxData({ slug }: { slug: string }) {
     if (!loading && tab === "withdrawals" && withdrawalIdsKey) {
       const keys = withdrawalIdsKey.split("|");
       setSeenRequestIds((current) => new Set([...current, ...keys]));
-      void markTeacherNotificationsSeen(currentUserId, keys);
+      void markNotificationsSeen(currentUserId, keys);
     }
   }, [currentUserId, withdrawalIdsKey, loading, tab]);
 
@@ -4569,15 +4535,15 @@ export function TeacherInboxData({ slug }: { slug: string }) {
     router.replace(`/m/${slug}/teacher/inbox?tab=${nextTab}`, { scroll: false });
     if (nextTab === "requests" && requestNotificationIds.length) {
       setSeenRequestIds((current) => new Set([...current, ...requestNotificationIds]));
-      void markTeacherNotificationsSeen(currentUserId, requestNotificationIds);
+      void markNotificationsSeen(currentUserId, requestNotificationIds);
     }
     if (nextTab === "instructors" && newInstructorNotificationIds.length) {
       setSeenRequestIds((current) => new Set([...current, ...newInstructorNotificationIds]));
-      void markTeacherNotificationsSeen(currentUserId, newInstructorNotificationIds);
+      void markNotificationsSeen(currentUserId, newInstructorNotificationIds);
     }
     if (nextTab === "withdrawals" && withdrawalNotificationIds.length) {
       setSeenRequestIds((current) => new Set([...current, ...withdrawalNotificationIds]));
-      void markTeacherNotificationsSeen(currentUserId, withdrawalNotificationIds);
+      void markNotificationsSeen(currentUserId, withdrawalNotificationIds);
     }
   }
 
@@ -4587,7 +4553,7 @@ export function TeacherInboxData({ slug }: { slug: string }) {
       return;
     }
     setDismissedNotificationIds((current) => new Set([...current, ...keys]));
-    void markTeacherNotificationsDismissed(currentUserId, keys);
+    void markNotificationsDismissed(currentUserId, keys);
   }
 
   return (
@@ -4696,7 +4662,7 @@ export function TeacherInboxData({ slug }: { slug: string }) {
                     onClear={() => {
                       const key = teacherInstructorNotificationKey(notification);
                       setDismissedNotificationIds((current) => new Set([...current, key]));
-                      void markTeacherNotificationsDismissed(currentUserId, [key]);
+                      void markNotificationsDismissed(currentUserId, [key]);
                     }}
                   />
                 ))
@@ -13961,7 +13927,7 @@ export function useStudentNotificationCounts(slug: string) {
           : Promise.resolve({ data: [] as Array<{ id: string; seen_at: string | null }> }),
       ]);
 
-      const seenRequestIds = readSeenNotificationIds(seenStudentRequestsStorageKey, userId);
+      const { seen: seenRequestIds } = await fetchNotificationState(userId);
       const nextRequestCount =
         (requestRows ?? []).filter((request) => !seenRequestIds.has(studentRequestNotificationKey(request))).length +
         (withdrawalRows ?? []).filter((request) => !seenRequestIds.has(studentWithdrawalNotificationKey(request))).length;
@@ -14082,7 +14048,7 @@ export function useTeacherNotificationCounts(slug: string) {
           .select("id, assignment_id, teacher_profile_id, event_type")
           .in("program_id", programIds),
       ]);
-      const { seen: seenIds, dismissed: dismissedIds } = await fetchTeacherNotificationState(userId);
+      const { seen: seenIds, dismissed: dismissedIds } = await fetchNotificationState(userId);
       if (active) {
         const unseenApplications = (rows ?? []).filter((row) => !seenIds.has(teacherRequestNotificationKey(row))).length;
         const joinedAssignmentIdsWithEvents = new Set((instructorEventRows ?? []).filter((event) => event.event_type === "joined" && event.assignment_id).map((event) => event.assignment_id as string));
