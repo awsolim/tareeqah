@@ -2,7 +2,37 @@ import Stripe from "stripe";
 import { getStripe, getStripeWebhookSecret, shouldUseStripeConnect } from "@/lib/stripe/server";
 import { activateEnrollmentForRequest, selectedTrackIdsForRequest } from "@/lib/programs/enrollment-activation";
 import { recordFinanceAuditEvent } from "@/lib/finance/audit";
+import { getProgramManagerProfileIds } from "@/lib/push/program-recipients";
+import { sendPushNotification } from "@/lib/push/send-push";
+import { logServerError } from "@/lib/monitoring/log-error";
+import { insertProgramPayment } from "@/lib/finance/payments";
 import { createSupabaseServiceClient } from "@/lib/supabase/service";
+
+async function notifyProgramManagers(
+  supabase: ReturnType<typeof createSupabaseServiceClient>,
+  programId: string,
+  payload: { title: string; body: string },
+) {
+  const { data: program } = await supabase
+    .from("programs")
+    .select("title, mosque_id, director_profile_id, teacher_profile_id")
+    .eq("id", programId)
+    .maybeSingle();
+  if (!program) {
+    return;
+  }
+  const { data: mosque } = await supabase.from("mosques").select("slug").eq("id", program.mosque_id).maybeSingle();
+  if (!mosque) {
+    return;
+  }
+  const managerIds = await getProgramManagerProfileIds(supabase, { id: programId, ...program });
+  void sendPushNotification(supabase, {
+    recipientProfileIds: managerIds,
+    title: payload.title,
+    body: payload.body,
+    url: `/m/${mosque.slug}/teacher/inbox`,
+  });
+}
 
 export const runtime = "nodejs";
 
@@ -81,6 +111,34 @@ async function upsertPaidEnrollmentFromSession(session: Stripe.Checkout.Session,
     await replaceSubscriptionTracks(supabase, subscriptionRow.id, trackIds);
   }
 
+  if (!subscriptionId) {
+    // One-time payment (e.g. "Pay in Full" or a one-time change-price checkout) — no
+    // subscription/invoice will follow, so this is the only place the charge is ever
+    // visible to record it. Recurring payments are instead captured in handleInvoicePaid,
+    // since Stripe also fires invoice.paid for a new subscription's first invoice.
+    const paymentIntentId = typeof session.payment_intent === "string" ? session.payment_intent : session.payment_intent?.id ?? null;
+    if (paymentIntentId) {
+      const stripeRequestOptions = shouldUseStripeConnect() && stripeAccountId ? { stripeAccount: stripeAccountId } : undefined;
+      const paymentIntent = await getStripe().paymentIntents.retrieve(paymentIntentId, { expand: ["latest_charge"] }, stripeRequestOptions);
+      const charge = typeof paymentIntent.latest_charge === "string" ? null : paymentIntent.latest_charge;
+      if (charge) {
+        await insertProgramPayment(supabase, {
+          mosqueId,
+          programId,
+          programSubscriptionId: subscriptionRow?.id ?? null,
+          studentProfileId,
+          parentProfileId,
+          stripeChargeId: charge.id,
+          stripePaymentIntentId: paymentIntentId,
+          amountCents: charge.amount,
+          currency: charge.currency,
+          paidAt: new Date(charge.created * 1000).toISOString(),
+          receiptUrl: charge.receipt_url,
+        });
+      }
+    }
+  }
+
   await activateEnrollmentForRequest(supabase, {
     enrollmentRequestId,
     programId,
@@ -89,6 +147,7 @@ async function upsertPaidEnrollmentFromSession(session: Stripe.Checkout.Session,
   });
 
   const { data: student } = await supabase.from("profiles").select("full_name, email").eq("id", studentProfileId).maybeSingle();
+  const studentLabel = student?.full_name || student?.email || "this student";
   await recordFinanceAuditEvent(supabase, {
     programId,
     studentProfileId,
@@ -96,9 +155,14 @@ async function upsertPaidEnrollmentFromSession(session: Stripe.Checkout.Session,
     eventType: paymentType === "annual" ? "payment_completed" : "subscription_started",
     summary:
       paymentType === "annual"
-        ? `Payment completed and enrollment activated for ${student?.full_name || student?.email || "this student"}.`
-        : `Subscription started and enrollment activated for ${student?.full_name || student?.email || "this student"}.`,
+        ? `Payment completed and enrollment activated for ${studentLabel}.`
+        : `Subscription started and enrollment activated for ${studentLabel}.`,
     metadata: { stripeSubscriptionId: subscriptionId, stripeCheckoutSessionId: session.id },
+  });
+
+  await notifyProgramManagers(supabase, programId, {
+    title: "Payment received",
+    body: paymentType === "annual" ? `${studentLabel} completed payment and enrollment is active.` : `${studentLabel} started a subscription and enrollment is active.`,
   });
 }
 
@@ -133,7 +197,7 @@ async function handleInvoicePaid(invoice: Stripe.Invoice) {
   const supabase = createSupabaseServiceClient();
   const { data: subscriptionRow } = await supabase
     .from("program_subscriptions")
-    .select("id, program_id, student_profile_id")
+    .select("id, mosque_id, program_id, student_profile_id, parent_profile_id")
     .eq("stripe_subscription_id", subscriptionId)
     .maybeSingle();
   if (!subscriptionRow?.program_id || !subscriptionRow.student_profile_id) {
@@ -149,14 +213,35 @@ async function handleInvoicePaid(invoice: Stripe.Invoice) {
     })
     .eq("id", subscriptionRow.id);
 
+  if (subscriptionRow.mosque_id) {
+    await insertProgramPayment(supabase, {
+      mosqueId: subscriptionRow.mosque_id,
+      programId: subscriptionRow.program_id,
+      programSubscriptionId: subscriptionRow.id,
+      studentProfileId: subscriptionRow.student_profile_id,
+      parentProfileId: subscriptionRow.parent_profile_id,
+      stripeInvoiceId: invoice.id,
+      amountCents: invoice.amount_paid,
+      currency: invoice.currency,
+      paidAt: stripeTimestampToIso(invoice.status_transitions.paid_at) ?? new Date().toISOString(),
+      receiptUrl: invoice.hosted_invoice_url ?? invoice.invoice_pdf ?? null,
+    });
+  }
+
   const { data: student } = await supabase.from("profiles").select("full_name, email").eq("id", subscriptionRow.student_profile_id).maybeSingle();
+  const studentLabel = student?.full_name || student?.email || "this student";
   await recordFinanceAuditEvent(supabase, {
     programId: subscriptionRow.program_id,
     studentProfileId: subscriptionRow.student_profile_id,
     actorProfileId: null,
     eventType: "invoice_paid",
-    summary: `Payment received for ${student?.full_name || student?.email || "this student"}.`,
+    summary: `Payment received for ${studentLabel}.`,
     metadata: { stripeSubscriptionId: subscriptionId, amountPaidCents: invoice.amount_paid },
+  });
+
+  await notifyProgramManagers(supabase, subscriptionRow.program_id, {
+    title: "Payment received",
+    body: `A recurring payment from ${studentLabel} was received.`,
   });
 }
 
@@ -177,13 +262,19 @@ async function handleInvoicePaymentFailed(invoice: Stripe.Invoice) {
   }
 
   const { data: student } = await supabase.from("profiles").select("full_name, email").eq("id", subscriptionRow.student_profile_id).maybeSingle();
+  const studentLabel = student?.full_name || student?.email || "this student";
   await recordFinanceAuditEvent(supabase, {
     programId: subscriptionRow.program_id,
     studentProfileId: subscriptionRow.student_profile_id,
     actorProfileId: null,
     eventType: "payment_failed",
-    summary: `Payment failed for ${student?.full_name || student?.email || "this student"}. The student remains enrolled; billing will show as past due.`,
+    summary: `Payment failed for ${studentLabel}. The student remains enrolled; billing will show as past due.`,
     metadata: { stripeSubscriptionId: subscriptionId },
+  });
+
+  await notifyProgramManagers(supabase, subscriptionRow.program_id, {
+    title: "Payment failed",
+    body: `A payment from ${studentLabel} failed. Billing will show as past due.`,
   });
 }
 
@@ -222,6 +313,11 @@ export async function POST(request: Request) {
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Stripe webhook handling failed.";
+    await logServerError(createSupabaseServiceClient(), {
+      source: "stripe.webhook",
+      message,
+      context: { eventType: event.type, eventId: event.id },
+    });
     return Response.json({ error: message }, { status: 500 });
   }
 

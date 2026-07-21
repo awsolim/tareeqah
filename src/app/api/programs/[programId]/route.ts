@@ -41,6 +41,7 @@ type UpdateProgramBody = {
   manualPaymentNote?: string | null;
   financialAssistanceNote?: string | null;
   receiptNote?: string | null;
+  taxReceiptPolicy?: string;
   contactName?: string | null;
   contactEmail?: string | null;
   contactPhone?: string | null;
@@ -137,6 +138,7 @@ const optionalProgramBuilderColumns = new Set([
   "manual_payment_note",
   "financial_assistance_note",
   "receipt_note",
+  "tax_receipt_policy",
   "contact_name",
   "contact_email",
   "contact_phone",
@@ -447,6 +449,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
       manual_payment_note: cleanText(body.manualPaymentNote, 1000),
       financial_assistance_note: cleanText(body.financialAssistanceNote, 1000),
       receipt_note: cleanText(body.receiptNote, 1000),
+      tax_receipt_policy: pickAllowed(body.taxReceiptPolicy, ["not_applicable", "admin_review_required", "eligible_confirmed"], "not_applicable"),
       contact_name: cleanText(body.contactName, 120),
       contact_email: cleanText(body.contactEmail, 180),
       contact_phone: cleanText(body.contactPhone, 60),

@@ -1,5 +1,6 @@
 import { requireProgramManageAccess } from "@/lib/programs/auth";
 import { recordFinanceAuditEvent } from "@/lib/finance/audit";
+import { sendPushNotification } from "@/lib/push/send-push";
 import { createSupabaseServiceClient } from "@/lib/supabase/service";
 
 export const runtime = "nodejs";
@@ -81,6 +82,17 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
       summary: `Approved price changed to $${(priceCents / 100).toFixed(2)} ${paymentType === "annual" ? "(Pay in Full)" : "/month"} for ${student?.full_name || student?.email || "this student"}.`,
       metadata: { paymentType, priceCents },
     });
+
+    const { data: program } = await supabase.from("programs").select("title, mosque_id").eq("id", programId).maybeSingle();
+    const { data: mosque } = program ? await supabase.from("mosques").select("slug").eq("id", program.mosque_id).maybeSingle() : { data: null };
+    if (program && mosque) {
+      void sendPushNotification(supabase, {
+        recipientProfileIds: [enrollmentRequest.parent_profile_id, enrollmentRequest.student_profile_id],
+        title: "Price updated",
+        body: `The approved price for ${program.title} was updated to $${(priceCents / 100).toFixed(2)}.`,
+        url: `/m/${mosque.slug}/registration/${requestId}`,
+      });
+    }
 
     return Response.json({ ok: true });
   } catch (error) {

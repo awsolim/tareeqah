@@ -65,8 +65,8 @@ self.addEventListener("push", (event) => {
   event.waitUntil(
     self.registration.showNotification(data.title || "Tareeqah", {
       body: data.body,
-      icon: "/icon",
-      badge: "/icon",
+      icon: "/icon-192x192.png",
+      badge: "/icon-192x192.png",
       data: {
         url: data.url || "/",
       },

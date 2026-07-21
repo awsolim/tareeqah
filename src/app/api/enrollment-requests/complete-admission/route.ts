@@ -1,3 +1,5 @@
+import { getProgramManagerProfileIds } from "@/lib/push/program-recipients";
+import { sendPushNotification } from "@/lib/push/send-push";
 import { createSupabaseServiceClient } from "@/lib/supabase/service";
 
 export const runtime = "nodejs";
@@ -69,6 +71,10 @@ export async function POST(request: Request) {
         student_profile_id: enrollmentRequest.student_profile_id,
         program_track_id: trackIds[0] ?? enrollmentRequest.program_track_id,
         status: "active",
+        // Explicitly refreshed so a student who withdraws and later re-joins the same
+        // program gets a fresh join date instead of Postgres silently keeping the
+        // original insert's default (announcement notifications key off this).
+        created_at: now,
       },
       { onConflict: "program_id,student_profile_id" },
     ).select("id").single();
@@ -82,6 +88,25 @@ export async function POST(request: Request) {
       .from("enrollment_requests")
       .update({ admission_completed_at: now, student_dismissed_at: now, teacher_dismissed_at: null })
       .eq("id", enrollmentRequest.id);
+
+    const { data: program } = await supabase
+      .from("programs")
+      .select("title, mosque_id, director_profile_id, teacher_profile_id")
+      .eq("id", enrollmentRequest.program_id)
+      .maybeSingle();
+    if (program) {
+      const { data: mosque } = await supabase.from("mosques").select("slug").eq("id", program.mosque_id).maybeSingle();
+      const { data: student } = await supabase.from("profiles").select("full_name, email").eq("id", enrollmentRequest.student_profile_id).maybeSingle();
+      const managerIds = await getProgramManagerProfileIds(supabase, { id: enrollmentRequest.program_id, ...program });
+      if (mosque) {
+        void sendPushNotification(supabase, {
+          recipientProfileIds: managerIds,
+          title: "Registration completed",
+          body: `${student?.full_name || student?.email || "A student"} completed registration for ${program.title}.`,
+          url: `/m/${mosque.slug}/teacher/inbox`,
+        });
+      }
+    }
 
     return Response.json({ ok: true });
   } catch (error) {

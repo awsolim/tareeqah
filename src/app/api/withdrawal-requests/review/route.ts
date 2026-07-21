@@ -1,4 +1,5 @@
 import { cancelProgramSubscription } from "@/lib/stripe/subscriptions";
+import { sendPushNotification } from "@/lib/push/send-push";
 import { createSupabaseServiceClient } from "@/lib/supabase/service";
 
 export const runtime = "nodejs";
@@ -59,6 +60,8 @@ export async function POST(request: Request) {
     }
 
     const now = new Date().toISOString();
+    const { data: program } = await supabase.from("programs").select("title, mosque_id").eq("id", withdrawalRequest.program_id).maybeSingle();
+    const { data: mosque } = program ? await supabase.from("mosques").select("slug").eq("id", program.mosque_id).maybeSingle() : { data: null };
 
     if (body.status === "rejected") {
       const { error: updateError } = await supabase
@@ -73,6 +76,15 @@ export async function POST(request: Request) {
 
       if (updateError) {
         return Response.json({ error: updateError.message }, { status: 500 });
+      }
+
+      if (program && mosque) {
+        void sendPushNotification(supabase, {
+          recipientProfileIds: [withdrawalRequest.parent_profile_id, withdrawalRequest.student_profile_id],
+          title: "Withdrawal request rejected",
+          body: `Your withdrawal request for ${program.title} was rejected. Enrollment remains active.`,
+          url: `/m/${mosque.slug}/portal/classes`,
+        });
       }
 
       return Response.json({ ok: true });
@@ -109,6 +121,15 @@ export async function POST(request: Request) {
 
     if (enrollmentUpdateError) {
       return Response.json({ error: enrollmentUpdateError.message }, { status: 500 });
+    }
+
+    if (program && mosque) {
+      void sendPushNotification(supabase, {
+        recipientProfileIds: [withdrawalRequest.parent_profile_id, withdrawalRequest.student_profile_id],
+        title: "Withdrawal request approved",
+        body: `Your withdrawal request for ${program.title} was approved. Enrollment has ended.`,
+        url: `/m/${mosque.slug}/portal/classes`,
+      });
     }
 
     return Response.json({ ok: true });

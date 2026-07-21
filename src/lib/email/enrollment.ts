@@ -3,6 +3,8 @@ import "server-only";
 import { createSupabaseServiceClient } from "@/lib/supabase/service";
 import type { Database } from "@/lib/supabase/types";
 import { escapeHtml, getAppBaseUrl, sendEmail } from "@/lib/email/resend";
+import { getProgramManagerProfileIds } from "@/lib/push/program-recipients";
+import { sendPushNotification } from "@/lib/push/send-push";
 
 type EnrollmentRequest = Database["public"]["Tables"]["enrollment_requests"]["Row"];
 type Program = Database["public"]["Tables"]["programs"]["Row"];
@@ -111,15 +113,25 @@ export async function sendEnrollmentSubmittedEmails(requestIds: string[], userId
   const contexts = await loadEnrollmentEmailContexts(requestIds);
   const ownedContexts = contexts.filter(({ request }) => request.student_profile_id === userId || request.parent_profile_id === userId);
 
+  const supabase = createSupabaseServiceClient();
   const results = await Promise.all(
     ownedContexts.map(async ({ program, mosque, student, parent, teacher }) => {
+      const studentName = profileName(student, "A student");
+      const parentName = parent ? profileName(parent, "A parent") : null;
+      const requesterText = parentName ? `${parentName} submitted this request for ${studentName}.` : `${studentName} submitted this request.`;
+
+      const managerIds = await getProgramManagerProfileIds(supabase, program);
+      void sendPushNotification(supabase, {
+        recipientProfileIds: managerIds,
+        title: "New application received",
+        body: `${requesterText} Class: ${program.title}.`,
+        url: teacherInboxUrl(mosque.slug),
+      });
+
       if (!teacher?.email) {
         return { ok: true, skipped: true, reason: "Teacher profile has no email." };
       }
 
-      const studentName = profileName(student, "A student");
-      const parentName = parent ? profileName(parent, "A parent") : null;
-      const requesterText = parentName ? `${parentName} submitted this request for ${studentName}.` : `${studentName} submitted this request.`;
       const body = `
         <p style="margin:0 0 12px;">${escapeHtml(requesterText)}</p>
         <p style="margin:0 0 12px;"><strong>Class:</strong> ${escapeHtml(program.title)}</p>

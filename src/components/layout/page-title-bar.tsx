@@ -37,16 +37,25 @@ export function PageTitleBar({
         )}
       >
         {backHref ? (
-          <div className={cn("flex w-full items-center gap-3", shouldCenterBackTitle ? "justify-center" : "translate-y-12")} style={shouldCenterBackTitle ? { transform: "translateY(23px)" } : undefined}>
+          <div
+            className={cn("w-full items-center gap-3", shouldCenterBackTitle ? "grid grid-cols-[40px_1fr_40px]" : "flex translate-y-12")}
+            style={shouldCenterBackTitle ? { transform: "translateY(23px)" } : undefined}
+          >
             <TransitionBackButton
               fallbackHref={backHref}
               label={backLabel}
-              className={cn(
-                "flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white text-[#111827] shadow-[0_8px_18px_rgba(38,50,58,0.14)] ring-1 ring-white/80 transition-colors hover:bg-[#F7FBFC]",
-                shouldCenterBackTitle && "absolute left-7",
-              )}
+              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white text-[#111827] shadow-[0_8px_18px_rgba(38,50,58,0.14)] ring-1 ring-white/80 transition-colors hover:bg-[#F7FBFC]"
             />
-            <h1 className={cn("font-semibold leading-none tracking-normal", shouldUseSmallTitle ? "text-2xl md:text-3xl" : "text-[2.15rem] md:text-5xl")}>{title}</h1>
+            <h1
+              className={cn(
+                "min-w-0 font-semibold leading-none tracking-normal",
+                shouldCenterBackTitle && "truncate text-center",
+                shouldUseSmallTitle ? "text-2xl md:text-3xl" : "text-[2.15rem] md:text-5xl",
+              )}
+            >
+              {title}
+            </h1>
+            {shouldCenterBackTitle ? <div aria-hidden /> : null}
           </div>
         ) : null}
         {!backHref ? (

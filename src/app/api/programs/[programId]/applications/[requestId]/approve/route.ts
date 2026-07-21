@@ -1,5 +1,6 @@
 import { requireProgramManageAccess } from "@/lib/programs/auth";
 import { recordFinanceAuditEvent } from "@/lib/finance/audit";
+import { sendPushNotification } from "@/lib/push/send-push";
 import { createSupabaseServiceClient } from "@/lib/supabase/service";
 
 export const runtime = "nodejs";
@@ -109,6 +110,16 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
       summary,
       metadata: { paymentType: approvalPaymentType, paymentBypassed, paymentBypassedExternal },
     });
+
+    const { data: mosque } = await supabase.from("mosques").select("slug").eq("id", program.mosque_id).maybeSingle();
+    if (mosque) {
+      void sendPushNotification(supabase, {
+        recipientProfileIds: [enrollmentRequest.parent_profile_id, enrollmentRequest.student_profile_id],
+        title: "Application approved",
+        body: `${label}'s application to ${program.title} was approved.`,
+        url: `/m/${mosque.slug}/portal/classes?tab=applications`,
+      });
+    }
 
     return Response.json({ ok: true });
   } catch (error) {

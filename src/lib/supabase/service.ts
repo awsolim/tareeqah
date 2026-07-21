@@ -3,6 +3,7 @@ import "server-only";
 import { createClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/types";
 import { getSupabasePublicEnv } from "@/lib/supabase/env";
+import { fetchWithTimeout } from "@/lib/supabase/fetch-with-timeout";
 
 export function createSupabaseServiceClient() {
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -17,5 +18,6 @@ export function createSupabaseServiceClient() {
       persistSession: false,
       autoRefreshToken: false,
     },
+    global: { fetch: fetchWithTimeout() },
   });
 }

@@ -1,5 +1,6 @@
 import { requireProgramManageAccess } from "@/lib/programs/auth";
 import { recordFinanceAuditEvent } from "@/lib/finance/audit";
+import { sendPushNotification } from "@/lib/push/send-push";
 import { createSupabaseServiceClient } from "@/lib/supabase/service";
 
 export const runtime = "nodejs";
@@ -75,6 +76,17 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
         : `Payment waived for ${label}. Registration confirmation is still required.`,
       metadata: { external },
     });
+
+    const { data: program } = await supabase.from("programs").select("title, mosque_id").eq("id", programId).maybeSingle();
+    const { data: mosque } = program ? await supabase.from("mosques").select("slug").eq("id", program.mosque_id).maybeSingle() : { data: null };
+    if (program && mosque) {
+      void sendPushNotification(supabase, {
+        recipientProfileIds: [enrollmentRequest.parent_profile_id, enrollmentRequest.student_profile_id],
+        title: "Payment waived",
+        body: `Payment for ${program.title} was waived. Complete registration to activate the class.`,
+        url: `/m/${mosque.slug}/registration/${requestId}`,
+      });
+    }
 
     return Response.json({ ok: true });
   } catch (error) {

@@ -39,6 +39,10 @@ export async function activateEnrollmentForRequest(
         student_profile_id: params.studentProfileId,
         program_track_id: trackIds[0] ?? params.fallbackTrackId,
         status: "active",
+        // Explicitly refreshed so a student who withdraws and later re-joins the same
+        // program gets a fresh join date instead of Postgres silently keeping the
+        // original insert's default (announcement notifications key off this).
+        created_at: new Date().toISOString(),
       },
       { onConflict: "program_id,student_profile_id" },
     )

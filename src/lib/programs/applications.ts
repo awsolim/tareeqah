@@ -159,7 +159,6 @@ export type ApplicationRowAction =
   | "reject"
   | "cancel_approval"
   | "change_price"
-  | "waive_payment"
   | "copy_confirmation_link"
   | "reopen";
 
@@ -171,7 +170,7 @@ export function getApplicationRowActions(status: ApplicationStatus): Application
     case "waitlisted":
       return ["view", "approve", "reject"];
     case "approved_confirmation_required":
-      return ["view", "copy_confirmation_link", "change_price", "waive_payment", "cancel_approval"];
+      return ["view", "copy_confirmation_link", "change_price", "cancel_approval"];
     case "rejected":
       return ["view", "reopen"];
     case "completed_enrolled":

@@ -70,6 +70,7 @@ export type Database = {
           manual_payment_note: string | null;
           financial_assistance_note: string | null;
           receipt_note: string | null;
+          tax_receipt_policy: string;
           contact_name: string | null;
           contact_email: string | null;
           contact_phone: string | null;
@@ -174,6 +175,32 @@ export type Database = {
         };
         Insert: Partial<Database["public"]["Tables"]["teacher_notification_state"]["Row"]>;
         Update: Partial<Database["public"]["Tables"]["teacher_notification_state"]["Row"]>;
+        Relationships: [];
+      };
+      push_subscriptions: {
+        Row: {
+          id: string;
+          profile_id: string;
+          endpoint: string;
+          p256dh: string;
+          auth: string;
+          user_agent: string | null;
+          created_at: string;
+        };
+        Insert: Partial<Database["public"]["Tables"]["push_subscriptions"]["Row"]>;
+        Update: Partial<Database["public"]["Tables"]["push_subscriptions"]["Row"]>;
+        Relationships: [];
+      };
+      system_error_logs: {
+        Row: {
+          id: string;
+          source: string;
+          message: string;
+          context: Json | null;
+          created_at: string;
+        };
+        Insert: Partial<Database["public"]["Tables"]["system_error_logs"]["Row"]>;
+        Update: Partial<Database["public"]["Tables"]["system_error_logs"]["Row"]>;
         Relationships: [];
       };
       enrollment_requests: {
@@ -346,6 +373,33 @@ export type Database = {
         };
         Insert: Partial<Database["public"]["Tables"]["program_finance_audit_events"]["Row"]>;
         Update: Partial<Database["public"]["Tables"]["program_finance_audit_events"]["Row"]>;
+        Relationships: [];
+      };
+      program_payments: {
+        Row: {
+          id: string;
+          mosque_id: string | null;
+          program_id: string | null;
+          program_subscription_id: string | null;
+          student_profile_id: string | null;
+          parent_profile_id: string | null;
+          stripe_charge_id: string | null;
+          stripe_payment_intent_id: string | null;
+          stripe_invoice_id: string | null;
+          amount_cents: number;
+          currency: string;
+          paid_at: string;
+          receipt_url: string | null;
+          tax_receipt_status: string;
+          tax_receipt_eligible_amount_cents: number | null;
+          tax_receipt_number: string | null;
+          tax_receipt_issued_at: string | null;
+          tax_receipt_issued_by: string | null;
+          tax_receipt_note: string | null;
+          created_at: string;
+        };
+        Insert: Partial<Database["public"]["Tables"]["program_payments"]["Row"]>;
+        Update: Partial<Database["public"]["Tables"]["program_payments"]["Row"]>;
         Relationships: [];
       };
       program_details: {
