@@ -6,7 +6,7 @@ import { createPortal } from "react-dom";
 import { ChildrenManager } from "@/components/data/children-manager";
 import { TransitionLink } from "@/components/layout/transition-link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import type { CSSProperties, Dispatch, PointerEvent as ReactPointerEvent, ReactNode, RefObject, SetStateAction, WheelEvent as ReactWheelEvent } from "react";
+import type { Dispatch, PointerEvent as ReactPointerEvent, ReactNode, RefObject, SetStateAction, WheelEvent as ReactWheelEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { EmptyState } from "@/components/data/empty-state";
 import { FlatLink } from "@/components/ui/flat-button";
@@ -53,6 +53,11 @@ type ProgramSubscription = Database["public"]["Tables"]["program_subscriptions"]
 type ProgramFinanceAuditEvent = Database["public"]["Tables"]["program_finance_audit_events"]["Row"];
 type AnnouncementReceipt = Database["public"]["Tables"]["program_announcement_receipts"]["Row"];
 type ProgramSessionCancellation = Database["public"]["Tables"]["program_session_cancellations"]["Row"];
+type ProgramTrackSwitchRequestRow = Database["public"]["Tables"]["program_track_switch_requests"]["Row"];
+type ProgramTrackSwitchRequestWithContext = ProgramTrackSwitchRequestRow & {
+  program?: Program | null;
+  student?: StudentDisplay | null;
+};
 type TeacherDisplay = Pick<Profile, "id" | "full_name" | "avatar_url" | "teacher_credentials" | "teacher_whatsapp_number">;
 type StudentDisplay = Pick<Profile, "id" | "full_name" | "email" | "phone_number" | "avatar_url" | "age" | "gender" | "date_of_birth" | "account_type">;
 type ParentDisplay = Pick<Profile, "id" | "full_name" | "email" | "phone_number" | "avatar_url">;
@@ -60,6 +65,8 @@ type DirectorOption = Pick<Profile, "id" | "full_name" | "email" | "phone_number
 
 type ProgramWithTeacher = Program & {
   teacher?: TeacherDisplay | null;
+  coverDirectorDisplayName?: string | null;
+  coverDirectorVisibility?: string;
 };
 
 type TeacherProgramRole = "director" | "instructor";
@@ -77,7 +84,13 @@ type ProgramEditorTrackRow = {
   pricingOverrideEnabled?: boolean;
   priceMonthly?: string;
   priceAnnual?: string;
+  eligibilityOverrideEnabled?: boolean;
+  ageMin?: string;
+  ageMax?: string;
+  genderOverride?: string;
+  eligibilityComment?: string;
 };
+type ProgramEditorTransferRule = { id: string; fromTrackId: string; toTrackId: string };
 type ProgramBuilderStep = "basics" | "public" | "schedule" | "pricing" | "review";
 type ProgramBuilderStatus = {
   internalName: string;
@@ -114,6 +127,8 @@ type ProgramBuilderStatus = {
   financialAssistanceNote: string;
   receiptNote: string;
   taxReceiptPolicy: "not_applicable" | "admin_review_required" | "eligible_confirmed";
+  trackSwitchPolicy: "disabled" | "request_only" | "allowed";
+  trackSwitchAllowAll: boolean;
   contactEmail: string;
   contactPhone: string;
   coverPriceLabelEnabled: boolean;
@@ -180,6 +195,8 @@ function defaultBuilderStatus(): ProgramBuilderStatus {
     financialAssistanceNote: "Financial assistance or custom payment arrangements may be available. Please apply and contact the program Director for details.",
     receiptNote: "Receipt eligibility may depend on program type and masjid policy. Please contact administration for details.",
     taxReceiptPolicy: "not_applicable",
+    trackSwitchPolicy: "disabled",
+    trackSwitchAllowAll: false,
     contactEmail: "",
     contactPhone: "",
     coverPriceLabelEnabled: true,
@@ -223,6 +240,8 @@ function defaultProgramBuilderColumns(): Pick<Program,
   | "financial_assistance_note"
   | "receipt_note"
   | "tax_receipt_policy"
+  | "track_switch_policy"
+  | "track_switch_allow_all"
   | "contact_name"
   | "contact_email"
   | "contact_phone"
@@ -266,6 +285,8 @@ function defaultProgramBuilderColumns(): Pick<Program,
     financial_assistance_note: defaults.financialAssistanceNote,
     receipt_note: defaults.receiptNote,
     tax_receipt_policy: defaults.taxReceiptPolicy,
+    track_switch_policy: defaults.trackSwitchPolicy,
+    track_switch_allow_all: defaults.trackSwitchAllowAll,
     contact_name: null,
     contact_email: null,
     contact_phone: null,
@@ -290,7 +311,7 @@ function programAlreadyStarted(program: Program | null) {
   return new Date(`${program.start_date}T00:00:00`).getTime() < startOfToday().getTime();
 }
 
-function defaultProgramTrackBuilderColumns(): Pick<ProgramTrack, "gender_override" | "age_min" | "age_max" | "location" | "room" | "capacity" | "pricing_override_enabled" | "price_monthly_cents" | "price_annual_cents"> {
+function defaultProgramTrackBuilderColumns(): Pick<ProgramTrack, "gender_override" | "age_min" | "age_max" | "location" | "room" | "capacity" | "pricing_override_enabled" | "price_monthly_cents" | "price_annual_cents" | "eligibility_comment"> {
   return {
     gender_override: null,
     age_min: null,
@@ -301,6 +322,16 @@ function defaultProgramTrackBuilderColumns(): Pick<ProgramTrack, "gender_overrid
     pricing_override_enabled: false,
     price_monthly_cents: null,
     price_annual_cents: null,
+    eligibility_comment: null,
+  };
+}
+
+function trackEligibilityOverrideColumns(track: ProgramEditorTrackRow) {
+  return {
+    gender_override: track.eligibilityOverrideEnabled ? track.genderOverride || "all" : null,
+    age_min: track.eligibilityOverrideEnabled && track.ageMin ? Number(track.ageMin) : null,
+    age_max: track.eligibilityOverrideEnabled && track.ageMax ? Number(track.ageMax) : null,
+    eligibility_comment: track.eligibilityOverrideEnabled ? track.eligibilityComment?.trim() || null : null,
   };
 }
 
@@ -388,6 +419,57 @@ type InstructorLifecycleNotification = {
   program?: Program | null;
   instructor?: Profile | null;
 };
+type TeacherInboxTab = "requests" | "other";
+type TeacherInboxSortMode = "newest" | "unread";
+type TeacherInboxMessageItem =
+  | {
+      id: string;
+      key: string;
+      kind: "application";
+      title: string;
+      subtitle: string;
+      meta: string;
+      createdAt: string;
+      unread: boolean;
+      requiresAction: boolean;
+      request: RequestWithContext;
+    }
+  | {
+      id: string;
+      key: string;
+      kind: "withdrawal";
+      title: string;
+      subtitle: string;
+      meta: string;
+      createdAt: string;
+      unread: boolean;
+      requiresAction: boolean;
+      request: WithdrawalRequestWithContext;
+    }
+  | {
+      id: string;
+      key: string;
+      kind: "instructor";
+      title: string;
+      subtitle: string;
+      meta: string;
+      createdAt: string;
+      unread: boolean;
+      requiresAction: false;
+      notification: InstructorLifecycleNotification;
+    }
+  | {
+      id: string;
+      key: string;
+      kind: "switch";
+      title: string;
+      subtitle: string;
+      meta: string;
+      createdAt: string;
+      unread: boolean;
+      requiresAction: boolean;
+      request: ProgramTrackSwitchRequestWithContext;
+    };
 
 type ProgramScheduleRow = {
   id?: string;
@@ -1237,7 +1319,6 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
   const teacherName = details?.instructor_display_name?.trim() || program.teacher?.full_name || "Teacher to be announced";
   const isTeacherContext = section === "teacher";
   const teacherCredentials = details?.instructor_credentials?.trim() ?? "";
-  const teacherWhatsAppHref = getWhatsAppHref(details?.instructor_contact_phone?.trim() || program.teacher?.teacher_whatsapp_number);
   const age = formatAgeRange(program.age_range_text);
   const gender = formatGender(program.audience_gender);
   const schedule = scheduleSummary(program.schedule, program.schedule_notes);
@@ -1245,11 +1326,15 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
   const locationName = primaryTrack?.location?.trim() || program.location?.trim() || "";
   const locationRoom = primaryTrack?.room?.trim() || program.room?.trim() || "";
   const locationDisplay = locationName ? `${locationName}${locationRoom ? `, ${locationRoom}` : ""}` : "Location will be announced";
-  const durationDisplay = program.start_date
-    ? program.end_date
-      ? `${formatFinanceShortDate(program.start_date)} – ${formatFinanceShortDate(program.end_date)}`
-      : `${formatFinanceShortDate(program.start_date)} · Ongoing`
-    : "Schedule to be announced";
+  const durationDisplay = program.is_ongoing
+    ? program.start_date
+      ? `${formatDurationDate(program.start_date)} · Ongoing`
+      : "Ongoing"
+    : program.start_date && program.end_date
+      ? `${formatDurationDate(program.start_date)} – ${formatDurationDate(program.end_date)}`
+      : program.start_date
+        ? `Starts ${formatDurationDate(program.start_date)}`
+        : "Schedule to be announced";
   const registrationState = programRegistrationLabel(program);
   const registrationDeadlineText =
     registrationState.label === "Registration open" && program.application_close_at
@@ -1466,27 +1551,22 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
                 </div>
               </div>
               {teacherCredentials ? <p className="mt-4 text-center text-sm leading-7 text-white/82">{teacherCredentials}</p> : null}
-              <div className="mt-5 flex justify-center">
-                {teacherWhatsAppHref ? (
-                  <a
-                    href={teacherWhatsAppHref}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex min-h-11 min-w-36 items-center justify-center gap-2 rounded-lg bg-white px-5 text-sm font-semibold !text-[#17624F] shadow-[0_10px_20px_rgba(15,69,55,0.22)] ring-1 ring-white/70 transition-colors hover:bg-[#F4FBF8]"
-                    style={{ color: "#17624F" }}
-                  >
-                    <MessageIcon className="text-[#17624F]" style={{ color: "#17624F" }} />
-                    <span className="!text-[#17624F]" style={{ color: "#17624F" }}>
-                      Contact
-                    </span>
-                  </a>
-                ) : (
-                  <span className="inline-flex min-h-11 min-w-36 items-center justify-center gap-2 rounded-lg bg-white/12 px-5 text-sm font-semibold text-white/75 ring-1 ring-white/20">
-                    <MessageIcon />
-                    Contact unavailable
-                  </span>
-                )}
-              </div>
+              {program.contact_phone || program.contact_email ? (
+                <div className="mt-5 space-y-2 rounded-lg bg-white/10 px-4 py-3 text-sm ring-1 ring-white/20">
+                  {program.contact_phone ? (
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-white/70">Phone</span>
+                      <span className="font-semibold text-white">{program.contact_phone}</span>
+                    </div>
+                  ) : null}
+                  {program.contact_email ? (
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-white/70">Email</span>
+                      <span className="font-semibold text-white">{program.contact_email}</span>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
             </section>
 
             {faqs.length ? <ProgramFaqSection faqs={faqs} /> : null}
@@ -1940,7 +2020,8 @@ export function ProgramApplyData({ slug, programId }: { slug: string; programId:
             ) : program.is_paid ? (
               <DetailSection title="Price">
                 <div className="flex flex-col items-end gap-1 text-right">
-                  <TrackPriceNumber price={trackPriceLine(null, program, selectedPaymentType)} />
+                  <TrackPriceNumber price={trackPriceLine(null, program, selectedPaymentType, { bareLabel: true })} />
+                  <TrackPricingDealCaption track={null} program={program} paymentType={selectedPaymentType} />
                 </div>
               </DetailSection>
             ) : null}
@@ -2215,7 +2296,7 @@ export function RegistrationConfirmationData({ slug, requestId }: { slug: string
   const durationLabel = program.is_ongoing
     ? "Ongoing — continues until ended"
     : program.start_date && program.end_date
-      ? `${formatFinanceShortDate(program.start_date)} – ${formatFinanceShortDate(program.end_date)}`
+      ? `${formatDurationDate(program.start_date)} – ${formatDurationDate(program.end_date)}`
       : "Dates to be announced";
   const listedPrice = request.payment_bypassed
     ? "Waived"
@@ -2557,6 +2638,11 @@ export function StudentClassesData({ slug }: { slug: string }) {
       </div>
 
       {content}
+      {tab === "browse" && !loading && !enrollmentLoading && mosque ? (
+        <div className="p-4">
+          <StudentInviteCodeTools slug={slug} />
+        </div>
+      ) : null}
       {detailsRow ? (
         <ApplicantDetailsDrawer
           row={detailsRow}
@@ -2713,6 +2799,13 @@ export function StudentScheduleOptionsData({ slug, programId }: { slug: string; 
       setItems((current) => current.map((row) => (row.enrollment.id === item.enrollment.id ? { ...row, message: { tone: "error", text: eligibility.reason ?? "This student is not eligible for this class." } } : row)));
       return;
     }
+    const trackEligibilityIssue = item.draftTrackIds
+      .map((trackId) => isProfileEligibleForTrack(item.student, tracks.find((track) => track.id === trackId), program))
+      .find((result) => !result.eligible);
+    if (trackEligibilityIssue) {
+      setItems((current) => current.map((row) => (row.enrollment.id === item.enrollment.id ? { ...row, message: { tone: "error", text: trackEligibilityIssue.reason ?? "This student is not eligible for the selected schedule option." } } : row)));
+      return;
+    }
     const validation = validateTrackSelection(program, tracks, item.draftTrackIds);
     if (!validation.valid) {
       setItems((current) => current.map((row) => (row.enrollment.id === item.enrollment.id ? { ...row, message: { tone: "error", text: validation.message } } : row)));
@@ -2721,6 +2814,28 @@ export function StudentScheduleOptionsData({ slug, programId }: { slug: string; 
 
     setSavingEnrollmentId(item.enrollment.id);
     const supabase = createSupabaseBrowserClient();
+
+    if (program.track_switch_policy === "request_only") {
+      const { error: requestError } = await supabase.from("program_track_switch_requests").insert({
+        program_id: programId,
+        enrollment_id: item.enrollment.id,
+        student_profile_id: item.enrollment.student_profile_id,
+        from_track_ids: item.selectedTrackIds,
+        to_track_ids: item.draftTrackIds,
+      });
+      setItems((current) =>
+        current.map((row) =>
+          row.enrollment.id === item.enrollment.id
+            ? requestError
+              ? { ...row, message: { tone: "error", text: requestError.message } }
+              : { ...row, draftTrackIds: row.selectedTrackIds, message: { tone: "success", text: "Request sent to the class director." } }
+            : row,
+        ),
+      );
+      setSavingEnrollmentId(null);
+      return;
+    }
+
     const { error: updateError } = await supabase.rpc("update_enrollment_track_selection", {
       target_enrollment_id: item.enrollment.id,
       selected_track_ids: item.draftTrackIds,
@@ -2753,6 +2868,10 @@ export function StudentScheduleOptionsData({ slug, programId }: { slug: string; 
     return <EmptyState title="Class not found" text="Schedule options could not be loaded." />;
   }
 
+  if (program.track_switch_policy === "disabled") {
+    return <EmptyState title="Schedule changes unavailable" text="This class does not allow changing schedule options after enrollment." />;
+  }
+
   const ruleText = trackSelectionRuleText(program, tracks.length);
 
   return (
@@ -2781,9 +2900,12 @@ export function StudentScheduleOptionsData({ slug, programId }: { slug: string; 
           {items.map((item) => {
             const studentName = item.student?.full_name?.trim() || "Student";
             const eligibility = isProfileEligibleForProgram(item.student, program);
+            const trackEligibility = item.draftTrackIds
+              .map((trackId) => isProfileEligibleForTrack(item.student, tracks.find((track) => track.id === trackId), program))
+              .find((result) => !result.eligible) ?? { eligible: true, reason: null };
             const validation = validateTrackSelection(program, tracks, item.draftTrackIds);
             const dirty = !sameStringSet(item.selectedTrackIds, item.draftTrackIds);
-            const canSave = dirty && eligibility.eligible && validation.valid && savingEnrollmentId !== item.enrollment.id;
+            const canSave = dirty && eligibility.eligible && trackEligibility.eligible && validation.valid && savingEnrollmentId !== item.enrollment.id;
             return (
               <section key={item.enrollment.id} className="py-5">
                 <div className="flex items-start gap-3">
@@ -2803,7 +2925,8 @@ export function StudentScheduleOptionsData({ slug, programId }: { slug: string; 
                 </div>
 
                 {!eligibility.eligible ? <p className="mt-3 text-sm font-semibold text-[#A34B16]">{eligibility.reason}</p> : null}
-                {eligibility.eligible && !validation.valid ? <p className="mt-3 text-sm font-semibold text-[#A34B16]">{validation.message}</p> : null}
+                {eligibility.eligible && !trackEligibility.eligible ? <p className="mt-3 text-sm font-semibold text-[#A34B16]">{trackEligibility.reason}</p> : null}
+                {eligibility.eligible && trackEligibility.eligible && !validation.valid ? <p className="mt-3 text-sm font-semibold text-[#A34B16]">{validation.message}</p> : null}
                 {item.message ? <p className={cn("mt-3 text-sm font-semibold", item.message.tone === "success" ? "text-[#17624F]" : "text-[#A34B16]")}>{item.message.text}</p> : null}
 
                 <div className="mt-4 divide-y divide-[#EEF2F4] border-y border-[#EEF2F4]">
@@ -3992,9 +4115,11 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
       return;
     }
     setSeenRequestIds((current) => new Set([...current, ...keys]));
+    window.dispatchEvent(new Event("tareeqah:notifications-changed"));
     void markNotificationsSeen(currentUserId, keys).then((ok) => {
       if (!ok) {
         revertOptimisticKeys(setSeenRequestIds, keys);
+        window.dispatchEvent(new Event("tareeqah:notifications-changed"));
       }
     });
   }
@@ -4487,6 +4612,7 @@ function ConfirmStudentRescindModal({
 
 export function TeacherInboxData({ slug }: { slug: string }) {
   const router = useRouter();
+  const pathname = usePathname();
   const searchParams = useSearchParams();
   const [programs, setPrograms] = useState<Program[]>([]);
   const [selectedProgramId, setSelectedProgramId] = useState<string>("");
@@ -4494,8 +4620,11 @@ export function TeacherInboxData({ slug }: { slug: string }) {
   const [requests, setRequests] = useState<RequestWithContext[]>([]);
   const [withdrawals, setWithdrawals] = useState<WithdrawalRequestWithContext[]>([]);
   const [instructorNotifications, setInstructorNotifications] = useState<InstructorLifecycleNotification[]>([]);
+  const [trackSwitchRequests, setTrackSwitchRequests] = useState<ProgramTrackSwitchRequestWithContext[]>([]);
+  const [switchRequestBusyId, setSwitchRequestBusyId] = useState<string | null>(null);
   const initialTeacherInboxTab = searchParams.get("tab");
-  const [tab, setTab] = useState<"requests" | "withdrawals" | "instructors">(initialTeacherInboxTab === "withdrawals" || initialTeacherInboxTab === "instructors" ? initialTeacherInboxTab : "requests");
+  const [tab, setTab] = useState<TeacherInboxTab>(initialTeacherInboxTab === "other" ? "other" : "requests");
+  const [sortMode, setSortMode] = useState<TeacherInboxSortMode>("newest");
   const [canReviewRequests, setCanReviewRequests] = useState(false);
   const [message, setMessage] = useState("");
   const [announcementTracksByProgramId, setAnnouncementTracksByProgramId] = useState<Record<string, ProgramTrack[]>>({});
@@ -4507,10 +4636,12 @@ export function TeacherInboxData({ slug }: { slug: string }) {
   const [toast, setToast] = useState<EditorToastState | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [reviewTarget, setReviewTarget] = useState<{ programId: string; requestId: string } | null>(null);
+  const [drawerItem, setDrawerItem] = useState<TeacherInboxMessageItem | null>(null);
 
   useEffect(() => {
     const nextTab = searchParams.get("tab");
-    if (nextTab === "requests" || nextTab === "withdrawals" || nextTab === "instructors") {
+    if (nextTab === "requests" || nextTab === "other") {
       setTab(nextTab);
     }
   }, [searchParams]);
@@ -4561,6 +4692,7 @@ export function TeacherInboxData({ slug }: { slug: string }) {
       setRequests([]);
       setWithdrawals([]);
       setInstructorNotifications([]);
+      setTrackSwitchRequests([]);
       setAnnouncementTracksByProgramId({});
       setSelectedAnnouncementTargetValue("");
       setCanReviewRequests(false);
@@ -4575,6 +4707,7 @@ export function TeacherInboxData({ slug }: { slug: string }) {
       { data: instructorRows, error: instructorError },
       { data: instructorEventRows, error: instructorEventError },
       { data: trackRows },
+      { data: trackSwitchRows },
     ] = await Promise.all([
       activeProgramId
         ? supabase.from("program_announcements").select("*").eq("program_id", activeProgramId).order("created_at", { ascending: false })
@@ -4600,6 +4733,9 @@ export function TeacherInboxData({ slug }: { slug: string }) {
       programIds.length
         ? supabase.from("program_tracks").select("*").in("program_id", programIds).eq("is_active", true).order("sort_order", { ascending: true })
         : Promise.resolve({ data: [] as ProgramTrack[] }),
+      directorProgramIds.length
+        ? supabase.from("program_track_switch_requests").select("*").in("program_id", directorProgramIds).order("requested_at", { ascending: false })
+        : Promise.resolve({ data: [] as ProgramTrackSwitchRequestRow[] }),
     ]);
 
     if (announcementError || requestError || withdrawalError || instructorError || instructorEventError) {
@@ -4608,7 +4744,13 @@ export function TeacherInboxData({ slug }: { slug: string }) {
       return;
     }
 
-    const studentIds = Array.from(new Set([...(requestRows ?? []).map((request) => request.student_profile_id), ...(withdrawalRows ?? []).map((request) => request.student_profile_id)]));
+    const studentIds = Array.from(
+      new Set([
+        ...(requestRows ?? []).map((request) => request.student_profile_id),
+        ...(withdrawalRows ?? []).map((request) => request.student_profile_id),
+        ...(trackSwitchRows ?? []).map((request) => request.student_profile_id),
+      ]),
+    );
     const parentIds = Array.from(new Set([...(requestRows ?? []).map((request) => request.parent_profile_id).filter(Boolean), ...(withdrawalRows ?? []).map((request) => request.parent_profile_id).filter(Boolean)])) as string[];
     const authorIds = Array.from(new Set((announcementRows ?? []).map((announcement) => announcement.author_profile_id).filter(Boolean))) as string[];
     const instructorIds = Array.from(
@@ -4645,6 +4787,13 @@ export function TeacherInboxData({ slug }: { slug: string }) {
         ...announcement,
         program: teacherPrograms.find((program) => program.id === announcement.program_id) ?? null,
         author: (authors ?? []).find((author) => author.id === announcement.author_profile_id) ?? null,
+      })),
+    );
+    setTrackSwitchRequests(
+      (trackSwitchRows ?? []).map((request) => ({
+        ...request,
+        program: teacherPrograms.find((program) => program.id === request.program_id) ?? null,
+        student: (students ?? []).find((student) => student.id === request.student_profile_id) ?? null,
       })),
     );
     setRequests(
@@ -4780,7 +4929,7 @@ export function TeacherInboxData({ slug }: { slug: string }) {
     if (!token) {
       setBusyWithdrawalId(null);
       setError("Please sign in again to review this withdrawal.");
-      return;
+      return false;
     }
 
     const response = await fetch("/api/withdrawal-requests/review", {
@@ -4795,10 +4944,11 @@ export function TeacherInboxData({ slug }: { slug: string }) {
     setBusyWithdrawalId(null);
     if (!response.ok) {
       setError(result.error ?? "Could not review withdrawal request.");
-      return;
+      return false;
     }
     window.dispatchEvent(new Event("tareeqah:notifications-changed"));
     await loadTeacherInbox();
+    return true;
   }
 
   async function clearPastWithdrawal(requestId: string) {
@@ -4850,6 +5000,9 @@ export function TeacherInboxData({ slug }: { slug: string }) {
   const unseenInstructorCount = newInstructorNotifications.length;
   const unseenPendingRequestCount = [...pendingRequests, ...completedAdmissionRequests].filter((request) => !seenRequestIds.has(teacherRequestNotificationKey(request))).length;
   const unseenWithdrawalCount = pendingWithdrawals.filter((request) => !seenRequestIds.has(studentWithdrawalNotificationKey(request))).length;
+  const pendingTrackSwitchRequests = trackSwitchRequests.filter((request) => request.status === "pending");
+  const pastTrackSwitchRequests = trackSwitchRequests.filter((request) => request.status !== "pending");
+  const allTracksById = Object.fromEntries(Object.values(announcementTracksByProgramId).flat().map((track) => [track.id, track]));
   const selectedProgram = programs.find((program) => program.id === selectedProgramId);
   const announcementTargetOptions = programs.flatMap((program) => [
     { value: announcementTargetValue(program.id, null), label: announcementTargetLabel(program, null) },
@@ -4861,9 +5014,6 @@ export function TeacherInboxData({ slug }: { slug: string }) {
   const requestNotificationIds = requests.map(teacherRequestNotificationKey);
   const newInstructorNotificationIds = newInstructorNotifications.map(teacherInstructorNotificationKey);
   const withdrawalNotificationIds = pendingWithdrawals.map(studentWithdrawalNotificationKey);
-  const pendingRequestIdsKey = requestNotificationIds.join("|");
-  const instructorIdsKey = newInstructorNotificationIds.join("|");
-  const withdrawalIdsKey = withdrawalNotificationIds.join("|");
 
   function markSeenOptimistically(keys: string[]) {
     if (!keys.length) {
@@ -4877,39 +5027,25 @@ export function TeacherInboxData({ slug }: { slug: string }) {
     });
   }
 
-  useEffect(() => {
-    if (!loading && tab === "requests" && pendingRequestIdsKey) {
-      markSeenOptimistically(pendingRequestIdsKey.split("|"));
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentUserId, loading, pendingRequestIdsKey, tab]);
-
-  useEffect(() => {
-    if (!loading && tab === "instructors" && instructorIdsKey) {
-      markSeenOptimistically(instructorIdsKey.split("|"));
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentUserId, instructorIdsKey, loading, tab]);
-
-  useEffect(() => {
-    if (!loading && tab === "withdrawals" && withdrawalIdsKey) {
-      markSeenOptimistically(withdrawalIdsKey.split("|"));
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentUserId, withdrawalIdsKey, loading, tab]);
-
-  function changeTab(nextTab: "requests" | "withdrawals" | "instructors") {
+  function changeTab(nextTab: TeacherInboxTab) {
     setTab(nextTab);
     router.replace(`/m/${slug}/teacher/inbox?tab=${nextTab}`, { scroll: false });
-    if (nextTab === "requests") {
-      markSeenOptimistically(requestNotificationIds);
+  }
+
+  async function decideTrackSwitchRequest(requestId: string, decision: "approved" | "rejected") {
+    setSwitchRequestBusyId(requestId);
+    const supabase = createSupabaseBrowserClient();
+    const { error: decisionError } = await supabase.rpc(decision === "approved" ? "approve_track_switch_request" : "reject_track_switch_request", {
+      target_request_id: requestId,
+    });
+    setSwitchRequestBusyId(null);
+    if (decisionError) {
+      setToast({ tone: "error", message: decisionError.message });
+      return false;
     }
-    if (nextTab === "instructors") {
-      markSeenOptimistically(newInstructorNotificationIds);
-    }
-    if (nextTab === "withdrawals") {
-      markSeenOptimistically(withdrawalNotificationIds);
-    }
+    setToast({ tone: "success", message: decision === "approved" ? "Switch approved." : "Switch rejected." });
+    await loadTeacherInbox();
+    return true;
   }
 
   function clearAllInstructorUpdates() {
@@ -4925,127 +5061,235 @@ export function TeacherInboxData({ slug }: { slug: string }) {
     });
   }
 
+  function trackSwitchNotificationKey(request: ProgramTrackSwitchRequestWithContext) {
+    return `track-switch:${request.id}:${request.status}:${request.requested_at}`;
+  }
+
+  function applicationMessage(request: RequestWithContext) {
+    if (request.status === "pending") {
+      return "Application requires review";
+    }
+    if (request.admission_completed_at) {
+      return "Registration was completed";
+    }
+    if (request.status === "approved") {
+      return "Application was accepted";
+    }
+    if (request.status === "waitlisted") {
+      return "Application was waitlisted";
+    }
+    if (request.status === "rejected") {
+      return "Application was rejected";
+    }
+    return `Application was ${request.status}`;
+  }
+
+  function sortInboxItems(items: TeacherInboxMessageItem[]) {
+    const ordered = items.slice();
+    ordered.sort((a, b) => {
+      if (sortMode === "unread") {
+        if (a.requiresAction !== b.requiresAction) {
+          return a.requiresAction ? -1 : 1;
+        }
+        if (a.unread !== b.unread) {
+          return a.unread ? -1 : 1;
+        }
+      }
+      return Date.parse(b.createdAt ?? "0") - Date.parse(a.createdAt ?? "0");
+    });
+    return ordered;
+  }
+
+  const applicationInboxItems = sortInboxItems(
+    requests.map((request) => {
+      const key = teacherRequestNotificationKey(request);
+      return {
+        id: request.id,
+        key,
+        kind: "application" as const,
+        title: request.student?.full_name?.trim() || "Student",
+        subtitle: applicationMessage(request),
+        meta: `${request.program?.title ?? "Class"} · ${timeAgo(request.admission_completed_at ?? request.reviewed_at ?? request.requested_at)}`,
+        createdAt: request.admission_completed_at ?? request.reviewed_at ?? request.requested_at,
+        unread: !seenRequestIds.has(key),
+        requiresAction: request.status === "pending",
+        request,
+      };
+    }),
+  );
+  const otherInboxItems = sortInboxItems([
+    ...withdrawals.map((request) => {
+      const key = studentWithdrawalNotificationKey(request);
+      return {
+        id: request.id,
+        key,
+        kind: "withdrawal" as const,
+        title: request.student?.full_name?.trim() || "Student",
+        subtitle: request.status === "pending" ? "Withdrawal requires review" : `Withdrawal was ${request.status}`,
+        meta: `${request.program?.title ?? "Class"} · ${timeAgo(request.reviewed_at ?? request.requested_at)}`,
+        createdAt: request.reviewed_at ?? request.requested_at,
+        unread: !seenRequestIds.has(key),
+        requiresAction: request.status === "pending",
+        request,
+      };
+    }),
+    ...instructorNotifications
+      .filter((notification) => !dismissedNotificationIds.has(teacherInstructorNotificationKey(notification)))
+      .map((notification) => {
+        const key = teacherInstructorNotificationKey(notification);
+        const instructorName = notification.instructor?.full_name?.trim() || notification.instructor?.email || "Instructor";
+        return {
+          id: notification.id,
+          key,
+          kind: "instructor" as const,
+          title: instructorName,
+          subtitle: notification.event_type === "resigned" ? "Instructor resigned" : "Instructor joined",
+          meta: `${notification.program?.title ?? "Class"} · ${timeAgo(notification.created_at ?? "")}`,
+          createdAt: notification.created_at ?? "",
+          unread: !seenRequestIds.has(key),
+          requiresAction: false as const,
+          notification,
+        };
+      }),
+    ...trackSwitchRequests.map((request) => {
+      const key = trackSwitchNotificationKey(request);
+      return {
+        id: request.id,
+        key,
+        kind: "switch" as const,
+        title: request.student?.full_name?.trim() || "Student",
+        subtitle: request.status === "pending" ? "Schedule switch requires review" : `Schedule switch was ${request.status}`,
+        meta: `${request.program?.title ?? "Class"} · ${timeAgo(request.requested_at)}`,
+        createdAt: request.requested_at,
+        unread: !seenRequestIds.has(key),
+        requiresAction: request.status === "pending",
+        request,
+      };
+    }),
+  ]);
+  const visibleInboxItems = tab === "requests" ? applicationInboxItems : otherInboxItems;
+  const applicationUnreadCount = applicationInboxItems.filter((item) => item.unread).length;
+  const otherUnreadCount = otherInboxItems.filter((item) => item.unread).length;
+
+  function openInboxItem(item: TeacherInboxMessageItem) {
+    markSeenOptimistically([item.key]);
+    if (item.kind === "application") {
+      window.dispatchEvent(new CustomEvent("tareeqah:nav-preview", { detail: { fromPath: pathname, kind: "subpage" } }));
+      setReviewTarget({ programId: item.request.program_id, requestId: item.request.id });
+      return;
+    }
+    window.dispatchEvent(new CustomEvent("tareeqah:nav-preview", { detail: { fromPath: pathname, kind: "subpage" } }));
+    setDrawerItem(item);
+  }
+
+  function closeInboxDrawer() {
+    setDrawerItem(null);
+    window.dispatchEvent(new CustomEvent("tareeqah:nav-preview", { detail: { fromPath: pathname, kind: "inbox" } }));
+  }
+
+  function closeReviewTarget() {
+    setReviewTarget(null);
+    window.dispatchEvent(new CustomEvent("tareeqah:nav-preview", { detail: { fromPath: pathname, kind: "inbox" } }));
+  }
+
   return (
     <div className="bg-[var(--workspace)]">
       <EditorToast toast={toast} onClose={() => setToast(null)} />
       <div className="md:hidden">
         <FloatingInboxTabs
           tabs={[
-            { id: "requests", label: "Applications", badge: unseenPendingRequestCount, actionRequired: pendingRequests.length > 0 },
-            { id: "withdrawals", label: "Withdrawals", badge: unseenWithdrawalCount, actionRequired: pendingWithdrawals.length > 0 },
-            { id: "instructors", label: "Instructors", badge: unseenInstructorCount },
+            { id: "requests", label: "Applications", badge: applicationUnreadCount, actionRequired: applicationInboxItems.some((item) => item.requiresAction) },
+            { id: "other", label: "Other", badge: otherUnreadCount, actionRequired: otherInboxItems.some((item) => item.requiresAction) },
           ]}
           value={tab}
-          onChange={(value) => changeTab(value as "requests" | "withdrawals" | "instructors")}
+          onChange={(value) => changeTab(value as TeacherInboxTab)}
         />
       </div>
       <div className="space-y-4 p-4">
         {error ? (
           <EmptyState title="Could not load teacher inbox" text={error} onRetry={() => window.location.reload()} />
         ) : loading ? (
-          <InboxLoadingPanel label={tab === "withdrawals" ? "Loading withdrawals" : tab === "instructors" ? "Loading instructors" : "Loading applications"} />
-        ) : tab === "requests" ? (
-          <>
-            <TeacherRequestSection title="Pending Requests" count={pendingRequests.length}>
-              {pendingRequests.length ? (
-                pendingRequests.map((request) => (
-                  <TeacherRequestCard
-                    key={request.id}
-                    request={request}
-                    viewHref={`/m/${slug}/teacher/classes/${request.program_id}/applications?requestId=${request.id}`}
-                  />
-                ))
-              ) : (
-                <MiniEmpty text="No students are waiting for review." />
-              )}
-            </TeacherRequestSection>
-            <TeacherRequestSection title="Past Requests" count={pastRequests.length} action={pastRequests.length ? <ClearAllButton onClick={clearAllPastRequests} /> : null}>
-              {pastRequests.length ? (
-                pastRequests.map((request) => (
-                  <TeacherRequestCard
-                    key={request.id}
-                    request={request}
-                    reviewed
-                    onClear={() => clearPastRequest(request.id)}
-                    viewHref={`/m/${slug}/teacher/classes/${request.program_id}/applications?requestId=${request.id}`}
-                  />
-                ))
-              ) : (
-                <MiniEmpty text="Reviewed requests will appear here." />
-              )}
-            </TeacherRequestSection>
-          </>
-        ) : tab === "withdrawals" ? (
-          <>
-            <TeacherRequestSection title="Pending Withdrawals" count={pendingWithdrawals.length}>
-              {pendingWithdrawals.length ? (
-                pendingWithdrawals.map((request) => (
-                  <WithdrawalRequestCard
-                    key={request.id}
-                    request={request}
-                    busy={busyWithdrawalId === request.id}
-                    onApprove={() => reviewWithdrawal(request, "approved")}
-                    onReject={() => reviewWithdrawal(request, "rejected")}
-                  />
-                ))
-              ) : (
-                <MiniEmpty text="No withdrawal requests are waiting for review." />
-              )}
-            </TeacherRequestSection>
-            <TeacherRequestSection
-              title="Past Withdrawals"
-              count={pastWithdrawals.length}
-              action={pastWithdrawals.length ? <ClearAllButton onClick={clearAllPastWithdrawals} /> : null}
-            >
-              {pastWithdrawals.length ? (
-                pastWithdrawals.map((request) => (
-                  <WithdrawalRequestCard key={request.id} request={request} reviewed onClear={() => clearPastWithdrawal(request.id)} />
-                ))
-              ) : (
-                <MiniEmpty text="Reviewed withdrawal requests will appear here." />
-              )}
-            </TeacherRequestSection>
-          </>
+          <InboxLoadingPanel label={tab === "other" ? "Loading messages" : "Loading applications"} />
         ) : (
-          <>
-            <TeacherRequestSection title="New" count={newInstructorNotifications.length}>
-              {newInstructorNotifications.length ? (
-                newInstructorNotifications.map((notification) => (
-                  <InstructorLifecycleNotificationCard key={`${notification.event_type}:${notification.id}`} notification={notification} slug={slug} />
-                ))
-              ) : (
-                <MiniEmpty text="Instructor joins and resignations will appear here." />
-              )}
-            </TeacherRequestSection>
-            <TeacherRequestSection
-              title="Past"
-              count={pastInstructorNotifications.length}
-              action={pastInstructorNotifications.length ? <ClearAllButton onClick={clearAllInstructorUpdates} /> : null}
-            >
-              {pastInstructorNotifications.length ? (
-                pastInstructorNotifications.map((notification) => (
-                  <InstructorLifecycleNotificationCard
-                    key={`${notification.event_type}:${notification.id}`}
-                    notification={notification}
-                    slug={slug}
-                    onClear={() => {
-                      const key = teacherInstructorNotificationKey(notification);
-                      setDismissedNotificationIds((current) => new Set([...current, key]));
-                      void markNotificationsDismissed(currentUserId, [key]).then((ok) => {
-                        if (!ok) {
-                          revertOptimisticKeys(setDismissedNotificationIds, [key]);
-                        }
-                      });
-                    }}
-                  />
-                ))
-              ) : (
-                <MiniEmpty text="Reviewed updates will appear here." />
-              )}
-            </TeacherRequestSection>
-          </>
+          <section className="space-y-3">
+            <div className="flex items-center justify-between gap-3 px-1">
+              <div>
+                <h2 className="text-[15px] font-semibold text-[#26323A]">{tab === "requests" ? "Applications" : "Other"}</h2>
+                <p className="mt-0.5 text-xs text-[#6B747B]">{visibleInboxItems.length ? `${visibleInboxItems.length} messages` : "No messages"}</p>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                <select
+                  value={sortMode}
+                  onChange={(event) => setSortMode(event.target.value as TeacherInboxSortMode)}
+                  className="h-9 rounded-full border border-[#D6DCE0] bg-white px-3 text-xs font-semibold text-[#52616A] outline-none"
+                  aria-label="Inbox sort"
+                >
+                  <option value="newest">Newest first</option>
+                  <option value="unread">Unread first</option>
+                </select>
+                <button
+                  type="button"
+                  onClick={() => void loadTeacherInbox()}
+                  className="flex h-9 w-9 items-center justify-center rounded-full bg-[#EEF6F7] text-[#17624F] transition-colors hover:bg-[#DCEFF4]"
+                  aria-label="Refresh inbox"
+                  title="Refresh inbox"
+                >
+                  <RefreshIcon />
+                </button>
+              </div>
+            </div>
+            {visibleInboxItems.length ? (
+              <div className="space-y-2">
+                {visibleInboxItems.map((item) => (
+                  <TeacherInboxMessageRow key={item.key} item={item} onOpen={() => openInboxItem(item)} />
+                ))}
+              </div>
+            ) : (
+              <MiniEmpty text="Messages will appear here." />
+            )}
+          </section>
         )}
       </div>
+      {drawerItem ? (
+        <TeacherInboxMessageDrawer
+          item={drawerItem}
+          slug={slug}
+          tracksById={allTracksById}
+          busyWithdrawalId={busyWithdrawalId}
+          busySwitchRequestId={switchRequestBusyId}
+          onClose={closeInboxDrawer}
+          onApproveWithdrawal={(request) => {
+            void reviewWithdrawal(request, "approved").then((ok) => {
+              if (ok) closeInboxDrawer();
+            });
+          }}
+          onRejectWithdrawal={(request) => {
+            void reviewWithdrawal(request, "rejected").then((ok) => {
+              if (ok) closeInboxDrawer();
+            });
+          }}
+          onApproveTrackSwitch={(request) => {
+            void decideTrackSwitchRequest(request.id, "approved").then((ok) => {
+              if (ok) closeInboxDrawer();
+            });
+          }}
+          onRejectTrackSwitch={(request) => {
+            void decideTrackSwitchRequest(request.id, "rejected").then((ok) => {
+              if (ok) closeInboxDrawer();
+            });
+          }}
+        />
+      ) : null}
+      {reviewTarget ? (
+        <ApplicationReviewOverlay
+          programId={reviewTarget.programId}
+          slug={slug}
+          mode="teacher"
+          requestId={reviewTarget.requestId}
+          onClose={closeReviewTarget}
+          onChanged={loadTeacherInbox}
+        />
+      ) : null}
     </div>
   );
 }
@@ -5444,7 +5688,7 @@ export function TeacherScheduleData({ slug, programId }: { slug: string; program
 
 export function TeacherHomeData({ slug }: { slug: string }) {
   const { programs, currentUserId, loading, error } = useTeacherPrograms(slug);
-  const { totalCount: inboxItemCount } = useTeacherNotificationCounts(currentUserId ? slug : "");
+  const { totalCount: inboxItemCount, actionRequired: inboxActionRequired } = useTeacherNotificationCounts(currentUserId ? slug : "");
 
   if (loading) {
     return <HomeLoadingState />;
@@ -5457,12 +5701,14 @@ export function TeacherHomeData({ slug }: { slug: string }) {
   return (
     <div className="space-y-4 bg-[var(--workspace)] p-4">
       <PushNotificationNudge />
-      <HomeNotification
-        tone={inboxItemCount > 0 ? "active" : "empty"}
-        title={inboxItemCount > 0 ? "Action required" : "No new inbox items"}
-        text={inboxItemCount > 0 ? `Check your inbox to review ${inboxItemCount === 1 ? "the new item" : `${inboxItemCount} new items`}.` : "New enrollment requests and class messages will appear here."}
-        href={inboxItemCount > 0 ? `/m/${slug}/teacher/inbox` : undefined}
-      />
+      {inboxItemCount > 0 ? (
+        <HomeNotification
+          tone="active"
+          title={inboxActionRequired ? "Action required" : "Attention"}
+          text={inboxActionRequired ? "Your inbox contains messages that require an action from you." : "Your inbox contains unread messages."}
+          href={`/m/${slug}/teacher/inbox`}
+        />
+      ) : null}
       <HomeSectionTitle title="Upcoming" />
       {programs.length ? <HomeUpcomingRows programs={programs} canCancelSessions currentUserId={currentUserId} /> : <HomeEmptyState title="No assigned classes" text="Your next class sessions will appear here." />}
     </div>
@@ -6154,11 +6400,13 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
   const [trackRows, setTrackRows] = useState<ProgramEditorTrackRow[]>([
     { id: crypto.randomUUID(), name: "Main Track", sessions: [{ day: "Monday", start: "18:00", end: "20:00" }] },
   ]);
+  const [transferRules, setTransferRules] = useState<ProgramEditorTransferRule[]>([]);
   const [trackSelectionMode, setTrackSelectionMode] = useState<TrackSelectionMode>("exact");
   const [trackSelectionCount, setTrackSelectionCount] = useState(1);
   const [instructorDisplayName, setInstructorDisplayName] = useState("");
   const [instructorCredentials, setInstructorCredentials] = useState("");
   const [instructorContactPhone, setInstructorContactPhone] = useState("");
+  const [coverDirectorVisibility, setCoverDirectorVisibility] = useState("name_and_photo");
   const [contactPhoneOmitted, setContactPhoneOmitted] = useState(false);
   const [contactEmailOmitted, setContactEmailOmitted] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -6436,6 +6684,8 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
           financialAssistanceNote: effectiveBuilderStatus.financialAssistanceNote.trim() || null,
           receiptNote: effectiveBuilderStatus.receiptNote.trim() || null,
           taxReceiptPolicy: effectiveBuilderStatus.taxReceiptPolicy,
+          trackSwitchPolicy: effectiveBuilderStatus.trackSwitchPolicy,
+          trackSwitchAllowAll: effectiveBuilderStatus.trackSwitchAllowAll,
           contactEmail: contactEmailOmitted ? "" : effectiveBuilderStatus.contactEmail.trim() || null,
           contactPhone: effectiveBuilderStatus.contactPhone.trim() || null,
           coverPriceLabelEnabled: effectiveBuilderStatus.coverPriceLabelEnabled,
@@ -6506,6 +6756,8 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
             financialAssistanceNote: effectiveBuilderStatus.financialAssistanceNote.trim() || null,
             receiptNote: effectiveBuilderStatus.receiptNote.trim() || null,
             taxReceiptPolicy: effectiveBuilderStatus.taxReceiptPolicy,
+            trackSwitchPolicy: effectiveBuilderStatus.trackSwitchPolicy,
+            trackSwitchAllowAll: effectiveBuilderStatus.trackSwitchAllowAll,
             contactEmail: contactEmailOmitted ? "" : effectiveBuilderStatus.contactEmail.trim() || null,
             contactPhone: effectiveBuilderStatus.contactPhone.trim() || null,
             coverPriceLabelEnabled: effectiveBuilderStatus.coverPriceLabelEnabled,
@@ -6543,6 +6795,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
         instructor_display_name: instructorDisplayName.trim() || null,
         instructor_credentials: instructorCredentials.trim() || null,
         instructor_contact_phone: contactPhoneOmitted ? "" : instructorContactPhone.trim() || null,
+        cover_director_visibility: coverDirectorVisibility,
       }, { onConflict: "program_id" });
       if (detailsError) {
         throw new Error(detailsError.message);
@@ -6595,6 +6848,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
           pricing_override_enabled: Boolean(track.pricingOverrideEnabled),
           price_monthly_cents: track.pricingOverrideEnabled && track.priceMonthly ? Math.max(0, Math.round(Number(track.priceMonthly) * 100)) : null,
           price_annual_cents: track.pricingOverrideEnabled && track.priceAnnual ? Math.max(0, Math.round(Number(track.priceAnnual) * 100)) : null,
+          ...trackEligibilityOverrideColumns(track),
           is_active: true,
         })))
         .select("id, sort_order");
@@ -6609,6 +6863,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
         location: effectiveBuilderStatus.location.trim() || null,
         room: effectiveBuilderStatus.room.trim() || null,
       });
+      await saveTrackTransferRules(supabase, program.id, insertedTracks ?? [], trackRows, transferRules);
 
       const uploadedMedia = [];
       for (const [index, row] of mediaRows.entries()) {
@@ -6929,6 +7184,8 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
         trackRows={trackRows}
         setTrackRows={setTrackRows}
         addTrack={addTrack}
+        transferRules={transferRules}
+        setTransferRules={setTransferRules}
         trackSelectionMode={trackSelectionMode}
         setTrackSelectionMode={setTrackSelectionMode}
         trackSelectionCount={trackSelectionCount}
@@ -6959,6 +7216,8 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
         setInstructorCredentials={setInstructorCredentials}
         instructorContactPhone={instructorContactPhone}
         setInstructorContactPhone={setInstructorContactPhone}
+        coverDirectorVisibility={coverDirectorVisibility}
+        setCoverDirectorVisibility={setCoverDirectorVisibility}
         contactEmail={builderStatus.contactEmail}
         setContactEmail={(value) => setBuilderStatus((current) => ({ ...current, contactEmail: value }))}
         contactPhoneOmitted={contactPhoneOmitted}
@@ -7017,11 +7276,13 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
   const [mediaVisible, setMediaVisible] = useState(false);
   const [mediaRows, setMediaRows] = useState<ProgramEditorMediaRow[]>([]);
   const [trackRows, setTrackRows] = useState<ProgramEditorTrackRow[]>([]);
+  const [transferRules, setTransferRules] = useState<ProgramEditorTransferRule[]>([]);
   const [trackSelectionMode, setTrackSelectionMode] = useState<TrackSelectionMode>("exact");
   const [trackSelectionCount, setTrackSelectionCount] = useState(1);
   const [instructorDisplayName, setInstructorDisplayName] = useState("");
   const [instructorCredentials, setInstructorCredentials] = useState("");
   const [instructorContactPhone, setInstructorContactPhone] = useState("");
+  const [coverDirectorVisibility, setCoverDirectorVisibility] = useState("name_and_photo");
   const [contactPhoneOmitted, setContactPhoneOmitted] = useState(false);
   const [contactEmailOmitted, setContactEmailOmitted] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -7050,7 +7311,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         return;
       }
 
-      const [{ data: programRow, error: programError }, { data: directorAllowed }, detailResult, outcomeResult, contentSectionResult, faqResult, mediaResult, trackResult, sessionResult] = await Promise.all([
+      const [{ data: programRow, error: programError }, { data: directorAllowed }, detailResult, outcomeResult, contentSectionResult, faqResult, mediaResult, trackResult, sessionResult, transferRuleResult] = await Promise.all([
         supabase.from("programs").select("*").eq("id", programId).eq("mosque_id", mosque.id).maybeSingle(),
         supabase.rpc("is_program_director", { check_program_id: programId }),
         supabase.from("program_details").select("*").eq("program_id", programId).maybeSingle(),
@@ -7060,6 +7321,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         supabase.from("program_media").select("*").eq("program_id", programId).order("sort_order", { ascending: true }),
         supabase.from("program_tracks").select("*").eq("program_id", programId).order("sort_order", { ascending: true }),
         supabase.from("program_sessions").select("*").eq("program_id", programId).order("session_date", { ascending: true }).order("start_time", { ascending: true }),
+        supabase.from("program_track_transfer_rules").select("*").eq("program_id", programId),
       ]);
       const trackIds = (trackResult.data ?? []).map((track) => track.id);
       const { data: trackSessionLinks } = trackIds.length
@@ -7171,6 +7433,8 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
           financialAssistanceNote: programRow.financial_assistance_note ?? defaultBuilderStatus().financialAssistanceNote,
           receiptNote: programRow.receipt_note ?? defaultBuilderStatus().receiptNote,
           taxReceiptPolicy: ["not_applicable", "admin_review_required", "eligible_confirmed"].includes(programRow.tax_receipt_policy) ? programRow.tax_receipt_policy as ProgramBuilderStatus["taxReceiptPolicy"] : "not_applicable",
+          trackSwitchPolicy: ["disabled", "request_only", "allowed"].includes(programRow.track_switch_policy) ? programRow.track_switch_policy as ProgramBuilderStatus["trackSwitchPolicy"] : "disabled",
+          trackSwitchAllowAll: Boolean(programRow.track_switch_allow_all),
           contactEmail: programRow.contact_email ?? directorProfile?.email ?? "",
           contactPhone: programRow.contact_phone ?? "",
           coverPriceLabelEnabled: programRow.cover_price_label_enabled !== false,
@@ -7214,6 +7478,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         setInstructorDisplayName(nextInstructorDisplayName);
         setInstructorCredentials(nextInstructorCredentials);
         setInstructorContactPhone(nextInstructorContactPhone);
+        setCoverDirectorVisibility(detailResult.data?.cover_director_visibility ?? "name_and_photo");
         setTrackSelectionMode("exact");
         setTrackSelectionCount(1);
         setOutcomeRows(nextOutcomeRows);
@@ -7224,6 +7489,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         setMediaRows(nextMediaRows);
         setMediaVisible(nextMediaRows.length > 0);
         setTrackRows(nextTrackRows);
+        setTransferRules((transferRuleResult.data ?? []).map((row) => ({ id: row.id, fromTrackId: row.from_track_id, toTrackId: row.to_track_id })));
       }
       setLoading(false);
     }
@@ -7471,6 +7737,8 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         financialAssistanceNote: effectiveBuilderStatus.financialAssistanceNote.trim() || null,
         receiptNote: effectiveBuilderStatus.receiptNote.trim() || null,
         taxReceiptPolicy: effectiveBuilderStatus.taxReceiptPolicy,
+        trackSwitchPolicy: effectiveBuilderStatus.trackSwitchPolicy,
+        trackSwitchAllowAll: effectiveBuilderStatus.trackSwitchAllowAll,
         contactEmail: contactEmailOmitted ? "" : effectiveBuilderStatus.contactEmail.trim() || null,
         contactPhone: effectiveBuilderStatus.contactPhone.trim() || null,
         coverPriceLabelEnabled: effectiveBuilderStatus.coverPriceLabelEnabled,
@@ -7511,6 +7779,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
       instructor_display_name: instructorDisplayName.trim() || null,
       instructor_credentials: instructorCredentials.trim() || null,
       instructor_contact_phone: contactPhoneOmitted ? "" : instructorContactPhone.trim() || null,
+      cover_director_visibility: coverDirectorVisibility,
       updated_at: new Date().toISOString(),
     };
     const { error: detailsError } = await supabase.from("program_details").upsert(detailsPayload, { onConflict: "program_id" });
@@ -7608,6 +7877,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
           pricing_override_enabled: Boolean(track.pricingOverrideEnabled),
           price_monthly_cents: track.pricingOverrideEnabled && track.priceMonthly ? Math.max(0, Math.round(Number(track.priceMonthly) * 100)) : null,
           price_annual_cents: track.pricingOverrideEnabled && track.priceAnnual ? Math.max(0, Math.round(Number(track.priceAnnual) * 100)) : null,
+          ...trackEligibilityOverrideColumns(track),
           is_active: true,
         })),
       ).select("id, sort_order");
@@ -7625,6 +7895,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
           location: effectiveBuilderStatus.location.trim() || null,
           room: effectiveBuilderStatus.room.trim() || null,
         });
+        await saveTrackTransferRules(supabase, program.id, insertedTracks ?? [], trackRows, transferRules);
       } catch (sessionError) {
         setToast({ tone: "error", message: sessionError instanceof Error ? sessionError.message : "Could not save sessions." });
         setBusy(false);
@@ -7970,6 +8241,8 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         trackRows={trackRows}
         setTrackRows={setTrackRows}
         addTrack={addTrack}
+        transferRules={transferRules}
+        setTransferRules={setTransferRules}
         trackSelectionMode={trackSelectionMode}
         setTrackSelectionMode={setTrackSelectionMode}
         trackSelectionCount={trackSelectionCount}
@@ -8000,6 +8273,8 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         setInstructorCredentials={setInstructorCredentials}
         instructorContactPhone={instructorContactPhone}
         setInstructorContactPhone={setInstructorContactPhone}
+        coverDirectorVisibility={coverDirectorVisibility}
+        setCoverDirectorVisibility={setCoverDirectorVisibility}
         contactEmail={builderStatus.contactEmail}
         setContactEmail={(value) => setBuilderStatus((current) => ({ ...current, contactEmail: value }))}
         contactPhoneOmitted={contactPhoneOmitted}
@@ -8128,6 +8403,7 @@ function ProgramEditorPreview({
     pricing_override_enabled: Boolean(track.pricingOverrideEnabled),
     price_monthly_cents: track.pricingOverrideEnabled && track.priceMonthly ? Math.max(0, Math.round(Number(track.priceMonthly) * 100)) : null,
     price_annual_cents: track.pricingOverrideEnabled && track.priceAnnual ? Math.max(0, Math.round(Number(track.priceAnnual) * 100)) : null,
+    ...trackEligibilityOverrideColumns(track),
     sort_order: index + 1,
     is_active: true,
     created_at: "",
@@ -8140,7 +8416,7 @@ function ProgramEditorPreview({
       <button
         type="button"
         onClick={onBack}
-        className="fixed left-[max(16px,calc(50%-244px))] top-3 z-[9010] inline-flex min-h-10 items-center rounded-full bg-[#26323A] px-4 text-sm font-semibold text-white shadow-[0_12px_30px_rgba(38,50,58,0.18)]"
+        className="fixed left-[max(16px,calc(50%-244px))] top-3 z-[9010] inline-flex min-h-10 items-center rounded-full bg-[#26323A] px-4 text-sm font-semibold text-white shadow-[0_12px_30px_rgba(38,50,58,0.18)] transition active:scale-95 active:bg-[#1B2429]"
       >
         Back to Editor
       </button>
@@ -8411,7 +8687,7 @@ function ProgramBuilderActionBar({
     <div className={cn("z-10 space-y-2 bg-white py-2 md:max-w-[420px]", sticky ? "sticky bottom-[92px] md:bottom-4" : "")}>
       {message ? <p className="text-sm font-medium text-[#52616A]">{message}</p> : null}
       <div className="flex items-center gap-2">
-        <button type="button" disabled={busy || builderStep === "basics"} onClick={onBack} className="min-h-11 shrink-0 rounded-[10px] border border-[#C9D3D8] bg-white px-4 text-sm font-semibold text-[#26323A] disabled:opacity-40">
+        <button type="button" disabled={busy || builderStep === "basics"} onClick={onBack} className="min-h-11 shrink-0 rounded-[10px] border border-[#C9D3D8] bg-white px-4 text-sm font-semibold text-[#26323A] transition active:scale-95 active:bg-[#F2F4F5] disabled:opacity-40">
           Back
         </button>
         <button type="button" disabled={busy} onClick={onContinueOrPublish} className="min-h-11 flex-[1.4] rounded-[10px] bg-[#17624F] px-5 text-sm font-semibold text-white disabled:opacity-60">
@@ -8767,6 +9043,8 @@ type ProgramEditorFieldsProps = {
   trackRows: ProgramEditorTrackRow[];
   setTrackRows: Dispatch<SetStateAction<ProgramEditorTrackRow[]>>;
   addTrack: () => void;
+  transferRules?: ProgramEditorTransferRule[];
+  setTransferRules?: Dispatch<SetStateAction<ProgramEditorTransferRule[]>>;
   trackSelectionMode: TrackSelectionMode;
   setTrackSelectionMode: (value: TrackSelectionMode) => void;
   trackSelectionCount: number;
@@ -8797,6 +9075,8 @@ type ProgramEditorFieldsProps = {
   setInstructorCredentials: (value: string) => void;
   instructorContactPhone: string;
   setInstructorContactPhone: (value: string) => void;
+  coverDirectorVisibility?: string;
+  setCoverDirectorVisibility?: (value: string) => void;
   contactEmail?: string;
   setContactEmail?: (value: string) => void;
   contactPhoneOmitted?: boolean;
@@ -8905,6 +9185,77 @@ function ProgramFaqEditor({
   );
 }
 
+function TrackTransferRuleBuilder({
+  trackRows,
+  transferRules,
+  setTransferRules,
+}: {
+  trackRows: ProgramEditorTrackRow[];
+  transferRules: ProgramEditorTransferRule[];
+  setTransferRules: Dispatch<SetStateAction<ProgramEditorTransferRule[]>>;
+}) {
+  const [fromId, setFromId] = useState("");
+  const [toId, setToId] = useState("");
+
+  function addRule() {
+    if (!fromId || !toId || fromId === toId) {
+      return;
+    }
+    if (transferRules.some((rule) => rule.fromTrackId === fromId && rule.toTrackId === toId)) {
+      return;
+    }
+    setTransferRules((current) => [...current, { id: crypto.randomUUID(), fromTrackId: fromId, toTrackId: toId }]);
+    setFromId("");
+    setToId("");
+  }
+
+  function trackName(id: string) {
+    return trackRows.find((track) => track.id === id)?.name || "Untitled track";
+  }
+
+  return (
+    <div className="space-y-2">
+      <p className="text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Allowed switches</p>
+      <div className="flex flex-wrap items-center gap-2">
+        <select value={fromId} onChange={(event) => setFromId(event.target.value)} className="h-10 min-w-0 flex-1 rounded-[8px] border border-[#B9C3C8] bg-white px-2 text-sm text-[#26323A] outline-none focus:border-[#2F8FB3]">
+          <option value="">From...</option>
+          {trackRows.map((track) => (
+            <option key={track.id} value={track.id}>{track.name || "Untitled track"}</option>
+          ))}
+        </select>
+        <span className="shrink-0 text-[#6B747B]" aria-hidden>→</span>
+        <select value={toId} onChange={(event) => setToId(event.target.value)} className="h-10 min-w-0 flex-1 rounded-[8px] border border-[#B9C3C8] bg-white px-2 text-sm text-[#26323A] outline-none focus:border-[#2F8FB3]">
+          <option value="">To...</option>
+          {trackRows.filter((track) => track.id !== fromId).map((track) => (
+            <option key={track.id} value={track.id}>{track.name || "Untitled track"}</option>
+          ))}
+        </select>
+        <button type="button" onClick={addRule} disabled={!fromId || !toId} className="h-10 shrink-0 rounded-[8px] bg-[#17624F] px-3 text-sm font-semibold text-white disabled:opacity-40">
+          Add
+        </button>
+      </div>
+      {transferRules.length ? (
+        <div className="divide-y divide-[#EEF2F4] rounded-[8px] border border-[#E1E8EC] bg-white">
+          {transferRules.map((rule) => (
+            <div key={rule.id} className="flex items-center justify-between gap-2 px-3 py-2 text-sm">
+              <span className="min-w-0 truncate text-[#26323A]">{trackName(rule.fromTrackId)} → {trackName(rule.toTrackId)}</span>
+              <button
+                type="button"
+                onClick={() => setTransferRules((current) => current.filter((item) => item.id !== rule.id))}
+                className="shrink-0 text-xs font-semibold text-[#C83F31] hover:underline"
+              >
+                Remove
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="text-xs text-[#7B858C]">No switches allowed yet. Add pairs above.</p>
+      )}
+    </div>
+  );
+}
+
 function ProgramEditorFields({
   activeStep,
   programType = "recurring",
@@ -8947,6 +9298,8 @@ function ProgramEditorFields({
   trackRows,
   setTrackRows,
   addTrack,
+  transferRules = [],
+  setTransferRules,
   trackSelectionMode,
   setTrackSelectionMode,
   trackSelectionCount,
@@ -8977,6 +9330,8 @@ function ProgramEditorFields({
   setInstructorCredentials,
   instructorContactPhone,
   setInstructorContactPhone,
+  coverDirectorVisibility = "name_and_photo",
+  setCoverDirectorVisibility,
   contactEmail = "",
   setContactEmail,
   contactPhoneOmitted = false,
@@ -9137,6 +9492,7 @@ function ProgramEditorFields({
       pricing_override_enabled: Boolean(track.pricingOverrideEnabled),
       price_monthly_cents: track.pricingOverrideEnabled && track.priceMonthly ? Math.max(0, Math.round(Number(track.priceMonthly) * 100)) : null,
       price_annual_cents: track.pricingOverrideEnabled && track.priceAnnual ? Math.max(0, Math.round(Number(track.priceAnnual) * 100)) : null,
+      ...trackEligibilityOverrideColumns(track),
       sort_order: index + 1,
       is_active: true,
       created_at: "",
@@ -9745,8 +10101,82 @@ function ProgramEditorFields({
                       })}
                     </div>
                   </div>
+                  <div className="mt-3 border-t border-[#E6ECEF] pt-3">
+                    <label className="flex items-center gap-2 text-sm font-medium text-[#26323A]">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(track.eligibilityOverrideEnabled)}
+                        onChange={(event) => setTrackRows((current) => current.map((item) => item.id === track.id ? { ...item, eligibilityOverrideEnabled: event.target.checked } : item))}
+                      />
+                      Override eligibility for this track
+                    </label>
+                    {track.eligibilityOverrideEnabled ? (
+                      <div className="mt-3 space-y-3">
+                        <div className="grid grid-cols-2 gap-3">
+                          <EditBox label="From age" value={track.ageMin ?? ""} onChange={(value) => setTrackRows((current) => current.map((item) => item.id === track.id ? { ...item, ageMin: value } : item))} />
+                          <EditBox label="To age" value={track.ageMax ?? ""} onChange={(value) => setTrackRows((current) => current.map((item) => item.id === track.id ? { ...item, ageMax: value } : item))} />
+                        </div>
+                        <label className="block">
+                          <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Gender</span>
+                          <select
+                            value={track.genderOverride ?? "all"}
+                            onChange={(event) => setTrackRows((current) => current.map((item) => item.id === track.id ? { ...item, genderOverride: event.target.value } : item))}
+                            className="h-11 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm text-[#26323A] outline-none focus:border-[#2F8FB3]"
+                          >
+                            <option value="all">All</option>
+                            <option value="brothers">Brothers only</option>
+                            <option value="sisters">Sisters only</option>
+                          </select>
+                        </label>
+                        <label className="block">
+                          <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Comment (shown on public page, not validated)</span>
+                          <textarea
+                            value={track.eligibilityComment ?? ""}
+                            onChange={(event) => setTrackRows((current) => current.map((item) => item.id === track.id ? { ...item, eligibilityComment: event.target.value } : item))}
+                            rows={2}
+                            className="w-full resize-none rounded-[10px] border border-[#B9C3C8] px-3 py-2 text-sm leading-6 outline-none focus:border-[#2F8FB3]"
+                          />
+                        </label>
+                      </div>
+                    ) : null}
+                  </div>
                 </div>
               ))}
+            </div>
+          </EditorFieldSection>
+        ) : null}
+
+        {showSchedule && trackRows.length > 1 && builderStatus && setBuilderStatus && setTransferRules ? (
+          <EditorFieldSection title="Track Switching">
+            <div className="space-y-3">
+              <p className="text-xs leading-5 text-[#7B858C]">Choose whether enrolled students can switch between schedule options after joining, and configure exactly which switches are allowed.</p>
+              <label className="block">
+                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Track switching</span>
+                <select
+                  value={builderStatus.trackSwitchPolicy}
+                  onChange={(event) => setBuilderStatus((current) => ({ ...current, trackSwitchPolicy: event.target.value as ProgramBuilderStatus["trackSwitchPolicy"] }))}
+                  className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]"
+                >
+                  <option value="disabled">Disabled</option>
+                  <option value="request_only">Allowed by request</option>
+                  <option value="allowed">Allowed without requesting</option>
+                </select>
+              </label>
+              {builderStatus.trackSwitchPolicy !== "disabled" ? (
+                <div className="space-y-3 rounded-[10px] border border-[#E1E8EC] bg-[#FAFCFC] p-3">
+                  <label className="flex items-center gap-2 text-sm font-medium text-[#26323A]">
+                    <input
+                      type="checkbox"
+                      checked={builderStatus.trackSwitchAllowAll}
+                      onChange={(event) => setBuilderStatus((current) => ({ ...current, trackSwitchAllowAll: event.target.checked }))}
+                    />
+                    Allow switching between any schedule options
+                  </label>
+                  {!builderStatus.trackSwitchAllowAll ? (
+                    <TrackTransferRuleBuilder trackRows={trackRows} transferRules={transferRules} setTransferRules={setTransferRules} />
+                  ) : null}
+                </div>
+              ) : null}
             </div>
           </EditorFieldSection>
         ) : null}
@@ -9795,6 +10225,22 @@ function ProgramEditorFields({
                   </label>
                 ) : null}
               </div>
+            ) : null}
+            {setCoverDirectorVisibility ? (
+              <label className="block">
+                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Show on class cover</span>
+                <select
+                  value={coverDirectorVisibility}
+                  onChange={(event) => setCoverDirectorVisibility(event.target.value)}
+                  className="h-11 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm text-[#26323A] outline-none focus:border-[#2F8FB3]"
+                >
+                  <option value="name_and_photo">Name and photo</option>
+                  <option value="name_only">Name only</option>
+                  <option value="photo_only">Photo only</option>
+                  <option value="none">Neither</option>
+                </select>
+                <p className="mt-1 text-xs leading-5 text-[#7B858C]">Controls what appears on the class cover in browse/enrolled lists. The Program Director section on the public page always shows full details.</p>
+              </label>
             ) : null}
           </div>
         </EditorFieldSection> : null}
@@ -10994,6 +11440,7 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
             ))}
           </section>
         ) : null}
+        {!cameFrom && program ? <ProgramStudentInviteTools program={program} /> : null}
       </div>
       {reviewTarget ? (
         <ApplicationDecisionModal
@@ -12218,7 +12665,7 @@ function FinanceDetailsDrawer({
   const basePath = mode === "admin" ? `/m/${slug}/admin/programs` : `/m/${slug}/teacher/classes`;
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex justify-end bg-[#26323A]/35 backdrop-blur-sm">
+    <div className="fixed inset-0 z-[2147483647] flex justify-end bg-[#26323A]/35 backdrop-blur-sm">
       <div ref={containerRef} role="dialog" aria-modal="true" tabIndex={-1} className="flex h-full w-full max-w-md flex-col overflow-y-auto bg-white text-[#26323A] shadow-[0_24px_70px_rgba(38,50,58,0.22)] outline-none">
         <div className="flex items-center justify-between border-b border-[#EEF2F4] px-5 py-4">
           <div>
@@ -12521,11 +12968,9 @@ export function ProgramApplicationsData({ slug, programId, mode = "teacher" }: {
   const [planFilter, setPlanFilter] = useState("all");
   const [needsActionOnly, setNeedsActionOnly] = useState(false);
   const [tracks, setTracks] = useState<ProgramTrack[]>([]);
-  const [decisionTarget, setDecisionTarget] = useState<{ row: ApplicationRow; action: "approved" | "waitlisted" | "rejected" } | null>(null);
-  const [decisionBusy, setDecisionBusy] = useState(false);
   const [detailsTarget, setDetailsTarget] = useState<ApplicationRow | null>(null);
-  const [changePriceTarget, setChangePriceTarget] = useState<ApplicationRow | null>(null);
-  const [confirmActionTarget, setConfirmActionTarget] = useState<{ row: ApplicationRow; action: "cancel_approval" | "reopen" } | null>(null);
+  const [trackSwitchRequests, setTrackSwitchRequests] = useState<ProgramTrackSwitchRequestWithContext[]>([]);
+  const [switchRequestBusyId, setSwitchRequestBusyId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<EditorToastState | null>(null);
@@ -12591,11 +13036,12 @@ export function ProgramApplicationsData({ slug, programId, mode = "teacher" }: {
       return;
     }
 
-    const [{ data: requestRows, error: requestError }, { data: trackRows }, { data: subscriptionRows }, { data: auditRows }] = await Promise.all([
+    const [{ data: requestRows, error: requestError }, { data: trackRows }, { data: subscriptionRows }, { data: auditRows }, { data: switchRows }] = await Promise.all([
       supabase.from("enrollment_requests").select("*").eq("program_id", programId).order("requested_at", { ascending: false }),
       supabase.from("program_tracks").select("*").eq("program_id", programId),
       supabase.from("program_subscriptions").select("*").eq("program_id", programId),
       supabase.from("program_finance_audit_events").select("*").eq("program_id", programId).order("created_at", { ascending: false }).limit(20),
+      supabase.from("program_track_switch_requests").select("*").eq("program_id", programId).order("requested_at", { ascending: false }),
     ]);
     if (requestError) {
       setError(requestError.message);
@@ -12603,7 +13049,7 @@ export function ProgramApplicationsData({ slug, programId, mode = "teacher" }: {
       return;
     }
 
-    const studentIds = Array.from(new Set((requestRows ?? []).map((row) => row.student_profile_id)));
+    const studentIds = Array.from(new Set([...(requestRows ?? []).map((row) => row.student_profile_id), ...(switchRows ?? []).map((row) => row.student_profile_id)]));
     const parentIds = Array.from(new Set((requestRows ?? []).map((row) => row.parent_profile_id).filter(Boolean) as string[]));
     const reviewerIds = Array.from(new Set((requestRows ?? []).map((row) => row.reviewed_by).filter(Boolean) as string[]));
     const profileIds = Array.from(new Set([...studentIds, ...parentIds, ...reviewerIds]));
@@ -12624,6 +13070,13 @@ export function ProgramApplicationsData({ slug, programId, mode = "teacher" }: {
       })),
     );
     setAuditEvents(auditRows ?? []);
+    setTrackSwitchRequests(
+      (switchRows ?? []).map((request) => ({
+        ...request,
+        program: programRow,
+        student: (profileRows ?? []).find((profile) => profile.id === request.student_profile_id) as StudentDisplay | null,
+      })),
+    );
     setLoading(false);
   }
 
@@ -12666,6 +13119,23 @@ export function ProgramApplicationsData({ slug, programId, mode = "teacher" }: {
     return payStatus === "not_required" || payStatus === "waived";
   }).length;
   const waitingPaymentCount = approvedRows.length - waitingConfirmationCount;
+  const tracksById = Object.fromEntries(tracks.map((track) => [track.id, track]));
+  const pendingSwitchRequests = trackSwitchRequests.filter((request) => request.status === "pending");
+
+  async function decideTrackSwitchRequest(requestId: string, decision: "approved" | "rejected") {
+    setSwitchRequestBusyId(requestId);
+    const supabase = createSupabaseBrowserClient();
+    const { error: decisionError } = await supabase.rpc(decision === "approved" ? "approve_track_switch_request" : "reject_track_switch_request", {
+      target_request_id: requestId,
+    });
+    setSwitchRequestBusyId(null);
+    if (decisionError) {
+      setToast({ tone: "error", message: decisionError.message });
+      return;
+    }
+    setToast({ tone: "success", message: decision === "approved" ? "Switch approved." : "Switch rejected." });
+    void loadApplications();
+  }
 
   if (loading) {
     return <DirectorySkeleton />;
@@ -12681,46 +13151,6 @@ export function ProgramApplicationsData({ slug, programId, mode = "teacher" }: {
 
   if (error) {
     return <EmptyState title="Applications unavailable" text={error} />;
-  }
-
-  async function handleCopyConfirmationLink(row: ApplicationRow) {
-    const url = `${window.location.origin}/m/${slug}/registration/${row.request.id}`;
-    try {
-      await navigator.clipboard.writeText(url);
-      setToast({ tone: "success", message: "Registration confirmation link copied." });
-    } catch {
-      setToast({ tone: "error", message: "Could not copy link." });
-    }
-  }
-
-  function handleApplicationAction(row: ApplicationRow, action: ApplicationRowAction) {
-    if (action === "view") {
-      setDetailsTarget(row);
-      return;
-    }
-    if (action === "approve") {
-      setDecisionTarget({ row, action: "approved" });
-      return;
-    }
-    if (action === "waitlist") {
-      setDecisionTarget({ row, action: "waitlisted" });
-      return;
-    }
-    if (action === "reject") {
-      setDecisionTarget({ row, action: "rejected" });
-      return;
-    }
-    if (action === "cancel_approval" || action === "reopen") {
-      setConfirmActionTarget({ row, action });
-      return;
-    }
-    if (action === "change_price") {
-      setChangePriceTarget(row);
-      return;
-    }
-    if (action === "copy_confirmation_link") {
-      void handleCopyConfirmationLink(row);
-    }
   }
 
   return (
@@ -12876,6 +13306,27 @@ export function ProgramApplicationsData({ slug, programId, mode = "teacher" }: {
         </div>
       </div>
 
+      {pendingSwitchRequests.length ? (
+        <section className="space-y-3">
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-semibold text-[#26323A]">Pending Switch Requests</h2>
+            <span className="rounded-full bg-[#EEF6F7] px-2.5 py-1 text-xs font-semibold text-[#17624F]">{pendingSwitchRequests.length}</span>
+          </div>
+          <div className="space-y-2">
+            {pendingSwitchRequests.map((request) => (
+              <TrackSwitchRequestCard
+                key={request.id}
+                request={request}
+                tracksById={tracksById}
+                busy={switchRequestBusyId === request.id}
+                onApprove={() => void decideTrackSwitchRequest(request.id, "approved")}
+                onReject={() => void decideTrackSwitchRequest(request.id, "rejected")}
+              />
+            ))}
+          </div>
+        </section>
+      ) : null}
+
       <section className="space-y-3">
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-semibold text-[#26323A]">Audit Trail</h2>
@@ -12900,70 +13351,236 @@ export function ProgramApplicationsData({ slug, programId, mode = "teacher" }: {
         </div>
       </section>
 
-      {decisionTarget ? (
+      {detailsTarget ? (
+        <ApplicationReviewOverlay
+          programId={programId}
+          slug={slug}
+          mode={mode}
+          requestId={detailsTarget.request.id}
+          onClose={() => setDetailsTarget(null)}
+          onChanged={loadApplications}
+        />
+      ) : null}
+    </section>
+  );
+}
+
+/**
+ * Self-contained "open an application on top of whatever page you're on" overlay.
+ * Independently loads the one enrollment_request by id (rather than requiring the
+ * caller's full rows array), so it can be mounted from the Applications table AND the
+ * Inbox without either needing to know about the other. Owns its own decision/change-price
+ * /confirm-action modal state; on any successful action it awaits the caller's onChanged
+ * (so the underlying list re-fetches and the item is already reclassified as "past") before
+ * closing, matching the existing per-row action wiring in ProgramApplicationsData.
+ */
+function ApplicationReviewOverlay({
+  programId,
+  slug,
+  mode,
+  requestId,
+  onClose,
+  onChanged,
+}: {
+  programId: string;
+  slug: string;
+  mode: "teacher" | "admin";
+  requestId: string;
+  onClose: () => void;
+  onChanged: () => Promise<void> | void;
+}) {
+  const [program, setProgram] = useState<Program | null>(null);
+  const [row, setRow] = useState<ApplicationRow | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [decisionAction, setDecisionAction] = useState<"approved" | "waitlisted" | "rejected" | null>(null);
+  const [decisionBusy, setDecisionBusy] = useState(false);
+  const [changePriceOpen, setChangePriceOpen] = useState(false);
+  const [confirmAction, setConfirmAction] = useState<"cancel_approval" | "reopen" | null>(null);
+  const [toast, setToast] = useState<EditorToastState | null>(null);
+  const [closing, setClosing] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function load() {
+      setLoading(true);
+      setError(null);
+      const supabase = createSupabaseBrowserClient();
+      const [{ data: programRow }, { data: request, error: requestError }] = await Promise.all([
+        supabase.from("programs").select("*").eq("id", programId).maybeSingle(),
+        supabase.from("enrollment_requests").select("*").eq("id", requestId).maybeSingle(),
+      ]);
+      if (cancelled) {
+        return;
+      }
+      if (requestError || !request || !programRow) {
+        setError(requestError?.message ?? "Application not found.");
+        setLoading(false);
+        return;
+      }
+
+      let trackRow: ProgramTrack | null = null;
+      if (request.program_track_id) {
+        const trackResult = await supabase.from("program_tracks").select("*").eq("id", request.program_track_id).maybeSingle();
+        trackRow = trackResult.data ?? null;
+      }
+      const { data: subscriptionRow } = await supabase
+        .from("program_subscriptions")
+        .select("*")
+        .eq("program_id", programId)
+        .eq("student_profile_id", request.student_profile_id)
+        .maybeSingle();
+      const profileIds = Array.from(new Set([request.student_profile_id, request.parent_profile_id, request.reviewed_by].filter(Boolean))) as string[];
+      const { data: profileRows } = profileIds.length
+        ? await supabase.from("profiles").select("id, full_name, email, phone_number, avatar_url, age, gender, date_of_birth, account_type").in("id", profileIds)
+        : { data: [] as StudentDisplay[] };
+
+      if (cancelled) {
+        return;
+      }
+      setProgram(programRow);
+      setRow({
+        request,
+        student: (profileRows ?? []).find((profile) => profile.id === request.student_profile_id) as StudentDisplay | null,
+        parent: request.parent_profile_id ? ((profileRows ?? []).find((profile) => profile.id === request.parent_profile_id) as ParentDisplay | undefined) ?? null : null,
+        track: trackRow,
+        subscription: subscriptionRow ?? null,
+        approver: request.reviewed_by ? ((profileRows ?? []).find((profile) => profile.id === request.reviewed_by) as Profile | undefined) ?? null : null,
+      });
+      setLoading(false);
+    }
+
+    const timeout = window.setTimeout(() => {
+      void load();
+    }, 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+    };
+  }, [programId, requestId]);
+
+  async function handleCopyConfirmationLink() {
+    const url = `${window.location.origin}/m/${slug}/registration/${requestId}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      setToast({ tone: "success", message: "Registration confirmation link copied." });
+    } catch {
+      setToast({ tone: "error", message: "Could not copy link." });
+    }
+  }
+
+  function handleAction(action: ApplicationRowAction) {
+    if (action === "approve") {
+      setDecisionAction("approved");
+      return;
+    }
+    if (action === "waitlist") {
+      setDecisionAction("waitlisted");
+      return;
+    }
+    if (action === "reject") {
+      setDecisionAction("rejected");
+      return;
+    }
+    if (action === "cancel_approval" || action === "reopen") {
+      setConfirmAction(action);
+      return;
+    }
+    if (action === "change_price") {
+      setChangePriceOpen(true);
+      return;
+    }
+    if (action === "copy_confirmation_link") {
+      void handleCopyConfirmationLink();
+    }
+  }
+
+  async function closeAfterChange() {
+    setClosing(true);
+    await onChanged();
+    setClosing(false);
+    onClose();
+  }
+
+  if (loading) {
+    return createPortal(
+      <div className="fixed inset-0 z-[2147483647] flex justify-end bg-[#26323A]/35 backdrop-blur-sm">
+        <div className="flex h-full w-full max-w-md items-center justify-center bg-white">
+          <InboxLoadingPanel label="Loading application" />
+        </div>
+      </div>,
+      document.body,
+    );
+  }
+
+  if (error || !program || !row) {
+    return createPortal(
+      <div className="fixed inset-0 z-[2147483647] flex justify-end bg-[#26323A]/35 backdrop-blur-sm">
+        <div className="flex h-full w-full max-w-md flex-col bg-white p-5">
+          <button type="button" onClick={onClose} className="self-end text-sm font-semibold text-[#6B747B]">
+            Close
+          </button>
+          <div className="flex flex-1 items-center justify-center">
+            <EmptyState title="Could not load application" text={error ?? "This application could not be found."} />
+          </div>
+        </div>
+      </div>,
+      document.body,
+    );
+  }
+
+  return (
+    <>
+      <EditorToast toast={toast} onClose={() => setToast(null)} />
+      <ApplicationDetailsDrawer row={row} program={program} slug={slug} mode={mode} onClose={onClose} onAction={handleAction} />
+      {decisionAction ? (
         <ApplicationDecisionModal
-          target={{ request: { ...decisionTarget.row.request, program, student: decisionTarget.row.student, parent: decisionTarget.row.parent, track: decisionTarget.row.track }, action: decisionTarget.action }}
-          busy={decisionBusy}
+          target={{ request: { ...row.request, program, student: row.student, parent: row.parent, track: row.track }, action: decisionAction }}
+          busy={decisionBusy || closing}
           onClose={() => {
             if (!decisionBusy) {
-              setDecisionTarget(null);
+              setDecisionAction(null);
             }
           }}
           onSubmit={async (options) => {
             setDecisionBusy(true);
-            const endpoint = decisionTarget.action === "approved" ? "approve" : decisionTarget.action === "waitlisted" ? "waitlist" : "reject";
-            const result = await callApplicationAction(programId, decisionTarget.row.request.id, endpoint, options);
+            const endpoint = decisionAction === "approved" ? "approve" : decisionAction === "waitlisted" ? "waitlist" : "reject";
+            const result = await callApplicationAction(programId, requestId, endpoint, options);
             setDecisionBusy(false);
             if (!result.ok) {
               setToast({ tone: "error", message: result.error });
               return;
             }
-            setDecisionTarget(null);
-            setDetailsTarget(null);
-            setToast({ tone: "success", message: "Application updated." });
-            void loadApplications();
+            setDecisionAction(null);
+            void closeAfterChange();
           }}
         />
       ) : null}
-
-      {detailsTarget ? (
-        <ApplicationDetailsDrawer
-          row={detailsTarget}
-          program={program}
-          slug={slug}
-          mode={mode}
-          onClose={() => setDetailsTarget(null)}
-          onAction={(action) => handleApplicationAction(detailsTarget, action)}
-        />
-      ) : null}
-
-      {changePriceTarget ? (
+      {changePriceOpen ? (
         <ApplicationChangePriceModal
-          row={changePriceTarget}
+          row={row}
           program={program}
-          onClose={() => setChangePriceTarget(null)}
+          onClose={() => setChangePriceOpen(false)}
           onSuccess={() => {
-            setChangePriceTarget(null);
-            setDetailsTarget(null);
-            void loadApplications();
+            setChangePriceOpen(false);
+            void closeAfterChange();
           }}
         />
       ) : null}
-
-      {confirmActionTarget ? (
+      {confirmAction ? (
         <ApplicationConfirmActionModal
-          row={confirmActionTarget.row}
-          action={confirmActionTarget.action}
+          row={row}
+          action={confirmAction}
           program={program}
-          onClose={() => setConfirmActionTarget(null)}
+          onClose={() => setConfirmAction(null)}
           onSuccess={() => {
-            setConfirmActionTarget(null);
-            setDetailsTarget(null);
-            void loadApplications();
+            setConfirmAction(null);
+            void closeAfterChange();
           }}
         />
       ) : null}
-    </section>
+    </>
   );
 }
 
@@ -13625,6 +14242,13 @@ function formatFinanceShortDate(value: string | null | undefined) {
   return new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
+function formatDurationDate(value: string | null | undefined) {
+  if (!value) {
+    return "—";
+  }
+  return new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
 function hasActiveRecurringSubscription(subscription: ProgramSubscription | null | undefined) {
   if (!subscription?.stripe_subscription_id) {
     return false;
@@ -13778,12 +14402,24 @@ async function fetchMosqueProgramsSnapshot(slug: string): Promise<MosquePrograms
     teachers = teacherData ?? [];
   }
 
+  const programIds = visiblePrograms.map((program) => program.id);
+  let detailsRows: Array<{ program_id: string; instructor_display_name: string | null; cover_director_visibility: string }> = [];
+  if (programIds.length > 0) {
+    const { data: detailsData } = await supabase.from("program_details").select("program_id, instructor_display_name, cover_director_visibility").in("program_id", programIds);
+    detailsRows = detailsData ?? [];
+  }
+
   const snapshot = {
     mosque: mosqueData,
-    programs: visiblePrograms.map((program) => ({
-      ...program,
-      teacher: teachers.find((teacher) => teacher.id === (program.director_profile_id ?? program.teacher_profile_id)) ?? null,
-    })),
+    programs: visiblePrograms.map((program) => {
+      const details = detailsRows.find((row) => row.program_id === program.id);
+      return {
+        ...program,
+        teacher: teachers.find((teacher) => teacher.id === (program.director_profile_id ?? program.teacher_profile_id)) ?? null,
+        coverDirectorDisplayName: details?.instructor_display_name ?? null,
+        coverDirectorVisibility: details?.cover_director_visibility ?? "name_and_photo",
+      };
+    }),
   };
 
   mosqueProgramsCache.set(slug, snapshot);
@@ -13806,6 +14442,40 @@ async function hydrateTracksWithLinkedSessions(
   ]);
 
   return applyLinkedSessionsToTracks(tracks, sessions ?? [], links ?? []);
+}
+
+async function saveTrackTransferRules(
+  supabase: ReturnType<typeof createSupabaseBrowserClient>,
+  programId: string,
+  insertedTracks: Array<{ id: string; sort_order: number | null }>,
+  trackRows: ProgramEditorTrackRow[],
+  transferRules: ProgramEditorTransferRule[],
+) {
+  await supabase.from("program_track_transfer_rules").delete().eq("program_id", programId);
+  if (!transferRules.length) {
+    return;
+  }
+
+  const insertedTrackBySortOrder = new Map(insertedTracks.map((track) => [track.sort_order ?? 0, track.id]));
+  const realIdByLocalId = new Map<string, string>();
+  trackRows.forEach((track, index) => {
+    const realId = insertedTrackBySortOrder.get(index + 1);
+    if (realId) {
+      realIdByLocalId.set(track.id, realId);
+    }
+  });
+
+  const rows = transferRules
+    .map((rule) => {
+      const fromId = realIdByLocalId.get(rule.fromTrackId);
+      const toId = realIdByLocalId.get(rule.toTrackId);
+      return fromId && toId ? { program_id: programId, from_track_id: fromId, to_track_id: toId } : null;
+    })
+    .filter((row): row is { program_id: string; from_track_id: string; to_track_id: string } => Boolean(row));
+
+  if (rows.length) {
+    await supabase.from("program_track_transfer_rules").insert(rows);
+  }
 }
 
 async function saveCanonicalProgramSessions(
@@ -14660,13 +15330,12 @@ export function useTeacherNotificationCounts(slug: string) {
         return;
       }
 
-      const [{ data: rows }, { data: withdrawalRows }, { data: instructorRows }, { data: instructorEventRows }] = await Promise.all([
+      const [{ data: rows }, { data: withdrawalRows }, { data: instructorRows }, { data: instructorEventRows }, { data: trackSwitchRows }] = await Promise.all([
         supabase
           .from("enrollment_requests")
-          .select("id, requested_at, admission_completed_at")
+          .select("id, status, requested_at, reviewed_at, admission_completed_at")
           .in("program_id", programIds)
-          .is("teacher_dismissed_at", null)
-          .or("status.eq.pending,admission_completed_at.not.is.null"),
+          .is("teacher_dismissed_at", null),
         supabase
           .from("withdrawal_requests")
           .select("id, status, reviewed_at, requested_at")
@@ -14683,6 +15352,7 @@ export function useTeacherNotificationCounts(slug: string) {
           .from("program_instructor_events")
           .select("id, assignment_id, teacher_profile_id, event_type")
           .in("program_id", programIds),
+        supabase.from("program_track_switch_requests").select("id, status, requested_at").in("program_id", programIds),
       ]);
       const { seen: seenIds, dismissed: dismissedIds } = await fetchNotificationState(userId);
       if (active) {
@@ -14700,9 +15370,11 @@ export function useTeacherNotificationCounts(slug: string) {
           .filter((row) => !dismissedIds.has(teacherInstructorNotificationKey(row)))
           .filter((row) => !seenIds.has(teacherInstructorNotificationKey(row))).length;
         const unseenWithdrawals = (withdrawalRows ?? []).filter((row) => !seenIds.has(studentWithdrawalNotificationKey(row))).length;
-        setRequestCount(unseenApplications + unseenInstructors + unseenWithdrawals);
-        const hasPendingApplication = (rows ?? []).some((row) => !row.admission_completed_at);
-        setActionRequired(hasPendingApplication || Boolean((withdrawalRows ?? []).length));
+        const unseenTrackSwitches = (trackSwitchRows ?? []).filter((row) => !seenIds.has(`track-switch:${row.id}:${row.status}:${row.requested_at}`)).length;
+        setRequestCount(unseenApplications + unseenInstructors + unseenWithdrawals + unseenTrackSwitches);
+        const hasPendingApplication = (rows ?? []).some((row) => row.status === "pending");
+        const hasPendingSwitch = (trackSwitchRows ?? []).some((row) => row.status === "pending");
+        setActionRequired(hasPendingApplication || Boolean((withdrawalRows ?? []).length) || hasPendingSwitch);
       }
     }
 
@@ -14814,6 +15486,175 @@ function ClearAllButton({ onClick }: { onClick: () => void }) {
 
 function MiniEmpty({ text }: { text: string }) {
   return <div className="rounded-xl border border-dashed border-[#D6DCE0] px-4 py-6 text-center text-sm text-[#6B747B]">{text}</div>;
+}
+
+function TeacherInboxMessageRow({ item, onOpen }: { item: TeacherInboxMessageItem; onOpen: () => void }) {
+  const inactive = !item.unread && !item.requiresAction;
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className={cn(
+        "flex w-full items-start gap-3 rounded-[20px] border px-3 py-3 text-left transition",
+        item.requiresAction
+          ? "border-[#CFE3EA] bg-white shadow-[0_10px_24px_rgba(38,50,58,0.07)]"
+          : item.unread
+            ? "border-[#DDE8EC] bg-white"
+            : "border-[#EDF1F3] bg-[#F8FAFB] opacity-70",
+      )}
+    >
+      <span className="mt-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#EEF6F7] text-[#2F8FB3]" aria-hidden>
+        <DefaultProfileIcon className="h-5 w-5" compact />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="flex items-start justify-between gap-2">
+          <span className={cn("truncate text-[15px] font-semibold leading-5", inactive ? "text-[#52616A]" : "text-[#26323A]")}>{item.title}</span>
+          {item.requiresAction ? (
+            <span className="shrink-0 rounded-full bg-[#FFF7E6] px-2 py-0.5 text-[11px] font-semibold text-[#996800]">Action</span>
+          ) : item.unread ? (
+            <span className="mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full bg-[#2F8FB3]" aria-label="Unread" />
+          ) : null}
+        </span>
+        <span className={cn("mt-1 block text-sm leading-5", inactive ? "text-[#7B858C]" : "text-[#26323A]")}>{item.subtitle}</span>
+        <span className="mt-0.5 block truncate text-xs leading-4 text-[#7B858C]">{item.meta}</span>
+      </span>
+    </button>
+  );
+}
+
+function TeacherInboxMessageDrawer({
+  item,
+  slug,
+  tracksById,
+  busyWithdrawalId,
+  busySwitchRequestId,
+  onClose,
+  onApproveWithdrawal,
+  onRejectWithdrawal,
+  onApproveTrackSwitch,
+  onRejectTrackSwitch,
+}: {
+  item: TeacherInboxMessageItem;
+  slug: string;
+  tracksById: Record<string, ProgramTrack>;
+  busyWithdrawalId: string | null;
+  busySwitchRequestId: string | null;
+  onClose: () => void;
+  onApproveWithdrawal: (request: WithdrawalRequestWithContext) => void;
+  onRejectWithdrawal: (request: WithdrawalRequestWithContext) => void;
+  onApproveTrackSwitch: (request: ProgramTrackSwitchRequestWithContext) => void;
+  onRejectTrackSwitch: (request: ProgramTrackSwitchRequestWithContext) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  useModalFocusTrap(containerRef, true, onClose);
+  const title = item.kind === "withdrawal" ? "Withdrawal" : item.kind === "instructor" ? "Instructor Update" : item.kind === "switch" ? "Schedule Switch" : "Message";
+  const fromNames = item.kind === "switch" ? (item.request.from_track_ids ?? []).map((id) => tracksById[id]?.name || "Untitled track").join(", ") || "—" : "";
+  const toNames = item.kind === "switch" ? (item.request.to_track_ids ?? []).map((id) => tracksById[id]?.name || "Untitled track").join(", ") || "—" : "";
+
+  return createPortal(
+    <div className="fixed inset-0 z-[2147483647] flex items-end bg-[#26323A]/35 backdrop-blur-sm md:items-center md:justify-center">
+      <div
+        ref={containerRef}
+        role="dialog"
+        aria-modal="true"
+        tabIndex={-1}
+        className="max-h-[82vh] w-full overflow-y-auto rounded-t-[30px] bg-white p-5 text-[#26323A] shadow-[0_-20px_60px_rgba(38,50,58,0.24)] outline-none md:max-w-lg md:rounded-[30px]"
+      >
+        <div className="mx-auto mb-4 h-1.5 w-12 rounded-full bg-[#D6DCE0] md:hidden" />
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#8A949B]">{title}</p>
+            <h2 className="mt-1 text-xl font-semibold">{item.title}</h2>
+            <p className="mt-1 text-sm leading-5 text-[#6B747B]">{item.meta}</p>
+          </div>
+          <button type="button" onClick={onClose} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#EEF3F5] text-[#52616A]" aria-label="Close">
+            <XIcon />
+          </button>
+        </div>
+
+        <div className="mt-5 rounded-[18px] border border-[#E1E8EC] bg-[#F8FAFB] p-4">
+          <p className="text-sm font-semibold text-[#26323A]">{item.subtitle}</p>
+          {item.kind === "withdrawal" ? (
+            <dl className="mt-4 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-2 text-xs">
+              <dt className="font-semibold uppercase tracking-wide text-[#8A949B]">Class</dt>
+              <dd>{item.request.program?.title ?? "Class"}</dd>
+              <dt className="font-semibold uppercase tracking-wide text-[#8A949B]">Student</dt>
+              <dd>{item.request.student?.full_name ?? "Student"}</dd>
+              {item.request.parent ? (
+                <>
+                  <dt className="font-semibold uppercase tracking-wide text-[#8A949B]">Parent</dt>
+                  <dd>{item.request.parent.full_name ?? item.request.parent.email ?? "Parent"}</dd>
+                </>
+              ) : null}
+              <dt className="font-semibold uppercase tracking-wide text-[#8A949B]">Reason</dt>
+              <dd className="whitespace-pre-wrap">{item.request.reason?.trim() || "No reason provided."}</dd>
+            </dl>
+          ) : item.kind === "instructor" ? (
+            <p className="mt-3 text-sm leading-6 text-[#52616A]">
+              {item.notification.instructor?.full_name?.trim() || item.notification.instructor?.email || "Instructor"}{" "}
+              {item.notification.event_type === "resigned" ? "resigned from" : "joined"} {item.notification.program?.title ?? "this class"}.
+            </p>
+          ) : item.kind === "switch" ? (
+            <dl className="mt-4 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-2 text-xs">
+              <dt className="font-semibold uppercase tracking-wide text-[#8A949B]">Switching from</dt>
+              <dd>{fromNames}</dd>
+              <dt className="font-semibold uppercase tracking-wide text-[#8A949B]">Switching to</dt>
+              <dd>{toNames}</dd>
+            </dl>
+          ) : null}
+        </div>
+
+        {item.kind === "withdrawal" && item.request.status === "pending" ? (
+          <div className="mt-4 grid gap-2">
+            <button
+              type="button"
+              onClick={() => onApproveWithdrawal(item.request)}
+              disabled={busyWithdrawalId === item.request.id}
+              className="min-h-11 rounded-full bg-[#17624F] px-4 text-sm font-semibold text-white disabled:bg-[#D8E2E5] disabled:text-[#8A949B]"
+            >
+              {busyWithdrawalId === item.request.id ? "Working..." : "Accept withdrawal and remove student"}
+            </button>
+            <button
+              type="button"
+              onClick={() => onRejectWithdrawal(item.request)}
+              disabled={busyWithdrawalId === item.request.id}
+              className="min-h-11 rounded-full bg-[#EEF3F5] px-4 text-sm font-semibold text-[#26323A] disabled:opacity-60"
+            >
+              Reject withdrawal and keep student
+            </button>
+          </div>
+        ) : item.kind === "switch" && item.request.status === "pending" ? (
+          <div className="mt-4 grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => onApproveTrackSwitch(item.request)}
+              disabled={busySwitchRequestId === item.request.id}
+              className="min-h-11 rounded-full bg-[#E2F6E8] px-4 text-sm font-semibold text-[#258A43] disabled:opacity-60"
+            >
+              Accept
+            </button>
+            <button
+              type="button"
+              onClick={() => onRejectTrackSwitch(item.request)}
+              disabled={busySwitchRequestId === item.request.id}
+              className="min-h-11 rounded-full bg-[#FCE8E4] px-4 text-sm font-semibold text-[#C83F31] disabled:opacity-60"
+            >
+              Reject
+            </button>
+          </div>
+        ) : item.kind === "instructor" ? (
+          <TransitionLink
+            href={`/m/${slug}/teacher/classes/${item.notification.program_id}/instructors`}
+            label="Manage"
+            className="mt-4 inline-flex min-h-10 w-full items-center justify-center rounded-full bg-[#17624F] px-4 text-sm font-semibold !text-white no-underline"
+          >
+            Manage
+          </TransitionLink>
+        ) : null}
+      </div>
+    </div>,
+    document.body,
+  );
 }
 
 function buildAnnouncementThreads(announcements: AnnouncementWithContext[], enrolledPrograms: Program[] = []) {
@@ -15352,10 +16193,12 @@ function TeacherAnnouncementBubble({ announcement, readers = [], showSeenDetails
 function InstructorLifecycleNotificationCard({
   notification,
   slug,
+  reviewed = false,
   onClear,
 }: {
   notification: InstructorLifecycleNotification;
   slug: string;
+  reviewed?: boolean;
   onClear?: () => void;
 }) {
   const instructorName = notification.instructor?.full_name?.trim() || notification.instructor?.email || "Instructor";
@@ -15363,7 +16206,7 @@ function InstructorLifecycleNotificationCard({
   const actionText = notification.event_type === "resigned" ? "has resigned from" : "has become an instructor of";
 
   return (
-    <article className="rounded-[22px] border border-[#E1E8EC] bg-white p-4 shadow-[0_10px_24px_rgba(38,50,58,0.07)]">
+    <article className={cn("rounded-[22px] border border-[#E1E8EC] bg-white p-4 shadow-[0_10px_24px_rgba(38,50,58,0.07)]", reviewed ? "opacity-70" : "")}>
       <div className="flex items-start gap-3">
         <Avatar src={notification.instructor?.avatar_url ?? null} name={instructorName} />
         <div className="min-w-0 flex-1">
@@ -15390,6 +16233,68 @@ function InstructorLifecycleNotificationCard({
   );
 }
 
+function TrackSwitchRequestCard({
+  request,
+  tracksById,
+  reviewed = false,
+  busy = false,
+  onApprove,
+  onReject,
+}: {
+  request: ProgramTrackSwitchRequestWithContext;
+  tracksById: Record<string, ProgramTrack>;
+  reviewed?: boolean;
+  busy?: boolean;
+  onApprove?: () => void;
+  onReject?: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const studentName = request.student?.full_name?.trim() || "Student";
+  const fromNames = (request.from_track_ids ?? []).map((id) => tracksById[id]?.name || "Untitled track").join(", ") || "—";
+  const toNames = (request.to_track_ids ?? []).map((id) => tracksById[id]?.name || "Untitled track").join(", ") || "—";
+  const statusLabel = request.status.charAt(0).toUpperCase() + request.status.slice(1);
+
+  return (
+    <article className={cn("overflow-hidden rounded-[22px] border border-[#E1E8EC] bg-white shadow-[0_10px_24px_rgba(38,50,58,0.07)]", reviewed ? "opacity-70" : "")}>
+      <button type="button" onClick={() => setExpanded((value) => !value)} className="flex w-full items-center gap-2 px-3 py-3 text-left">
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#EEF6F7] text-[#2F8FB3]" aria-hidden>
+          <DefaultProfileIcon className="h-5 w-5" compact />
+        </span>
+        <div className="min-w-0 flex-1">
+          <h3 className="truncate text-[15px] font-semibold leading-5 text-[#26323A]">{studentName}</h3>
+          <p className="mt-0.5 truncate text-xs leading-4 text-[#6B747B]">{request.program?.title ?? "Class"} · Schedule switch request</p>
+        </div>
+        {reviewed ? (
+          <span className={cn("shrink-0 rounded-full px-2 py-1 text-[11px] font-semibold", request.status === "approved" ? "bg-[#EAF8EF] text-[#258A43]" : "bg-[#FDEDEA] text-[#C83F31]")}>
+            {statusLabel}
+          </span>
+        ) : null}
+        <ChevronIcon expanded={expanded} />
+      </button>
+      {expanded ? (
+        <div className="border-t border-[#E6ECEF] bg-[#F8FAFB] px-5 py-4">
+          <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-2 text-xs">
+            <dt className="font-semibold uppercase tracking-wide text-[#8A949B]">Switching from</dt>
+            <dd className="text-[#26323A]">{fromNames}</dd>
+            <dt className="font-semibold uppercase tracking-wide text-[#8A949B]">Switching to</dt>
+            <dd className="text-[#26323A]">{toNames}</dd>
+          </dl>
+          {!reviewed && (onApprove || onReject) ? (
+            <div className="mt-4 grid grid-cols-2 gap-2">
+              <button type="button" onClick={onApprove} disabled={busy} className="min-h-10 rounded-[9px] bg-[#E2F6E8] px-2 text-xs font-semibold text-[#258A43] transition-colors hover:bg-[#D4F0DD] disabled:opacity-60">
+                Accept
+              </button>
+              <button type="button" onClick={onReject} disabled={busy} className="min-h-10 rounded-[9px] bg-[#FCE8E4] px-2 text-xs font-semibold text-[#C83F31] transition-colors hover:bg-[#F9D8D1] disabled:opacity-60">
+                Reject
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
 function TeacherRequestCard({
   request,
   reviewed = false,
@@ -15397,7 +16302,7 @@ function TeacherRequestCard({
   onWaitlist,
   onReject,
   onClear,
-  viewHref,
+  onView,
 }: {
   request: RequestWithContext;
   reviewed?: boolean;
@@ -15405,7 +16310,7 @@ function TeacherRequestCard({
   onWaitlist?: () => void;
   onReject?: () => void;
   onClear?: () => void;
-  viewHref?: string;
+  onView?: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const studentName = request.student?.full_name ?? "Student";
@@ -15416,7 +16321,7 @@ function TeacherRequestCard({
   return (
     <article className="relative pb-1">
       {!expanded ? <div className="absolute inset-x-8 bottom-0 h-3 rounded-b-[18px] bg-[#DDE7EC]" aria-hidden /> : null}
-      <div className="relative overflow-hidden rounded-[22px] border border-[#E1E8EC] bg-white shadow-[0_10px_24px_rgba(38,50,58,0.07)]">
+      <div className={cn("relative overflow-hidden rounded-[22px] border border-[#E1E8EC] bg-white shadow-[0_10px_24px_rgba(38,50,58,0.07)]", reviewed ? "opacity-70" : "")}>
         <div className="flex items-center gap-2 px-3 py-3">
           <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#EEF6F7] text-[#2F8FB3]" aria-hidden>
             <DefaultProfileIcon className="h-5 w-5" compact />
@@ -15464,11 +16369,11 @@ function TeacherRequestCard({
                   </>
                 )}
               </dl>
-              {viewHref ? (
+              {onView ? (
                 <div className="mt-4">
-                  <Link href={viewHref} className="flex min-h-10 items-center justify-center rounded-[9px] bg-[#EEF6F7] px-2 text-xs font-semibold text-[#17624F] transition-colors hover:bg-[#E3F0F0]">
+                  <button type="button" onClick={onView} className="flex min-h-10 w-full items-center justify-center rounded-[9px] bg-[#EEF6F7] px-2 text-xs font-semibold text-[#17624F] transition-colors hover:bg-[#E3F0F0]">
                     View Application
-                  </Link>
+                  </button>
                 </div>
               ) : !reviewed && (onAccept || onReject) ? (
                 <div className={cn("mt-4 grid gap-2", onWaitlist ? "grid-cols-3" : "grid-cols-2")}>
@@ -15517,7 +16422,7 @@ function WithdrawalRequestCard({
   const statusText = request.status === "pending" ? "Pending review" : titleCase(request.status);
 
   return (
-    <article className="rounded-[22px] border border-[#E1E8EC] bg-white p-4 shadow-[0_10px_24px_rgba(38,50,58,0.06)]">
+    <article className={cn("rounded-[22px] border border-[#E1E8EC] bg-white p-4 shadow-[0_10px_24px_rgba(38,50,58,0.06)]", reviewed ? "opacity-70" : "")}>
       <button type="button" onClick={() => setExpanded((current) => !current)} className="flex w-full items-start gap-3 text-left">
         <Avatar src={request.student?.avatar_url ?? null} name={studentName} />
         <div className="min-w-0 flex-1">
@@ -15662,7 +16567,7 @@ function ApplicationDecisionModal({
 
   const containerRef = useRef<HTMLDivElement>(null);
   useModalFocusTrap(containerRef, true, onClose);
-  return (
+  return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#26323A]/35 px-5 backdrop-blur-sm">
       <div ref={containerRef} role="dialog" aria-modal="true" tabIndex={-1} className="w-full max-w-sm rounded-[28px] bg-white p-5 text-[#26323A] shadow-[0_24px_70px_rgba(38,50,58,0.22)] outline-none">
         <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">{target.request.program?.title ?? "Class application"}</p>
@@ -15742,7 +16647,8 @@ function ApplicationDecisionModal({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -16232,7 +17138,7 @@ function StudentInboxThreadView({
   return (
     <section className="overflow-hidden rounded-[24px] bg-[#F7FAFB] shadow-[0_12px_28px_rgba(38,50,58,0.07)] ring-1 ring-[#E4EAEE]">
       <div className="flex items-center gap-3 border-b border-[#E1E8EC] bg-white px-4 py-3">
-        <button type="button" onClick={onBack} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#EEF3F5] text-[#26323A]" aria-label="Back to inbox">
+        <button type="button" onClick={onBack} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#EEF3F5] text-[#26323A] transition active:scale-90 active:bg-[#E1E8EC]" aria-label="Back to inbox">
           <ChevronLeftIcon />
         </button>
         <div className="min-w-0">
@@ -16630,6 +17536,17 @@ function SearchIcon() {
   );
 }
 
+function RefreshIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M20 6v5h-5" />
+      <path d="M4 18v-5h5" />
+      <path d="M18.3 9A7 7 0 0 0 6.7 6.7L4 9" />
+      <path d="M5.7 15A7 7 0 0 0 17.3 17.3L20 15" />
+    </svg>
+  );
+}
+
 function SendUpIcon() {
   return (
     <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -16967,7 +17884,7 @@ function requestEffectivePriceCents(paymentType: PaymentType, request: RequestWi
   return request.approved_price_monthly_cents ?? (useOverride ? request.track?.price_monthly_cents : request.program?.price_monthly_cents) ?? 0;
 }
 
-function trackPriceLine(track: ProgramTrack | null, program: Program, forType?: PaymentType): { label: string } | null {
+function trackPriceLine(track: ProgramTrack | null, program: Program, forType?: PaymentType, options?: { bareLabel?: boolean }): { label: string } | null {
   if (!program.is_paid) {
     return { label: "Free" };
   }
@@ -16983,8 +17900,46 @@ function trackPriceLine(track: ProgramTrack | null, program: Program, forType?: 
       : forType === "monthly" && offersMonthly
         ? false
         : !offersMonthly && offersAnnual;
-  const label = useAnnual ? `${formatPrice(annualCents)} pay in full` : `${formatPrice(monthlyCents)}/mo`;
+  const label = useAnnual ? (options?.bareLabel ? formatPrice(annualCents) : `${formatPrice(annualCents)} pay in full`) : `${formatPrice(monthlyCents)}/mo`;
   return { label };
+}
+
+function trackPricingDeal(track: ProgramTrack | null, program: Program): { annualPriceCents: number; savingsCents: number } | null {
+  if (!program.is_paid) {
+    return null;
+  }
+  const { monthlyCents, annualCents } = track ? trackEffectivePriceCents(track, program) : { monthlyCents: program.price_monthly_cents, annualCents: program.price_annual_cents };
+  const offersMonthly = program.offers_monthly_payment !== false && Boolean(monthlyCents);
+  const offersAnnual = !program.is_ongoing && Boolean(program.offers_annual_payment && annualCents);
+  if (!offersMonthly || !offersAnnual) {
+    return null;
+  }
+  const durationMonths = programPayInFullDurationMonths(program);
+  if (!durationMonths) {
+    return null;
+  }
+  const monthlyTotal = (monthlyCents ?? 0) * durationMonths;
+  const annual = annualCents ?? 0;
+  if (!monthlyTotal || !annual || annual >= monthlyTotal) {
+    return null;
+  }
+  return { annualPriceCents: annual, savingsCents: monthlyTotal - annual };
+}
+
+function TrackPricingDealCaption({ track, program, paymentType }: { track: ProgramTrack | null; program: Program; paymentType?: PaymentType }) {
+  const deal = trackPricingDeal(track, program);
+  if (!deal) {
+    return null;
+  }
+  return (
+    <p className="mt-0.5 text-right text-xs font-semibold text-[#B8860B]">
+      {paymentType === "annual"
+        ? `⭐ Saved ${formatPrice(deal.savingsCents)}`
+        : paymentType === "monthly"
+          ? `⭐ Save ${formatPrice(deal.savingsCents)} paying in full`
+          : `⭐ Save ${formatPrice(deal.savingsCents)} — ${formatPrice(deal.annualPriceCents)} pay in full`}
+    </p>
+  );
 }
 
 function TrackPriceNumber({ price }: { price: { label: string } | null }) {
@@ -17028,13 +17983,16 @@ function ProgramScheduleOptionsDisplay({
             const price = program ? trackPriceLine(track, program) : null;
             const capacityBadge = trackCapacityBadge(track, enrolledCountByTrackId);
             return (
-              <div key={track.id} className={cn("relative overflow-hidden rounded-[14px] p-3 ring-1", capacityBadge?.tone === "full" ? "bg-[#F3F4F5] ring-[#E1E8EC] opacity-75" : "bg-[#F7FAFB] ring-[#E6ECEF]")}>
+              <div key={track.id} className={cn("relative overflow-hidden rounded-[14px] p-3 ring-1", capacityBadge?.tone === "full" ? "bg-[#F3F4F5] ring-[#E1E8EC] opacity-75" : "bg-[#F7FAFB] ring-[#E6ECEF]", capacityBadge?.tone === "low" ? "pt-7" : "")}>
                 {capacityBadge?.tone === "low" ? (
                   <span className="absolute right-0 top-0 rounded-bl-[10px] bg-[#C0392B] px-2 py-1 text-[10px] font-bold uppercase tracking-wide text-white">{capacityBadge.label}</span>
                 ) : null}
                 <div className="flex items-start justify-between gap-3">
                   <p className="min-w-0 flex-1 text-sm font-semibold text-[#26323A]">{track.name}</p>
-                  <TrackPriceNumber price={price} />
+                  <div className="shrink-0">
+                    <TrackPriceNumber price={price} />
+                    {program ? <TrackPricingDealCaption track={track} program={program} /> : null}
+                  </div>
                 </div>
                 <div className="mt-1 flex items-start justify-between gap-3">
                   <div className="min-w-0 flex-1 space-y-0.5">
@@ -17043,6 +18001,7 @@ function ProgramScheduleOptionsDisplay({
                     ))}
                   </div>
                 </div>
+                {track.eligibility_comment ? <p className="mt-1.5 text-xs leading-5 text-[#7B858C]">{track.eligibility_comment}</p> : null}
                 {capacityBadge?.tone === "full" ? <span className="mt-2 inline-block rounded-full bg-[#E1E8EC] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#7B858C]">Full</span> : null}
               </div>
             );
@@ -17056,7 +18015,10 @@ function ProgramScheduleOptionsDisplay({
             <div className="rounded-[14px] bg-[#F7FAFB] p-3 ring-1 ring-[#E6ECEF]">
               <div className="flex items-start justify-between gap-3">
                 <p className="min-w-0 flex-1 text-sm font-semibold text-[#26323A]">Class schedule</p>
-                <TrackPriceNumber price={price} />
+                <div className="shrink-0">
+                  <TrackPriceNumber price={price} />
+                  {program ? <TrackPricingDealCaption track={null} program={program} /> : null}
+                </div>
               </div>
               <div className="mt-1 flex items-start justify-between gap-3">
                 <div className="min-w-0 flex-1 space-y-0.5">
@@ -17218,16 +18180,6 @@ function ChildEnrollmentSelector({
   );
 }
 
-function MessageIcon({ className, style }: { className?: string; style?: CSSProperties } = {}) {
-  return (
-    <svg viewBox="0 0 24 24" className={cn("h-4 w-4", className)} style={style} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4v8Z" />
-      <path d="M8 9h8" />
-      <path d="M8 13h5" />
-    </svg>
-  );
-}
-
 function ProgramTrackSelector({
   tracks,
   selectedTrackIds,
@@ -17253,7 +18205,7 @@ function ProgramTrackSelector({
           const scheduleLines = scheduleSessionLines(track.schedule, null);
           const capacityBadge = trackCapacityBadge(track, enrolledCountByTrackId);
           const full = capacityBadge?.tone === "full";
-          const price = trackPriceLine(track, program, selectedPaymentType);
+          const price = trackPriceLine(track, program, selectedPaymentType, { bareLabel: true });
           return (
             <button
               key={track.id}
@@ -17267,6 +18219,7 @@ function ProgramTrackSelector({
                   : selected
                     ? "bg-[#EAF7F1] ring-2 ring-[#17624F]"
                     : "bg-[#F7FAFB] ring-[#E6ECEF] hover:ring-[#9EC8D5]",
+                capacityBadge?.tone === "low" ? "pt-7" : "",
               )}
             >
               {capacityBadge?.tone === "low" ? (
@@ -17274,7 +18227,20 @@ function ProgramTrackSelector({
               ) : null}
               <span className="flex items-start justify-between gap-3">
                 <span className="min-w-0 flex-1 text-sm font-semibold text-[#26323A]">{track.name}</span>
-                <TrackPriceNumber price={price} />
+                <span className="shrink-0 text-right">
+                  <TrackPriceNumber price={price} />
+                  {(() => {
+                    const deal = trackPricingDeal(track, program);
+                    if (!deal) {
+                      return null;
+                    }
+                    return (
+                      <span className="mt-0.5 block text-xs font-semibold text-[#B8860B]">
+                        {selectedPaymentType === "annual" ? `⭐ Saved ${formatPrice(deal.savingsCents)}` : `⭐ Save ${formatPrice(deal.savingsCents)} paying in full`}
+                      </span>
+                    );
+                  })()}
+                </span>
               </span>
               {track.description ? <span className="mt-1 block text-xs leading-5 text-[#52616A]">{track.description}</span> : null}
               <span className="mt-1 flex items-start justify-between gap-3">
@@ -17511,7 +18477,9 @@ function EnrolledClassList({ programs, mosqueSlug }: { programs: ProgramWithTeac
             </div>
             <AudienceDetails age={formatAgeRange(program.age_range_text)} gender={formatGender(program.audience_gender)} />
             <div className="divide-y divide-[#E3E8EC] border-t border-[#E3E8EC]">
-              <TeacherActionLink href={`/m/${mosqueSlug}/portal/classes/${program.id}/schedule`} icon={<ScheduleIcon />} label="Schedule Options" />
+              {program.track_switch_policy !== "disabled" ? (
+                <TeacherActionLink href={`/m/${mosqueSlug}/portal/classes/${program.id}/schedule`} icon={<ScheduleIcon />} label="Schedule Options" />
+              ) : null}
               <TeacherActionLink href={`/m/${mosqueSlug}/programs/${program.id}?returnTo=${encodeURIComponent(`/m/${mosqueSlug}/portal/classes`)}`} icon={<ExternalLinkIcon />} label="Program Details" previewLabel="Program Details" />
               <TeacherActionLink href={`/m/${mosqueSlug}/portal/classes/${program.id}/withdrawal`} icon={<XIcon />} label="Request Withdrawal" previewLabel="Request Withdrawal" />
             </div>
@@ -18002,13 +18970,25 @@ function ProgramCard({
       </div>
       {program.cover_price_label_enabled !== false ? <PriceTag price={programCoverPriceLabel(program)} /> : null}
       <div className="space-y-3 p-4 pt-5">
-        <div className="flex items-start gap-3">
-          <Avatar src={program.teacher?.avatar_url ?? null} name={program.teacher?.full_name ?? "Teacher"} />
-          <div className="min-w-0">
-            <h3 className="line-clamp-2 text-lg font-medium leading-6 text-[#26323A]">{program.title}</h3>
-            {program.summary ? <p className="mt-1 line-clamp-2 text-sm leading-5 text-[#52616A]">{program.summary}</p> : <p className="mt-1 truncate text-sm text-[#6B747B]">{program.teacher?.full_name ?? "Teacher to be announced"}</p>}
-          </div>
-        </div>
+        {(() => {
+          const visibility = program.coverDirectorVisibility ?? "name_and_photo";
+          const showPhoto = visibility === "name_and_photo" || visibility === "photo_only";
+          const showName = visibility === "name_and_photo" || visibility === "name_only";
+          const directorName = program.coverDirectorDisplayName?.trim() || program.teacher?.full_name;
+          return (
+            <div className="flex items-start gap-3">
+              {showPhoto ? <Avatar src={program.teacher?.avatar_url ?? null} name={directorName ?? "Teacher"} /> : null}
+              <div className="min-w-0">
+                <h3 className="line-clamp-2 text-lg font-medium leading-6 text-[#26323A]">{program.title}</h3>
+                {program.summary ? (
+                  <p className="mt-1 line-clamp-2 text-sm leading-5 text-[#52616A]">{program.summary}</p>
+                ) : showName ? (
+                  <p className="mt-1 truncate text-sm text-[#6B747B]">{directorName ?? "Teacher to be announced"}</p>
+                ) : null}
+              </div>
+            </div>
+          );
+        })()}
         <AudienceDetails age={formatAgeRange(program.age_range_text)} gender={formatGender(program.audience_gender)} />
         {(program.location?.trim() || program.room?.trim()) ? (
           <p className="flex items-start gap-1.5 text-xs leading-5 text-[#6B747B]">
@@ -19172,6 +20152,254 @@ function TeacherWorkspaceTools({ slug, mode, canCreateClass, createHref }: { slu
   );
 }
 
+/**
+ * Student-facing redemption UI, mirroring TeacherWorkspaceTools' mode="invite" flow
+ * (same code-entry grid, paste button, live preview via a lookup RPC), but claiming
+ * lands the student straight on the registration-confirmation page instead of just
+ * assigning a class, since a student invite creates a pre-approved application rather
+ * than an instructor assignment.
+ */
+function StudentInviteCodeTools({ slug }: { slug: string }) {
+  const router = useRouter();
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [isParentAccount, setIsParentAccount] = useState(false);
+  const [children, setChildren] = useState<StudentDisplay[]>([]);
+  const [selectedStudentId, setSelectedStudentId] = useState("");
+  const [inviteCode, setInviteCode] = useState("");
+  const [invitePreview, setInvitePreview] = useState<{ programId: string; title: string; directorName: string } | null>(null);
+  const [invitePreviewLoading, setInvitePreviewLoading] = useState(false);
+  const [invitePreviewError, setInvitePreviewError] = useState<string | null>(null);
+  const [showInviteInput, setShowInviteInput] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const inviteInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      void (async () => {
+        const supabase = createSupabaseBrowserClient();
+        const session = await loadCachedSession();
+        const userId = session?.user.id ?? null;
+        if (!userId) {
+          return;
+        }
+        setCurrentUserId(userId);
+        const { data: profile } = await supabase.from("profiles").select("account_type").eq("id", userId).maybeSingle();
+        if (profile?.account_type === "parent") {
+          setIsParentAccount(true);
+          const { children: parentChildren } = await fetchParentChildren(supabase, slug, userId);
+          setChildren(parentChildren);
+          setSelectedStudentId(parentChildren[0]?.id ?? "");
+        } else {
+          setSelectedStudentId(userId);
+        }
+      })();
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, [slug]);
+
+  useEffect(() => {
+    const code = inviteCode.trim().toUpperCase();
+    if (code.length !== 8) {
+      setInvitePreview(null);
+      setInvitePreviewLoading(false);
+      setInvitePreviewError(null);
+      return;
+    }
+
+    let cancelled = false;
+    const timeout = window.setTimeout(() => {
+      void (async () => {
+        setInvitePreviewLoading(true);
+        const supabase = createSupabaseBrowserClient();
+        const { data: previewRows, error: previewError } = await supabase.rpc("lookup_program_student_invite_code", { invite: code });
+        const previewRow = previewRows?.[0] ?? null;
+        if (cancelled) {
+          return;
+        }
+        if (previewError) {
+          setInvitePreview(null);
+          setInvitePreviewLoading(false);
+          setInvitePreviewError(previewError.message);
+          return;
+        }
+        if (!previewRow) {
+          setInvitePreview(null);
+          setInvitePreviewLoading(false);
+          setInvitePreviewError(null);
+          return;
+        }
+        setInvitePreviewError(null);
+        setInvitePreview({ programId: previewRow.program_id, title: previewRow.title, directorName: previewRow.director_name });
+        setInvitePreviewLoading(false);
+      })();
+    }, 180);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+    };
+  }, [inviteCode]);
+
+  async function claimInviteCode() {
+    if (!inviteCode.trim() || !selectedStudentId) {
+      return;
+    }
+    setBusy(true);
+    setMessage(null);
+    const supabase = createSupabaseBrowserClient();
+    const { data: requestId, error: claimError } = await supabase.rpc("claim_program_student_invite_code", {
+      invite: inviteCode.trim().toUpperCase(),
+      target_student_profile_id: selectedStudentId,
+    });
+    setBusy(false);
+    if (claimError || !requestId) {
+      setMessage(claimError?.message ?? "Could not redeem this code.");
+      return;
+    }
+    router.push(`/m/${slug}/registration/${requestId}`);
+  }
+
+  async function pasteInviteCode() {
+    const clipboardText = await navigator.clipboard.readText().catch(() => "");
+    const normalizedCode = clipboardText.replace(/[^a-zA-Z0-9]/g, "").toUpperCase().slice(0, 8);
+    if (!normalizedCode) {
+      setMessage("Clipboard does not contain a registration code.");
+      return;
+    }
+    setMessage(null);
+    setInviteCode(normalizedCode);
+    inviteInputRef.current?.focus();
+  }
+
+  if (!currentUserId) {
+    return null;
+  }
+
+  const inviteChars = inviteCode.padEnd(8, " ").slice(0, 8).split("");
+
+  return (
+    <section className="rounded-[30px] bg-[#17624F] p-5 text-white shadow-[0_18px_40px_rgba(23,98,79,0.24)]">
+      <div className="min-w-0">
+        <p className="text-xs font-semibold uppercase tracking-wide text-white/65">Have a registration code?</p>
+        <h2 className="mt-1 text-xl font-semibold leading-6">Join With a Class Code</h2>
+        <p className="mt-3 text-sm leading-5 text-white/78">Enter the code shared by the class director to register directly.</p>
+      </div>
+
+      {!showInviteInput ? (
+        <button
+          type="button"
+          onClick={() => setShowInviteInput(true)}
+          className="mt-5 min-h-11 w-full rounded-full bg-white px-4 text-sm font-semibold text-[#17624F] shadow-[0_10px_22px_rgba(10,45,36,0.16)] md:w-auto md:px-10"
+        >
+          Enter Code
+        </button>
+      ) : (
+        <div className="mt-5 space-y-4">
+          {isParentAccount && children.length > 1 ? (
+            <label className="block">
+              <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-white/70">Registering</span>
+              <select
+                value={selectedStudentId}
+                onChange={(event) => setSelectedStudentId(event.target.value)}
+                className="h-10 w-full rounded-[8px] border-0 bg-white/12 px-3 text-sm text-white outline-none ring-1 ring-white/20 focus:ring-white/50"
+              >
+                {children.map((child) => (
+                  <option key={child.id} value={child.id} className="text-[#26323A]">
+                    {child.full_name || "Child"}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+          <label className="block">
+            <span className="sr-only">Registration code</span>
+            <input
+              ref={inviteInputRef}
+              value={inviteCode}
+              maxLength={8}
+              onChange={(event) => setInviteCode(event.target.value.replace(/[^a-zA-Z0-9]/g, "").toUpperCase())}
+              className="sr-only"
+              autoFocus
+            />
+            <div
+              role="button"
+              tabIndex={0}
+              onClick={() => inviteInputRef.current?.focus()}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  inviteInputRef.current?.focus();
+                }
+              }}
+              className="grid grid-cols-8 gap-1.5"
+            >
+              {inviteChars.map((char, index) => (
+                <span key={index} className="flex aspect-[0.78] min-w-0 items-center justify-center rounded-[10px] bg-white text-base font-semibold text-[#17624F] shadow-[0_8px_18px_rgba(10,45,36,0.12)]">
+                  {char.trim() || ""}
+                </span>
+              ))}
+            </div>
+          </label>
+
+          <div className="grid grid-cols-[auto_1fr_auto] gap-2">
+            <button
+              type="button"
+              onClick={() => void pasteInviteCode()}
+              className="flex h-11 w-11 items-center justify-center rounded-full bg-white/16 text-white ring-1 ring-white/20 transition-colors hover:bg-white/24"
+              aria-label="Paste registration code"
+            >
+              <ClipboardIcon />
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setInviteCode("");
+                setShowInviteInput(false);
+              }}
+              className="min-h-11 rounded-full bg-white/16 px-4 text-sm font-semibold text-white ring-1 ring-white/20"
+            >
+              Cancel
+            </button>
+          </div>
+
+          {inviteCode.trim().length === 8 ? (
+            <div className="rounded-[18px] bg-white p-4 text-[#26323A] shadow-[0_12px_26px_rgba(10,45,36,0.14)]">
+              {invitePreviewLoading ? (
+                <p className="text-sm font-semibold text-[#6B747B]">Checking code...</p>
+              ) : invitePreviewError ? (
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-sm font-semibold text-[#C84B3E]">{invitePreviewError}</p>
+                  <button type="button" onClick={() => setInviteCode("")} className="min-h-9 rounded-full bg-[#EEF3F5] px-3 text-xs font-semibold text-[#52616A]">Clear</button>
+                </div>
+              ) : invitePreview ? (
+                <>
+                  <p className="text-sm font-semibold text-[#26323A]">{invitePreview.title}</p>
+                  <p className="mt-1 text-xs font-medium text-[#6B747B]">Directed by {invitePreview.directorName}</p>
+                  <div className="mt-4 grid grid-cols-2 gap-2">
+                    <button type="button" onClick={() => setInviteCode("")} className="min-h-10 rounded-full bg-[#EEF3F5] px-3 text-sm font-semibold text-[#52616A]">
+                      Not this class
+                    </button>
+                    <button type="button" disabled={busy || !selectedStudentId} onClick={() => void claimInviteCode()} className="min-h-10 rounded-full bg-[#17624F] px-3 text-sm font-semibold text-white disabled:opacity-50">
+                      {busy ? "Confirming..." : "Confirm"}
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-sm font-semibold text-[#C84B3E]">No class found for this code.</p>
+                  <button type="button" onClick={() => setInviteCode("")} className="min-h-9 rounded-full bg-[#EEF3F5] px-3 text-xs font-semibold text-[#52616A]">Clear</button>
+                </div>
+              )}
+            </div>
+          ) : null}
+        </div>
+      )}
+
+      {message ? <p className="mt-3 text-sm text-white/82">{message}</p> : null}
+    </section>
+  );
+}
+
 function ProgramTeacherStaffTools({ program }: { program: Program }) {
   const [isDirector, setIsDirector] = useState(false);
   const [instructors, setInstructors] = useState<Array<ProgramTeacher & { profile?: Profile | null }>>([]);
@@ -19363,6 +20591,232 @@ function generateInviteCode() {
   return code;
 }
 
+type ProgramStudentInviteRow = Database["public"]["Tables"]["program_student_invites"]["Row"];
+
+/**
+ * Director-facing generation UI for student registration codes — mirrors
+ * ProgramTeacherStaffTools' instructor-code generate/copy/remove flow, but for students,
+ * with payment terms (waive, or monthly/annual with a custom price defaulting to the
+ * program's own price) baked into each code, mirroring ApplicationDecisionModal's
+ * waive/custom-price controls.
+ */
+function ProgramStudentInviteTools({ program }: { program: Program }) {
+  const [isDirector, setIsDirector] = useState(false);
+  const [invites, setInvites] = useState<ProgramStudentInviteRow[]>([]);
+  const [comment, setComment] = useState("");
+  const [paymentBypassed, setPaymentBypassed] = useState(false);
+  const [paymentType, setPaymentType] = useState<"monthly" | "annual">("monthly");
+  const [customPriceMonthly, setCustomPriceMonthly] = useState(() => (program.price_monthly_cents ? String(program.price_monthly_cents / 100) : ""));
+  const [customPriceAnnual, setCustomPriceAnnual] = useState(() => (program.price_annual_cents ? String(program.price_annual_cents / 100) : ""));
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [toast, setToast] = useState<EditorToastState | null>(null);
+  const [latestInviteCode, setLatestInviteCode] = useState<string | null>(null);
+
+  async function loadInvites() {
+    const supabase = createSupabaseBrowserClient();
+    const [{ data: directorAllowed }, { data: inviteRows }] = await Promise.all([
+      supabase.rpc("is_program_director", { check_program_id: program.id }),
+      supabase.from("program_student_invites").select("*").eq("program_id", program.id).order("created_at", { ascending: true }),
+    ]);
+    setIsDirector(Boolean(directorAllowed));
+    setInvites(inviteRows ?? []);
+  }
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      void loadInvites();
+    }, 0);
+    return () => window.clearTimeout(timeout);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [program.id]);
+
+  async function generateCode() {
+    setBusy(true);
+    setMessage(null);
+    const supabase = createSupabaseBrowserClient();
+    const code = generateInviteCode();
+    const { data: sessionData } = await supabase.auth.getSession();
+    const { error: insertError } = await supabase.from("program_student_invites").insert({
+      program_id: program.id,
+      invite_code: code,
+      comment: comment.trim() || null,
+      payment_bypassed: paymentBypassed,
+      payment_bypass_external: false,
+      payment_type: paymentType,
+      custom_price_monthly_cents: !paymentBypassed && paymentType === "monthly" ? Math.max(0, Math.round(Number(customPriceMonthly || "0") * 100)) : null,
+      custom_price_annual_cents: !paymentBypassed && paymentType === "annual" ? Math.max(0, Math.round(Number(customPriceAnnual || "0") * 100)) : null,
+      created_by: sessionData.session?.user.id ?? null,
+    });
+    setBusy(false);
+    if (insertError) {
+      setMessage(insertError.message);
+      return;
+    }
+    setLatestInviteCode(code);
+    setComment("");
+    setMessage("Registration code generated.");
+    await loadInvites();
+  }
+
+  async function copyCode(code: string | null) {
+    if (!code) {
+      return;
+    }
+    await navigator.clipboard.writeText(code).catch(() => null);
+    setToast({ tone: "success", message: "Registration code copied to clipboard." });
+  }
+
+  async function removeInvite(id: string) {
+    setBusy(true);
+    setMessage(null);
+    const supabase = createSupabaseBrowserClient();
+    const { error: deleteError } = await supabase.from("program_student_invites").delete().eq("id", id);
+    setBusy(false);
+    if (deleteError) {
+      setMessage(deleteError.message);
+      return;
+    }
+    await loadInvites();
+  }
+
+  if (!isDirector) {
+    return null;
+  }
+
+  const unusedInvites = invites.filter((invite) => !invite.claimed_at);
+  const claimedInvites = invites.filter((invite) => invite.claimed_at);
+  const featuredCode = latestInviteCode ?? unusedInvites[unusedInvites.length - 1]?.invite_code ?? null;
+
+  return (
+    <section className="space-y-6 bg-white px-4 pb-8 pt-4">
+      <EditorToast toast={toast} onClose={() => setToast(null)} />
+      <div className="rounded-[30px] bg-[#17624F] p-5 text-white shadow-[0_18px_40px_rgba(23,98,79,0.24)]">
+        <h2 className="text-xl font-semibold leading-6">Generate Student Registration Code</h2>
+        <p className="mt-1 truncate text-sm font-medium text-white/72">{program.title}</p>
+
+        <div className="mt-5 space-y-3">
+          <label className="block">
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-white/70">Comment (optional, e.g. who this is for)</span>
+            <input
+              value={comment}
+              onChange={(event) => setComment(event.target.value)}
+              placeholder="e.g. Referred by the imam"
+              className="h-10 w-full rounded-[8px] border-0 bg-white/12 px-3 text-sm text-white placeholder:text-white/50 outline-none ring-1 ring-white/20 focus:ring-white/50"
+            />
+          </label>
+          <label className="flex items-center gap-2 text-sm font-semibold text-white">
+            <input type="checkbox" checked={paymentBypassed} onChange={(event) => setPaymentBypassed(event.target.checked)} />
+            Waive payment for this registration
+          </label>
+          {!paymentBypassed ? (
+            <>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setPaymentType("monthly")}
+                  className={cn("min-h-10 rounded-[9px] text-sm font-semibold transition-colors", paymentType === "monthly" ? "bg-white text-[#17624F]" : "bg-white/12 text-white")}
+                >
+                  Monthly
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPaymentType("annual")}
+                  className={cn("min-h-10 rounded-[9px] text-sm font-semibold transition-colors", paymentType === "annual" ? "bg-white text-[#17624F]" : "bg-white/12 text-white")}
+                >
+                  Pay in Full
+                </button>
+              </div>
+              <label className="block">
+                <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-white/70">{paymentType === "monthly" ? "Monthly price" : "Pay in Full price"}</span>
+                <input
+                  value={paymentType === "monthly" ? customPriceMonthly : customPriceAnnual}
+                  onChange={(event) => (paymentType === "monthly" ? setCustomPriceMonthly(event.target.value) : setCustomPriceAnnual(event.target.value))}
+                  inputMode="decimal"
+                  className="h-10 w-full rounded-[8px] border-0 bg-white/12 px-3 text-sm text-white outline-none ring-1 ring-white/20 focus:ring-white/50"
+                />
+              </label>
+            </>
+          ) : null}
+        </div>
+
+        <div className="mt-6 grid grid-cols-8 gap-1.5">
+          {(featuredCode ?? "--------").split("").map((char, index) => (
+            <span
+              key={`${char}-${index}`}
+              className="flex aspect-[0.78] min-w-0 items-center justify-center rounded-[10px] bg-white text-base font-semibold text-[#17624F] shadow-[0_8px_18px_rgba(10,45,36,0.12)]"
+            >
+              {char}
+            </span>
+          ))}
+        </div>
+
+        <div className="mt-5 grid grid-cols-[1fr_auto] gap-2">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void generateCode()}
+            className="min-h-11 rounded-full bg-white px-4 text-sm font-semibold text-[#17624F] shadow-[0_10px_22px_rgba(10,45,36,0.16)] disabled:opacity-60"
+          >
+            Generate Code
+          </button>
+          <button
+            type="button"
+            disabled={!featuredCode}
+            onClick={() => void copyCode(featuredCode)}
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-white/16 text-white ring-1 ring-white/20 transition-colors hover:bg-white/24 disabled:opacity-45"
+            aria-label="Copy registration code"
+          >
+            <CopyIcon />
+          </button>
+        </div>
+      </div>
+
+      {message ? <div className="px-1 text-sm font-semibold text-[#17624F]">{message}</div> : null}
+
+      <section className="space-y-2">
+        <h2 className="px-1 text-lg font-semibold text-[#26323A]">Unused Codes</h2>
+        {unusedInvites.length ? (
+          <div className="divide-y divide-[#EEF2F4]">
+            {unusedInvites.map((invite) => (
+              <div key={invite.id} className="flex items-center justify-between gap-3 py-3">
+                <div className="min-w-0">
+                  <p className="truncate font-semibold tracking-[0.12em] text-[#26323A]">{invite.invite_code}</p>
+                  <p className="mt-0.5 truncate text-sm text-[#7B858C]">{invite.comment || "Not claimed yet"}</p>
+                </div>
+                <div className="flex shrink-0 items-center gap-1">
+                  <button type="button" onClick={() => void copyCode(invite.invite_code)} className="flex h-9 w-9 items-center justify-center rounded-full text-[#52616A] hover:bg-[#EEF3F5]" aria-label="Copy registration code">
+                    <CopyIcon />
+                  </button>
+                  <button type="button" disabled={busy} onClick={() => void removeInvite(invite.id)} className="min-h-9 rounded-full px-3 text-sm font-semibold text-[#C83F31] disabled:opacity-60">
+                    Remove
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <MiniEmpty text="No unused registration codes." />
+        )}
+      </section>
+
+      {claimedInvites.length ? (
+        <section className="space-y-2">
+          <h2 className="px-1 text-lg font-semibold text-[#26323A]">Claimed Codes</h2>
+          <div className="divide-y divide-[#EEF2F4]">
+            {claimedInvites.map((invite) => (
+              <div key={invite.id} className="py-3">
+                <p className="truncate font-semibold tracking-[0.12em] text-[#26323A]">{invite.invite_code}</p>
+                <p className="mt-0.5 text-sm text-[#7B858C]">{invite.comment || "Claimed"} · {formatFinanceDate(invite.claimed_at)}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+    </section>
+  );
+}
+
 function AccountPanelFrame({ children }: { children: ReactNode }) {
   return <div className="w-full shrink-0 px-1 pb-24">{children}</div>;
 }
@@ -19403,7 +20857,7 @@ function AccountMenuButton({
 function AccountSubpageHeader({ title, onBack }: { title: string; onBack: () => void }) {
   return (
     <header className="flex min-h-12 items-center gap-4">
-      <button type="button" onClick={onBack} className="flex h-10 w-10 items-center justify-center rounded-full bg-white text-[#26323A] shadow-[0_10px_22px_rgba(38,50,58,0.08)] ring-1 ring-[#E4EAEE]" aria-label="Back">
+      <button type="button" onClick={onBack} className="flex h-10 w-10 items-center justify-center rounded-full bg-white text-[#26323A] shadow-[0_10px_22px_rgba(38,50,58,0.08)] ring-1 ring-[#E4EAEE] transition active:scale-90 active:bg-[#EDF2F4]" aria-label="Back">
         <BackArrowIcon />
       </button>
       <h1 className="text-2xl font-semibold tracking-[-0.01em] text-[#1F2A31]">{title}</h1>
@@ -19598,12 +21052,14 @@ function dismissPushNudge() {
 function PushNotificationNudge() {
   const { supported, permission, subscribed, busy, enable } = usePushSubscription();
   const [dismissed, setDismissed] = useState(true);
+  const [signedIn, setSignedIn] = useState(false);
 
   useEffect(() => {
     setDismissed(isPushNudgeDismissed());
+    void loadCachedSession().then((session) => setSignedIn(Boolean(session)));
   }, []);
 
-  if (!supported || dismissed || subscribed || permission !== "default") {
+  if (!signedIn || !supported || dismissed || subscribed || permission !== "default") {
     return null;
   }
 
@@ -19818,7 +21274,7 @@ function EditProfilePhotoPanel({
   return (
     <section className="-mx-5 min-h-[calc(100vh-140px)] bg-[var(--workspace)] px-5 pb-8 pt-1">
       <header className="flex h-14 items-center justify-between">
-        <button type="button" onClick={onBack} className="flex h-10 w-10 items-center justify-center text-[#26323A]" aria-label="Back">
+        <button type="button" onClick={onBack} className="flex h-10 w-10 items-center justify-center rounded-full text-[#26323A] transition active:scale-90 active:bg-[#EDF2F4]" aria-label="Back">
           <BackArrowIcon />
         </button>
         <h1 className="text-base font-semibold text-[#26323A]">Preview</h1>
@@ -20213,6 +21669,60 @@ function isProfileEligibleForProgram(profile: Pick<Profile, "date_of_birth" | "a
   return { eligible: true, reason: null };
 }
 
+function isProfileEligibleForTrack(
+  profile: Pick<Profile, "date_of_birth" | "age" | "gender"> | null | undefined,
+  track: Pick<ProgramTrack, "age_min" | "age_max" | "gender_override"> | null | undefined,
+  program: Pick<Program, "age_range_text" | "audience_gender">,
+) {
+  if (track?.age_min != null || track?.age_max != null) {
+    const age = profileAgeNumber(profile);
+    if (age === null) {
+      return { eligible: false, reason: "Missing age requirement for this class." };
+    }
+    if (track.age_min != null && age < track.age_min) {
+      return { eligible: false, reason: `Outside age range: must be ${track.age_min} or older.` };
+    }
+    if (track.age_max != null && age > track.age_max) {
+      return { eligible: false, reason: `Outside age range: must be ${track.age_max} or younger.` };
+    }
+  } else {
+    const ageBounds = parseAgeRange(program.age_range_text);
+    if (ageBounds) {
+      const age = profileAgeNumber(profile);
+      if (age === null) {
+        return { eligible: false, reason: "Missing age requirement for this class." };
+      }
+      if (ageBounds.min !== null && age < ageBounds.min) {
+        return { eligible: false, reason: `Outside age range: must be ${ageBounds.min} or older.` };
+      }
+      if (ageBounds.max !== null && age > ageBounds.max) {
+        return { eligible: false, reason: `Outside age range: must be ${ageBounds.max} or younger.` };
+      }
+    }
+  }
+
+  const gender = normalizeGender(profile?.gender ?? null);
+  const trackGender = track?.gender_override && track.gender_override !== "all" ? track.gender_override : null;
+  if (trackGender) {
+    if (trackGender === "brothers" && gender !== "male") {
+      return { eligible: false, reason: "Audience requirement: brothers only." };
+    }
+    if (trackGender === "sisters" && gender !== "female") {
+      return { eligible: false, reason: "Audience requirement: sisters only." };
+    }
+  } else {
+    const audience = formatGender(program.audience_gender);
+    if (audience === "Brothers Only" && gender !== "male") {
+      return { eligible: false, reason: "Audience requirement: brothers only." };
+    }
+    if (audience === "Sisters Only" && gender !== "female") {
+      return { eligible: false, reason: "Audience requirement: sisters only." };
+    }
+  }
+
+  return { eligible: true, reason: null };
+}
+
 function parseAgeRange(ageRange: string | null) {
   const normalized = ageRange?.trim().toLowerCase();
   if (!normalized || normalized === "all" || normalized === "all ages") {
@@ -20298,7 +21808,7 @@ function programPaymentOptions(program: ProgramPaymentOptionsInput) {
   const options: Array<{ type: PaymentType; title: string; price: string; subtitle: string; badge?: string }> = [];
   if (monthlyEnabled) {
     const monthlyBadge = monthlyDealText(program);
-    const fixedRange = !program.is_ongoing && program.start_date && program.end_date ? `${formatFinanceShortDate(program.start_date)} to ${formatFinanceShortDate(program.end_date)}` : null;
+    const fixedRange = !program.is_ongoing && program.start_date && program.end_date ? `${formatDurationDate(program.start_date)} to ${formatDurationDate(program.end_date)}` : null;
     options.push({
       type: "monthly",
       title: "Monthly plan",
@@ -20358,16 +21868,6 @@ function monthlyDealText(program: Pick<Program, "price_monthly_cents" | "price_a
     return "";
   }
   return `Save ${formatPrice(annual - monthlyTotal)} by paying monthly`;
-}
-
-function getWhatsAppHref(phoneNumber: string | null | undefined) {
-  const trimmed = phoneNumber?.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  const digits = trimmed.replace(/\D/g, "").replace(/^00/, "");
-  return digits ? `https://wa.me/${digits}` : null;
 }
 
 function formatAgeRange(ageRange: string | null) {
@@ -20562,6 +22062,11 @@ function linkedEditorTrackRows(tracks: ProgramTrack[], sessions: ProgramSession[
       pricingOverrideEnabled: track.pricing_override_enabled,
       priceMonthly: track.price_monthly_cents ? String(track.price_monthly_cents / 100) : "",
       priceAnnual: track.price_annual_cents ? String(track.price_annual_cents / 100) : "",
+      eligibilityOverrideEnabled: Boolean(track.age_min || track.age_max || (track.gender_override && track.gender_override !== "all") || track.eligibility_comment),
+      ageMin: track.age_min ? String(track.age_min) : "",
+      ageMax: track.age_max ? String(track.age_max) : "",
+      genderOverride: track.gender_override ?? "all",
+      eligibilityComment: track.eligibility_comment ?? "",
     };
   });
 }

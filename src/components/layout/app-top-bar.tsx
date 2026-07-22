@@ -477,12 +477,12 @@ export function AppTopBar({
         <div className="flex min-w-0 items-center justify-end gap-1.5">
           {!accountReady ? (
             <>
-              <span className="h-6 w-6 shrink-0 animate-pulse rounded-full bg-[#E4E9EC]" />
+              <span className="h-6 w-6 shrink-0 animate-pulse rounded-md bg-[#E4E9EC]" />
               <span className="h-3 w-12 animate-pulse rounded bg-[#E4E9EC]" />
             </>
           ) : (
             <>
-              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#17624F] text-[11px] font-semibold leading-none text-white">
+              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-[#17624F] text-[11px] font-semibold leading-none text-white">
                 {accountInitial ?? <GuestProfileIcon />}
               </span>
               <span className="min-w-0 max-w-[74px] truncate text-right text-[12px] font-semibold leading-4 text-[#26323A]">

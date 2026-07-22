@@ -89,6 +89,8 @@ export type Database = {
           schedule_notes: string | null;
           track_selection_mode: string;
           track_selection_count: number;
+          track_switch_policy: string;
+          track_switch_allow_all: boolean;
           tags: string[] | null;
           created_at: string;
           updated_at: string;
@@ -414,6 +416,7 @@ export type Database = {
           instructor_display_name: string | null;
           instructor_credentials: string | null;
           instructor_contact_phone: string | null;
+          cover_director_visibility: string;
           created_at: string;
           updated_at: string;
         };
@@ -474,6 +477,7 @@ export type Database = {
           pricing_override_enabled: boolean;
           price_monthly_cents: number | null;
           price_annual_cents: number | null;
+          eligibility_comment: string | null;
           sort_order: number;
           is_active: boolean;
           created_at: string;
@@ -481,6 +485,58 @@ export type Database = {
         };
         Insert: Partial<Database["public"]["Tables"]["program_tracks"]["Row"]>;
         Update: Partial<Database["public"]["Tables"]["program_tracks"]["Row"]>;
+        Relationships: [];
+      };
+      program_track_transfer_rules: {
+        Row: {
+          id: string;
+          program_id: string;
+          from_track_id: string;
+          to_track_id: string;
+          created_at: string;
+        };
+        Insert: Partial<Database["public"]["Tables"]["program_track_transfer_rules"]["Row"]>;
+        Update: Partial<Database["public"]["Tables"]["program_track_transfer_rules"]["Row"]>;
+        Relationships: [];
+      };
+      program_track_switch_requests: {
+        Row: {
+          id: string;
+          program_id: string;
+          enrollment_id: string;
+          student_profile_id: string;
+          from_track_ids: string[];
+          to_track_ids: string[];
+          status: string;
+          requested_by: string | null;
+          requested_at: string;
+          decided_at: string | null;
+          decided_by: string | null;
+          decision_note: string | null;
+        };
+        Insert: Partial<Database["public"]["Tables"]["program_track_switch_requests"]["Row"]>;
+        Update: Partial<Database["public"]["Tables"]["program_track_switch_requests"]["Row"]>;
+        Relationships: [];
+      };
+      program_student_invites: {
+        Row: {
+          id: string;
+          program_id: string;
+          invite_code: string;
+          invite_code_created_at: string;
+          comment: string | null;
+          payment_bypassed: boolean;
+          payment_bypass_external: boolean;
+          payment_type: string;
+          custom_price_monthly_cents: number | null;
+          custom_price_annual_cents: number | null;
+          claimed_by_profile_id: string | null;
+          claimed_at: string | null;
+          created_by: string | null;
+          created_at: string;
+        };
+        Insert: Partial<Database["public"]["Tables"]["program_student_invites"]["Row"]>;
+        Update: Partial<Database["public"]["Tables"]["program_student_invites"]["Row"]>;
         Relationships: [];
       };
       program_content_sections: {
@@ -613,6 +669,20 @@ export type Database = {
         };
         Returns: void;
       };
+      approve_track_switch_request: {
+        Args: {
+          target_request_id: string;
+          decision_note_text?: string | null;
+        };
+        Returns: void;
+      };
+      reject_track_switch_request: {
+        Args: {
+          target_request_id: string;
+          decision_note_text?: string | null;
+        };
+        Returns: void;
+      };
       request_program_withdrawal: {
         Args: {
           target_program_id: string;
@@ -667,6 +737,14 @@ export type Database = {
         Returns: string;
       };
       lookup_program_instructor_code: {
+        Args: { invite: string };
+        Returns: Array<{ program_id: string; title: string; director_name: string }>;
+      };
+      claim_program_student_invite_code: {
+        Args: { invite: string; target_student_profile_id?: string };
+        Returns: string;
+      };
+      lookup_program_student_invite_code: {
         Args: { invite: string };
         Returns: Array<{ program_id: string; title: string; director_name: string }>;
       };

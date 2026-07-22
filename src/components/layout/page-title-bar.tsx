@@ -44,7 +44,7 @@ export function PageTitleBar({
             <TransitionBackButton
               fallbackHref={backHref}
               label={backLabel}
-              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white text-[#111827] shadow-[0_8px_18px_rgba(38,50,58,0.14)] ring-1 ring-white/80 transition-colors hover:bg-[#F7FBFC]"
+              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white text-[#111827] shadow-[0_8px_18px_rgba(38,50,58,0.14)] ring-1 ring-white/80 transition hover:bg-[#F7FBFC] active:scale-90 active:bg-[#EDF2F4]"
             />
             <h1
               className={cn(

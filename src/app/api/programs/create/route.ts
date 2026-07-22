@@ -43,6 +43,8 @@ type CreateProgramBody = {
   financialAssistanceNote?: string | null;
   receiptNote?: string | null;
   taxReceiptPolicy?: string;
+  trackSwitchPolicy?: string;
+  trackSwitchAllowAll?: boolean;
   contactName?: string | null;
   contactEmail?: string | null;
   contactPhone?: string | null;
@@ -139,6 +141,8 @@ const optionalProgramBuilderColumns = new Set([
   "financial_assistance_note",
   "receipt_note",
   "tax_receipt_policy",
+  "track_switch_policy",
+  "track_switch_allow_all",
   "contact_name",
   "contact_email",
   "contact_phone",
@@ -416,6 +420,8 @@ export async function POST(request: Request) {
         financial_assistance_note: cleanText(body.financialAssistanceNote, 1000),
         receipt_note: cleanText(body.receiptNote, 1000),
         tax_receipt_policy: pickAllowed(body.taxReceiptPolicy, ["not_applicable", "admin_review_required", "eligible_confirmed"], "not_applicable"),
+        track_switch_policy: pickAllowed(body.trackSwitchPolicy, ["disabled", "request_only", "allowed"], "disabled"),
+        track_switch_allow_all: Boolean(body.trackSwitchAllowAll),
         contact_name: cleanText(body.contactName, 120),
         contact_email: cleanText(body.contactEmail, 180),
         contact_phone: cleanText(body.contactPhone, 60),
