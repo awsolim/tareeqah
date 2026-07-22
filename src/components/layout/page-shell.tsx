@@ -1,12 +1,74 @@
+"use client";
+
+import { useEffect, useState } from "react";
 import { AppTopBar, MobileBottomNav } from "@/components/layout/app-top-bar";
 import { DesktopSidebar } from "@/components/layout/desktop-sidebar";
 import { NavItem } from "@/components/layout/horizontal-nav";
 import { PageTransitionFrame } from "@/components/layout/page-transition-frame";
 import { masjid } from "@/lib/mock-data";
+import { getCachedSessionSnapshot, getCachedUserAccess, loadCachedSession, loadCachedUserAccess, subscribeCachedSession } from "@/lib/client-cache";
+
+// Routes like /m/[slug]/programs and /m/[slug]/programs/[programId] are shared by guests
+// AND signed-in users (deep-linked from the portal). They're passed section="public" since
+// that's correct for guests, but a signed-in viewer should see their real role's chrome
+// instead of the guest nav — otherwise "Classes" sends them to the guest flat list and the
+// tabbed portal/teacher/admin chrome disappears even though their session is still valid.
+function useEffectiveSection(slug: string, requestedSection: "public" | "portal" | "teacher" | "admin") {
+  const [effectiveSection, setEffectiveSection] = useState(requestedSection);
+
+  useEffect(() => {
+    if (requestedSection !== "public") {
+      setEffectiveSection(requestedSection);
+      return;
+    }
+
+    let cancelled = false;
+
+    function applyAccessForSession(userId: string | undefined) {
+      if (!userId) {
+        if (!cancelled) setEffectiveSection("public");
+        return;
+      }
+      const cachedAccess = getCachedUserAccess(slug, userId);
+      if (cachedAccess) {
+        applyAccess(cachedAccess);
+      }
+      loadCachedUserAccess(slug, userId).then((access) => {
+        if (!cancelled) applyAccess(access);
+      });
+    }
+
+    function applyAccess(access: ReturnType<typeof getCachedUserAccess>) {
+      if (cancelled || !access) return;
+      if (access.isMosqueAdmin) setEffectiveSection("admin");
+      else if (access.isTeacher) setEffectiveSection("teacher");
+      else if (access.isStudent || access.isParent) setEffectiveSection("portal");
+      else setEffectiveSection("public");
+    }
+
+    const cachedSession = getCachedSessionSnapshot();
+    applyAccessForSession(cachedSession?.user.id);
+
+    loadCachedSession().then((session) => {
+      if (!cancelled) applyAccessForSession(session?.user.id);
+    });
+
+    const unsubscribe = subscribeCachedSession((session) => {
+      applyAccessForSession(session?.user.id);
+    });
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [slug, requestedSection]);
+
+  return effectiveSection;
+}
 
 export function AppChrome({
   children,
-  section = "public",
+  section: requestedSection = "public",
   navItems,
   mobileNavItems,
   slug,
@@ -17,6 +79,7 @@ export function AppChrome({
   mobileNavItems?: NavItem[];
   slug: string;
 }) {
+  const section = useEffectiveSection(slug, requestedSection);
   const scopedPublicNav = [
     { label: "Home", href: `/m/${slug}` },
     { label: "Classes", href: `/m/${slug}/programs` },

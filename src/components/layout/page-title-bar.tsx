@@ -1,5 +1,5 @@
 import { cn } from "@/lib/utils";
-import { TransitionBackButton } from "@/components/layout/transition-link";
+import { TransitionBackButton, TransitionCloseButton } from "@/components/layout/transition-link";
 import type { ReactNode } from "react";
 
 export function PageTitleBar({
@@ -7,6 +7,8 @@ export function PageTitleBar({
   action,
   backHref,
   backLabel = "Back",
+  closeHref,
+  closeLabel = "Close",
   tone = "blue",
   centerBackTitle,
   smallTitle,
@@ -16,11 +18,16 @@ export function PageTitleBar({
   action?: ReactNode;
   backHref?: string;
   backLabel?: string;
+  /** Mutually exclusive with backHref/backLabel — renders an X instead of a chevron, for
+   * card-triggered deep links that should close back to their origin rather than "go back". */
+  closeHref?: string;
+  closeLabel?: string;
   tone?: "white" | "blue" | "teal";
   centerBackTitle?: boolean;
   smallTitle?: boolean;
 }) {
-  const shouldCenterBackTitle = centerBackTitle ?? Boolean(backHref);
+  const hasHeaderControl = Boolean(backHref || closeHref);
+  const shouldCenterBackTitle = centerBackTitle ?? hasHeaderControl;
   const shouldUseSmallTitle = smallTitle ?? true;
   const bandClass =
     tone === "white"
@@ -32,20 +39,28 @@ export function PageTitleBar({
       <div
         className={cn(
           "app-container relative flex min-h-60 flex-col justify-start gap-2 pb-32 md:min-h-64 md:pb-32",
-          backHref ? "pt-32 md:pt-32" : "pt-0 md:pt-0",
-          backHref ? (shouldCenterBackTitle ? "items-center px-14 text-center" : "items-start px-7 text-left") : "items-center text-center",
+          hasHeaderControl ? "pt-32 md:pt-32" : "pt-0 md:pt-0",
+          hasHeaderControl ? (shouldCenterBackTitle ? "items-center px-14 text-center" : "items-start px-7 text-left") : "items-center text-center",
         )}
       >
-        {backHref ? (
+        {hasHeaderControl ? (
           <div
             className={cn("w-full items-center gap-3", shouldCenterBackTitle ? "grid grid-cols-[40px_1fr_40px]" : "flex translate-y-12")}
             style={shouldCenterBackTitle ? { transform: "translateY(23px)" } : undefined}
           >
-            <TransitionBackButton
-              fallbackHref={backHref}
-              label={backLabel}
-              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white text-[#111827] shadow-[0_8px_18px_rgba(38,50,58,0.14)] ring-1 ring-white/80 transition hover:bg-[#F7FBFC] active:scale-90 active:bg-[#EDF2F4]"
-            />
+            {closeHref ? (
+              <TransitionCloseButton
+                closeHref={closeHref}
+                label={closeLabel}
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white text-[#111827] shadow-[0_8px_18px_rgba(38,50,58,0.14)] ring-1 ring-white/80 transition hover:bg-[#F7FBFC] active:scale-90 active:bg-[#EDF2F4]"
+              />
+            ) : (
+              <TransitionBackButton
+                fallbackHref={backHref as string}
+                label={backLabel}
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white text-[#111827] shadow-[0_8px_18px_rgba(38,50,58,0.14)] ring-1 ring-white/80 transition hover:bg-[#F7FBFC] active:scale-90 active:bg-[#EDF2F4]"
+              />
+            )}
             <h1
               className={cn(
                 "min-w-0 font-semibold leading-none tracking-normal",
@@ -58,7 +73,7 @@ export function PageTitleBar({
             {shouldCenterBackTitle ? <div aria-hidden /> : null}
           </div>
         ) : null}
-        {!backHref ? (
+        {!hasHeaderControl ? (
         <div className="w-full">
           <h1
             className={cn("font-medium leading-none tracking-normal", shouldUseSmallTitle ? "text-2xl md:text-3xl" : "text-[2.35rem] md:text-5xl")}

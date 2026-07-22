@@ -27,12 +27,13 @@ function BottomNav({ items, inboxBadgeCount = 0, inboxActionRequired = false }: 
   const router = useRouter();
   const [pendingHref, setPendingHref] = useState<string | null>(null);
   const [previewNavVisible, setPreviewNavVisible] = useState<boolean | null>(null);
+  const overlayChromeHidden = useOverlayChromeHidden();
   const itemByLabel = new Map(items.map((item) => [item.label, item]));
   const visibleItems = ["Home", "Classes", "Inbox", "Members", "Masjid", "Me"]
     .map((label) => itemByLabel.get(label))
     .filter((item): item is NavItem => Boolean(item));
   const currentIndex = visibleItems.findIndex((item) => isNavItemActive(pathname, item));
-  const shouldShow = previewNavVisible ?? isMainTabRoute(pendingHref ?? pathname, visibleItems);
+  const shouldShow = !overlayChromeHidden && (previewNavVisible ?? isMainTabRoute(pendingHref ?? pathname, visibleItems));
 
   useEffect(() => {
     for (const item of items) {
@@ -168,6 +169,26 @@ export function MobileBottomNav({
   const inboxActionRequired = showStudentBadges ? studentActionRequired : showTeacherBadges ? teacherActionRequired : false;
 
   return <BottomNav items={resolvedItems} inboxBadgeCount={inboxBadgeCount} inboxActionRequired={inboxActionRequired} />;
+}
+
+// Same-route full-screen overlays (e.g. ApplicationReviewOverlay) never change the
+// pathname, so isMainTabRoute alone can't tell the chrome to hide for them. Overlays
+// dispatch this event on mount/unmount to force-hide the top bar and bottom nav regardless
+// of route, independent of the tareeqah:nav-preview transition-only signal below.
+function useOverlayChromeHidden() {
+  const [hidden, setHidden] = useState(false);
+
+  useEffect(() => {
+    function handleOverlayChrome(event: Event) {
+      const detail = (event as CustomEvent<{ hidden?: boolean }>).detail;
+      setHidden(Boolean(detail?.hidden));
+    }
+
+    window.addEventListener("tareeqah:overlay-chrome", handleOverlayChrome);
+    return () => window.removeEventListener("tareeqah:overlay-chrome", handleOverlayChrome);
+  }, []);
+
+  return hidden;
 }
 
 function isNavItemActive(pathname: string, item: NavItem) {
@@ -322,7 +343,8 @@ export function AppTopBar({
   mobileNavItems?: NavItem[];
 }) {
   const pathname = usePathname();
-  const showTopBar = isMainTabRoute(pathname, mobileNavItems ?? navItems);
+  const overlayChromeHidden = useOverlayChromeHidden();
+  const showTopBar = !overlayChromeHidden && isMainTabRoute(pathname, mobileNavItems ?? navItems);
   const [displayName, setDisplayName] = useState(
     mosqueSlug ? titleFromSlug(mosqueSlug) : appName
   );

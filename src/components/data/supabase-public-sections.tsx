@@ -554,6 +554,20 @@ function getEnrollmentTrackIdsByProgram(enrollments: EnrollmentTrackSelection[],
   return trackIdsByProgramId;
 }
 
+/**
+ * Resolves a single display track for an enrollment_request. Multi-track selections are
+ * stored in the enrollment_request_tracks join table (not the legacy program_track_id column),
+ * so callers that only checked program_track_id showed a blank "—" for those requests.
+ */
+function resolveRequestTrack(
+  request: Pick<EnrollmentRequest, "id" | "program_track_id">,
+  requestTrackIdsByRequestId: Map<string, string[]>,
+  tracks: ProgramTrack[],
+): ProgramTrack | null {
+  const primaryTrackId = request.program_track_id ?? requestTrackIdsByRequestId.get(request.id)?.[0] ?? null;
+  return primaryTrackId ? tracks.find((track) => track.id === primaryTrackId) ?? null : null;
+}
+
 /** Earliest enrollment created_at per program, across all target students — the "join date" cutoff before which an announcement shouldn't count as new. Mirrors getEnrollmentTrackIdsByProgram's "any child counts" merge for parents with multiple children in the same program. */
 function getEnrollmentJoinDatesByProgram(enrollments: Array<Pick<EnrollmentTrackSelection, "program_id" | "created_at">>) {
   const joinDateByProgramId = new Map<string, string>();
@@ -684,8 +698,15 @@ function studentWithdrawalNotificationKey(request: Pick<WithdrawalRequest, "id" 
   return ["withdrawal", request.id, request.status, request.reviewed_at ?? request.requested_at ?? ""].join(":");
 }
 
-function teacherRequestNotificationKey(request: Pick<EnrollmentRequest, "id" | "requested_at" | "admission_completed_at">) {
-  return request.admission_completed_at ? ["admission-complete", request.id, request.admission_completed_at].join(":") : ["application", request.id, request.requested_at ?? ""].join(":");
+function teacherRequestNotificationKey(request: Pick<EnrollmentRequest, "id" | "status" | "requested_at" | "reviewed_at" | "admission_completed_at">) {
+  if (request.admission_completed_at) {
+    return ["admission-complete", request.id, request.admission_completed_at].join(":");
+  }
+  // Folding status + reviewed_at into the key (mirroring studentRequestNotificationKey) means a
+  // decision made anywhere (inbox or the Applications table) always mints a fresh, never-seen
+  // key the moment status flips — so a resolved application surfaces as unread automatically,
+  // with no need for the approve/reject/waitlist API routes to touch notification state at all.
+  return ["application", request.id, request.status, request.reviewed_at ?? request.requested_at ?? ""].join(":");
 }
 
 function teacherInstructorNotificationKey(notification: Pick<InstructorLifecycleNotification, "id" | "event_type" | "teacher_profile_id">) {
@@ -1335,6 +1356,7 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
       : program.start_date
         ? `Starts ${formatDurationDate(program.start_date)}`
         : "Schedule to be announced";
+  const billingDurationMonths = program.is_ongoing ? null : programPayInFullDurationMonths(program);
   const registrationState = programRegistrationLabel(program);
   const registrationDeadlineText =
     registrationState.label === "Registration open" && program.application_close_at
@@ -1493,7 +1515,14 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
             </aside>
 
             <section className="rounded-2xl border border-[#C8DCE2] bg-white p-4 shadow-[0_14px_34px_rgba(38,50,58,0.10)]">
-              <p className="text-lg font-semibold text-[#26323A]">Schedule and Pricing</p>
+              <p className="flex items-center gap-2 text-lg font-semibold text-[#26323A]">
+                Schedule and Pricing
+                {program.is_ongoing ? (
+                  <span className="inline-flex items-center rounded-full bg-[#EEF6F7] px-2 py-0.5 text-[11px] font-semibold text-[#2F8FB3]">Ongoing</span>
+                ) : billingDurationMonths ? (
+                  <span className="inline-flex items-center rounded-full bg-[#EEF6F7] px-2 py-0.5 text-[11px] font-semibold text-[#2F8FB3]">{billingDurationMonths} mo</span>
+                ) : null}
+              </p>
               <ProgramScheduleOptionsDisplay tracks={tracks} program={program} fallbackSchedule={schedule.full} enrolledCountByTrackId={enrolledCountByTrackId} />
               {section === "portal" && viewerHasActiveEnrollment ? (
                 <p className="mt-3 text-xs leading-5 text-[#6B747B]">
@@ -2022,6 +2051,7 @@ export function ProgramApplyData({ slug, programId }: { slug: string; programId:
                 <div className="flex flex-col items-end gap-1 text-right">
                   <TrackPriceNumber price={trackPriceLine(null, program, selectedPaymentType, { bareLabel: true })} />
                   <TrackPricingDealCaption track={null} program={program} paymentType={selectedPaymentType} />
+                  <TrackPayInFullPriceCaption track={null} program={program} />
                 </div>
               </DetailSection>
             ) : null}
@@ -2203,8 +2233,8 @@ export function RegistrationConfirmationData({ slug, requestId }: { slug: string
       headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
       body: JSON.stringify({ checkoutSessionId: sessionId }),
     });
+    await loadRegistration();
     setConfirmBusy(false);
-    void loadRegistration();
   }
 
   useEffect(() => {
@@ -2254,12 +2284,15 @@ export function RegistrationConfirmationData({ slug, requestId }: { slug: string
     setConfirmBusy(true);
     setActionError(null);
     const result = await callApplicationAction(program.id, requestId, "confirm", {});
-    setConfirmBusy(false);
     if (!result.ok) {
+      setConfirmBusy(false);
       setActionError(result.error);
       return;
     }
-    void loadRegistration();
+    // Stay in the loading state through the refetch too, not just the initial request — the
+    // button should read "Please wait..." until the page has actually flipped to "completed".
+    await loadRegistration();
+    setConfirmBusy(false);
   }
 
   async function handleCancelRegistration() {
@@ -2301,7 +2334,6 @@ export function RegistrationConfirmationData({ slug, requestId }: { slug: string
   const listedPrice = request.payment_bypassed
     ? "Waived"
     : formatPrice(request.payment_type === "annual" ? request.approved_price_annual_cents ?? track?.price_annual_cents ?? program.price_annual_cents : request.approved_price_monthly_cents ?? track?.price_monthly_cents ?? program.price_monthly_cents);
-  const viewEnrollmentHref = `/m/${slug}/portal/classes`;
   const programHref = `/m/${slug}/programs/${program.id}`;
 
   return (
@@ -2415,12 +2447,7 @@ export function RegistrationConfirmationData({ slug, requestId }: { slug: string
               <section className="rounded-[24px] bg-white p-6 text-center shadow-[0_12px_30px_rgba(38,50,58,0.08)]">
                 <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-[#E8F7F2] text-2xl text-[#17624F]">✓</div>
                 <p className="mt-4 text-sm leading-6 text-[#52616A]">{student?.full_name || "This student"} is enrolled in {program.title}.</p>
-                <Link
-                  href={viewEnrollmentHref}
-                  className="mt-4 inline-flex min-h-11 items-center justify-center rounded-full bg-[#17624F] px-5 text-sm font-semibold !text-white"
-                >
-                  View Enrollment
-                </Link>
+                <p className="mt-3 text-xs leading-5 text-[#8A949B]">Tap Close above to continue.</p>
               </section>
             )}
           </>
@@ -2602,25 +2629,25 @@ export function StudentClassesData({ slug }: { slug: string }) {
         </button>
         <button
           type="button"
-          onClick={() => changeClassesTab("applications")}
-          className={cn("min-h-12 text-sm font-medium", tab === "applications" ? "border-b-2 border-[#2F8FB3] text-[#2F8FB3]" : "text-[#6B747B]")}
-        >
-          My Applications
-        </button>
-        <button
-          type="button"
           onClick={() => changeClassesTab("browse")}
           className={cn("min-h-12 text-sm font-medium", tab === "browse" ? "border-b-2 border-[#2F8FB3] text-[#2F8FB3]" : "text-[#6B747B]")}
         >
           Browse
+        </button>
+        <button
+          type="button"
+          onClick={() => changeClassesTab("applications")}
+          className={cn("min-h-12 text-sm font-medium", tab === "applications" ? "border-b-2 border-[#2F8FB3] text-[#2F8FB3]" : "text-[#6B747B]")}
+        >
+          My Applications
         </button>
       </div>
       <div className="hidden gap-2 border-b border-[#D6DCE0] px-4 py-3 md:flex">
         {(
           [
             ["classes", "My Classes"],
-            ["applications", "My Applications"],
             ["browse", "Browse Programs"],
+            ["applications", "My Applications"],
           ] as const
         ).map(([id, label]) => (
           <button
@@ -4476,7 +4503,7 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
                     <StudentRequestCard
                       key={request.id}
                       request={request}
-                      completeRegistrationHref={request.status === "approved" && !request.admission_completed_at ? `/m/${slug}/registration/${request.id}` : undefined}
+                      completeRegistrationHref={request.status === "approved" && !request.admission_completed_at ? `/m/${slug}/registration/${request.id}?returnTo=${encodeURIComponent(`/m/${slug}/portal/announcements`)}` : undefined}
                       viewClassHref={request.status === "approved" && request.admission_completed_at ? `/m/${slug}/portal/classes/${request.program_id}` : undefined}
                       onDismiss={() => dismissRequest(request.id)}
                     />
@@ -4760,7 +4787,8 @@ export function TeacherInboxData({ slug }: { slug: string }) {
       ]),
     ) as string[];
     const subscriptionStudentIds = Array.from(new Set((withdrawalRows ?? []).map((request) => request.student_profile_id)));
-    const [{ data: students }, { data: parents }, { data: authors }, { data: instructorProfiles }, { data: subscriptions }] = await Promise.all([
+    const requestIds = (requestRows ?? []).map((request) => request.id);
+    const [{ data: students }, { data: parents }, { data: authors }, { data: instructorProfiles }, { data: subscriptions }, { data: requestTrackLinkRows }] = await Promise.all([
       studentIds.length
         ? supabase.from("profiles").select("id, full_name, email, phone_number, avatar_url, age, gender, date_of_birth, account_type").in("id", studentIds)
         : Promise.resolve({ data: [] as StudentDisplay[] }),
@@ -4772,7 +4800,14 @@ export function TeacherInboxData({ slug }: { slug: string }) {
       subscriptionStudentIds.length
         ? supabase.from("program_subscriptions").select("*").in("program_id", directorProgramIds).in("student_profile_id", subscriptionStudentIds)
         : Promise.resolve({ data: [] as ProgramSubscription[] }),
+      requestIds.length
+        ? supabase.from("enrollment_request_tracks").select("enrollment_request_id, program_track_id").in("enrollment_request_id", requestIds)
+        : Promise.resolve({ data: [] as Array<{ enrollment_request_id: string; program_track_id: string }> }),
     ]);
+    const requestTrackIdsByRequestId = new Map<string, string[]>();
+    for (const linkRow of requestTrackLinkRows ?? []) {
+      requestTrackIdsByRequestId.set(linkRow.enrollment_request_id, [...(requestTrackIdsByRequestId.get(linkRow.enrollment_request_id) ?? []), linkRow.program_track_id]);
+    }
 
     const tracksByProgramId = (trackRows ?? []).reduce<Record<string, ProgramTrack[]>>((next, track) => {
       next[track.program_id] = [...(next[track.program_id] ?? []), track];
@@ -4802,7 +4837,7 @@ export function TeacherInboxData({ slug }: { slug: string }) {
         program: teacherPrograms.find((program) => program.id === request.program_id) ?? null,
         student: (students ?? []).find((student) => student.id === request.student_profile_id) ?? null,
         parent: request.parent_profile_id ? ((parents ?? []).find((parent) => parent.id === request.parent_profile_id) as ParentDisplay | undefined) ?? null : null,
-        track: request.program_track_id ? (trackRows ?? []).find((track) => track.id === request.program_track_id) ?? null : null,
+        track: resolveRequestTrack(request, requestTrackIdsByRequestId, trackRows ?? []),
       })),
     );
     setWithdrawals(
@@ -5065,6 +5100,29 @@ export function TeacherInboxData({ slug }: { slug: string }) {
     return `track-switch:${request.id}:${request.status}:${request.requested_at}`;
   }
 
+  // Items never disappear on their own — this is the only thing that removes an inbox item
+  // from view (applications/withdrawals get their own teacher_dismissed_at column; instructor
+  // updates and track switches share the generic teacher_notification_state dismissed_at ledger
+  // since neither of those tables has a dismissal column of its own).
+  function dismissInboxNotificationKey(key: string) {
+    setDismissedNotificationIds((current) => new Set([...current, key]));
+    void markNotificationsDismissed(currentUserId, [key]).then((ok) => {
+      if (!ok) {
+        revertOptimisticKeys(setDismissedNotificationIds, [key]);
+      }
+    });
+  }
+
+  function clearInboxItem(item: TeacherInboxMessageItem) {
+    if (item.kind === "application") {
+      void clearPastRequest(item.request.id);
+    } else if (item.kind === "withdrawal") {
+      void clearPastWithdrawal(item.request.id);
+    } else {
+      dismissInboxNotificationKey(item.key);
+    }
+  }
+
   function applicationMessage(request: RequestWithContext) {
     if (request.status === "pending") {
       return "Application requires review";
@@ -5151,7 +5209,9 @@ export function TeacherInboxData({ slug }: { slug: string }) {
           notification,
         };
       }),
-    ...trackSwitchRequests.map((request) => {
+    ...trackSwitchRequests
+      .filter((request) => !dismissedNotificationIds.has(trackSwitchNotificationKey(request)))
+      .map((request) => {
       const key = trackSwitchNotificationKey(request);
       return {
         id: request.id,
@@ -5172,7 +5232,14 @@ export function TeacherInboxData({ slug }: { slug: string }) {
   const otherUnreadCount = otherInboxItems.filter((item) => item.unread).length;
 
   function openInboxItem(item: TeacherInboxMessageItem) {
-    markSeenOptimistically([item.key]);
+    // Action-required items must stay visually unread until the underlying action is actually
+    // resolved — merely opening one to review/decide must not mark it read (it'd otherwise dim
+    // out while still needing a decision). Once resolved, the notification key changes (see
+    // teacherRequestNotificationKey/studentWithdrawalNotificationKey/trackSwitchNotificationKey),
+    // so the item naturally re-surfaces as unread and only clears on this same click-to-open path.
+    if (!item.requiresAction) {
+      markSeenOptimistically([item.key]);
+    }
     if (item.kind === "application") {
       window.dispatchEvent(new CustomEvent("tareeqah:nav-preview", { detail: { fromPath: pathname, kind: "subpage" } }));
       setReviewTarget({ programId: item.request.program_id, requestId: item.request.id });
@@ -5241,7 +5308,7 @@ export function TeacherInboxData({ slug }: { slug: string }) {
             {visibleInboxItems.length ? (
               <div className="space-y-2">
                 {visibleInboxItems.map((item) => (
-                  <TeacherInboxMessageRow key={item.key} item={item} onOpen={() => openInboxItem(item)} />
+                  <TeacherInboxMessageRow key={item.key} item={item} onOpen={() => openInboxItem(item)} onClear={() => clearInboxItem(item)} />
                 ))}
               </div>
             ) : (
@@ -5710,7 +5777,7 @@ export function TeacherHomeData({ slug }: { slug: string }) {
         />
       ) : null}
       <HomeSectionTitle title="Upcoming" />
-      {programs.length ? <HomeUpcomingRows programs={programs} canCancelSessions currentUserId={currentUserId} /> : <HomeEmptyState title="No assigned classes" text="Your next class sessions will appear here." />}
+      {programs.length ? <HomeUpcomingRows programs={programs} canCancelSessions currentUserId={currentUserId} slug={slug} /> : <HomeEmptyState title="No assigned classes" text="Your next class sessions will appear here." />}
     </div>
   );
 }
@@ -10236,7 +10303,6 @@ function ProgramEditorFields({
                 >
                   <option value="name_and_photo">Name and photo</option>
                   <option value="name_only">Name only</option>
-                  <option value="photo_only">Photo only</option>
                   <option value="none">Neither</option>
                 </select>
                 <p className="mt-1 text-xs leading-5 text-[#7B858C]">Controls what appears on the class cover in browse/enrolled lists. The Program Director section on the public page always shows full details.</p>
@@ -10950,12 +11016,15 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
   const cameFromParam = searchParams.get("from");
   const cameFrom = cameFromParam === "finances" || cameFromParam === "applications" ? cameFromParam : null;
   const originStudentId = searchParams.get("studentId");
+  const sessionTrackIdParam = searchParams.get("trackId");
+  const sessionDayParam = searchParams.get("day");
   const [mosque, setMosque] = useState<Mosque | null>(null);
   const [program, setProgram] = useState<Program | null>(null);
   const [students, setStudents] = useState<Array<{ enrollment: Enrollment; profile: StudentDisplay | null; parent?: ParentDisplay | null; subscription?: ProgramSubscription | null; trackIds: string[] }>>([]);
   const [tracks, setTracks] = useState<ProgramTrack[]>([]);
-  const [selectedRosterTrackIds, setSelectedRosterTrackIds] = useState<string[]>([]);
-  const [selectedRosterDays, setSelectedRosterDays] = useState<string[]>(() => [...scheduleDayOptions]);
+  const [selectedRosterTrackIds, setSelectedRosterTrackIds] = useState<string[]>(() => (sessionTrackIdParam ? [sessionTrackIdParam] : []));
+  const [selectedRosterDays, setSelectedRosterDays] = useState<string[]>(() => (sessionDayParam ? [sessionDayParam] : [...scheduleDayOptions]));
+  const [sessionFilterActive, setSessionFilterActive] = useState(Boolean(sessionTrackIdParam || sessionDayParam));
   const [waitlist, setWaitlist] = useState<RequestWithContext[]>([]);
   const [studentSearch, setStudentSearch] = useState(originStudentId ?? "");
   const [genderFilter, setGenderFilter] = useState("all");
@@ -11316,6 +11385,22 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
             className="min-h-10 rounded-full bg-[#17624F] px-4 text-sm font-semibold text-white shadow-[0_10px_24px_rgba(23,98,79,0.22)]"
           >
             {cameFrom === "finances" ? "Back to Finances" : "Back to Applications"}
+          </button>
+        </div>
+      ) : null}
+      {sessionFilterActive ? (
+        <div className="mb-4 flex items-center justify-between gap-3 rounded-full bg-[#EEF6F7] px-4 py-2 text-sm font-semibold text-[#2F8FB3]">
+          <span>Filtered to {sessionDayParam ?? "that"}&apos;s session</span>
+          <button
+            type="button"
+            onClick={() => {
+              setSelectedRosterTrackIds(tracks.map((track) => track.id));
+              setSelectedRosterDays([...scheduleDayOptions]);
+              setSessionFilterActive(false);
+            }}
+            className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-[#2F8FB3] shadow-[0_4px_10px_rgba(38,50,58,0.08)]"
+          >
+            Clear
           </button>
         </div>
       ) : null}
@@ -13036,17 +13121,23 @@ export function ProgramApplicationsData({ slug, programId, mode = "teacher" }: {
       return;
     }
 
-    const [{ data: requestRows, error: requestError }, { data: trackRows }, { data: subscriptionRows }, { data: auditRows }, { data: switchRows }] = await Promise.all([
+    const [{ data: requestRows, error: requestError }, { data: trackRows }, { data: subscriptionRows }, { data: auditRows }, { data: switchRows }, { data: requestTrackLinkRows }] = await Promise.all([
       supabase.from("enrollment_requests").select("*").eq("program_id", programId).order("requested_at", { ascending: false }),
       supabase.from("program_tracks").select("*").eq("program_id", programId),
       supabase.from("program_subscriptions").select("*").eq("program_id", programId),
       supabase.from("program_finance_audit_events").select("*").eq("program_id", programId).order("created_at", { ascending: false }).limit(20),
       supabase.from("program_track_switch_requests").select("*").eq("program_id", programId).order("requested_at", { ascending: false }),
+      supabase.from("enrollment_request_tracks").select("enrollment_request_id, program_track_id"),
     ]);
     if (requestError) {
       setError(requestError.message);
       setLoading(false);
       return;
+    }
+
+    const requestTrackIdsByRequestId = new Map<string, string[]>();
+    for (const linkRow of requestTrackLinkRows ?? []) {
+      requestTrackIdsByRequestId.set(linkRow.enrollment_request_id, [...(requestTrackIdsByRequestId.get(linkRow.enrollment_request_id) ?? []), linkRow.program_track_id]);
     }
 
     const studentIds = Array.from(new Set([...(requestRows ?? []).map((row) => row.student_profile_id), ...(switchRows ?? []).map((row) => row.student_profile_id)]));
@@ -13064,7 +13155,7 @@ export function ProgramApplicationsData({ slug, programId, mode = "teacher" }: {
         request,
         student: (profileRows ?? []).find((profile) => profile.id === request.student_profile_id) as StudentDisplay | null,
         parent: request.parent_profile_id ? ((profileRows ?? []).find((profile) => profile.id === request.parent_profile_id) as ParentDisplay | undefined) ?? null : null,
-        track: request.program_track_id ? (trackRows ?? []).find((track) => track.id === request.program_track_id) ?? null : null,
+        track: resolveRequestTrack(request, requestTrackIdsByRequestId, trackRows ?? []),
         subscription: (subscriptionRows ?? []).find((subscription) => subscription.student_profile_id === request.student_profile_id) ?? null,
         approver: request.reviewed_by ? ((profileRows ?? []).find((profile) => profile.id === request.reviewed_by) as Profile | undefined) ?? null : null,
       })),
@@ -13401,15 +13492,23 @@ function ApplicationReviewOverlay({
   const [closing, setClosing] = useState(false);
 
   useEffect(() => {
+    window.dispatchEvent(new CustomEvent("tareeqah:overlay-chrome", { detail: { hidden: true } }));
+    return () => {
+      window.dispatchEvent(new CustomEvent("tareeqah:overlay-chrome", { detail: { hidden: false } }));
+    };
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
 
     async function load() {
       setLoading(true);
       setError(null);
       const supabase = createSupabaseBrowserClient();
-      const [{ data: programRow }, { data: request, error: requestError }] = await Promise.all([
+      const [{ data: programRow }, { data: request, error: requestError }, { data: trackLinkRows }] = await Promise.all([
         supabase.from("programs").select("*").eq("id", programId).maybeSingle(),
         supabase.from("enrollment_requests").select("*").eq("id", requestId).maybeSingle(),
+        supabase.from("enrollment_request_tracks").select("program_track_id").eq("enrollment_request_id", requestId),
       ]);
       if (cancelled) {
         return;
@@ -13420,9 +13519,11 @@ function ApplicationReviewOverlay({
         return;
       }
 
+      const linkedTrackIds = (trackLinkRows ?? []).map((linkRow) => linkRow.program_track_id);
+      const primaryTrackId = request.program_track_id ?? linkedTrackIds[0] ?? null;
       let trackRow: ProgramTrack | null = null;
-      if (request.program_track_id) {
-        const trackResult = await supabase.from("program_tracks").select("*").eq("id", request.program_track_id).maybeSingle();
+      if (primaryTrackId) {
+        const trackResult = await supabase.from("program_tracks").select("*").eq("id", primaryTrackId).maybeSingle();
         trackRow = trackResult.data ?? null;
       }
       const { data: subscriptionRow } = await supabase
@@ -13800,7 +13901,7 @@ function ApplicationDetailsDrawer({
         </div>
 
         {availableActions.length ? (
-          <div className="shrink-0 space-y-2 border-t border-[#EEF2F4] px-4 py-3">
+          <div className="shrink-0 space-y-2 border-t border-[#EEF2F4] px-4 pb-[calc(0.75rem+env(safe-area-inset-bottom))] pt-3">
             {decisionActions.length ? (
               <div className={cn("grid gap-2", decisionActions.length === 3 ? "grid-cols-3" : decisionActions.length === 2 ? "grid-cols-2" : "grid-cols-1")}>
                 {decisionActions.map((action) => (
@@ -15406,7 +15507,7 @@ function FloatingInboxTabs({
   onChange: (value: string) => void;
 }) {
   return (
-    <div className="flex justify-center gap-4 border-b border-[#D6DCE0] bg-[var(--workspace)]">
+    <div className="flex justify-center gap-10 border-b border-[#D6DCE0] bg-[var(--workspace)] px-4">
         {tabs.map((tab) => {
           const active = value === tab.id;
           return (
@@ -15415,16 +15516,16 @@ function FloatingInboxTabs({
               type="button"
               onClick={() => onChange(tab.id)}
               className={cn(
-                "relative min-h-11 min-w-0 px-2 text-[12px] font-medium transition",
-                tab.badge ? "pr-7" : "",
-                active ? "border-b-2 border-[#2F8FB3] text-[#2F8FB3]" : "text-[#6B747B]",
+                "relative min-h-14 min-w-0 px-3 text-[17px] font-semibold transition",
+                tab.badge ? "pr-8" : "",
+                active ? "border-b-[3px] border-[#2F8FB3] text-[#2F8FB3]" : "text-[#8A949B]",
               )}
             >
-              <span className="inline-flex items-center justify-center gap-1 whitespace-nowrap text-center">
+              <span className="inline-flex items-center justify-center gap-1.5 whitespace-nowrap text-center">
                 {tab.label}
-                {!tab.badge && tab.actionRequired ? <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[#2F8FB3]" /> : null}
+                {!tab.badge && tab.actionRequired ? <span className="h-2 w-2 shrink-0 rounded-full bg-[#2F8FB3]" /> : null}
               </span>
-              {tab.badge ? <NotificationBadge count={tab.badge} className="right-0 top-1" /> : null}
+              {tab.badge ? <NotificationBadge count={tab.badge} className="right-0 top-2" /> : null}
             </button>
           );
         })}
@@ -15488,37 +15589,48 @@ function MiniEmpty({ text }: { text: string }) {
   return <div className="rounded-xl border border-dashed border-[#D6DCE0] px-4 py-6 text-center text-sm text-[#6B747B]">{text}</div>;
 }
 
-function TeacherInboxMessageRow({ item, onOpen }: { item: TeacherInboxMessageItem; onOpen: () => void }) {
+function TeacherInboxMessageRow({ item, onOpen, onClear }: { item: TeacherInboxMessageItem; onOpen: () => void; onClear: () => void }) {
   const inactive = !item.unread && !item.requiresAction;
   return (
-    <button
-      type="button"
-      onClick={onOpen}
+    <div
       className={cn(
-        "flex w-full items-start gap-3 rounded-[20px] border px-3 py-3 text-left transition",
+        "flex w-full items-start gap-2 rounded-[20px] border px-3 py-3 transition",
         item.requiresAction
           ? "border-[#CFE3EA] bg-white shadow-[0_10px_24px_rgba(38,50,58,0.07)]"
           : item.unread
             ? "border-[#DDE8EC] bg-white"
-            : "border-[#EDF1F3] bg-[#F8FAFB] opacity-70",
+            : "border-[#EDF1F3] bg-[#F5F7F8] opacity-55",
       )}
     >
-      <span className="mt-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#EEF6F7] text-[#2F8FB3]" aria-hidden>
-        <DefaultProfileIcon className="h-5 w-5" compact />
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="flex items-start justify-between gap-2">
-          <span className={cn("truncate text-[15px] font-semibold leading-5", inactive ? "text-[#52616A]" : "text-[#26323A]")}>{item.title}</span>
-          {item.requiresAction ? (
-            <span className="shrink-0 rounded-full bg-[#FFF7E6] px-2 py-0.5 text-[11px] font-semibold text-[#996800]">Action</span>
-          ) : item.unread ? (
-            <span className="mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full bg-[#2F8FB3]" aria-label="Unread" />
-          ) : null}
+      <button type="button" onClick={onOpen} className="flex min-w-0 flex-1 items-start gap-3 text-left">
+        <span className="mt-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#EEF6F7] text-[#2F8FB3]" aria-hidden>
+          <DefaultProfileIcon className="h-5 w-5" compact />
         </span>
-        <span className={cn("mt-1 block text-sm leading-5", inactive ? "text-[#7B858C]" : "text-[#26323A]")}>{item.subtitle}</span>
-        <span className="mt-0.5 block truncate text-xs leading-4 text-[#7B858C]">{item.meta}</span>
-      </span>
-    </button>
+        <span className="min-w-0 flex-1">
+          <span className="flex items-start justify-between gap-2">
+            <span className={cn("truncate text-[15px] font-semibold leading-5", inactive ? "text-[#8A949B]" : "text-[#26323A]")}>{item.title}</span>
+            {item.requiresAction ? (
+              <span className="shrink-0 rounded-full bg-[#FFF7E6] px-2 py-0.5 text-[11px] font-semibold text-[#996800]">Action</span>
+            ) : item.unread ? (
+              <span className="mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full bg-[#2F8FB3]" aria-label="Unread" />
+            ) : null}
+          </span>
+          <span className={cn("mt-1 block text-sm leading-5", inactive ? "text-[#9AA3A9]" : "text-[#26323A]")}>{item.subtitle}</span>
+          <span className="mt-0.5 block truncate text-xs leading-4 text-[#9AA3A9]">{item.meta}</span>
+        </span>
+      </button>
+      {!item.requiresAction ? (
+        <button
+          type="button"
+          onClick={onClear}
+          className="mt-1 shrink-0 rounded-full px-2 py-1 text-[11px] font-semibold text-[#8A949B] transition hover:bg-[#EEF1F2] hover:text-[#52616A]"
+          aria-label="Clear this message"
+          title="Clear"
+        >
+          Clear
+        </button>
+      ) : null}
+    </div>
   );
 }
 
@@ -15547,6 +15659,12 @@ function TeacherInboxMessageDrawer({
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   useModalFocusTrap(containerRef, true, onClose);
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent("tareeqah:overlay-chrome", { detail: { hidden: true } }));
+    return () => {
+      window.dispatchEvent(new CustomEvent("tareeqah:overlay-chrome", { detail: { hidden: false } }));
+    };
+  }, []);
   const title = item.kind === "withdrawal" ? "Withdrawal" : item.kind === "instructor" ? "Instructor Update" : item.kind === "switch" ? "Schedule Switch" : "Message";
   const fromNames = item.kind === "switch" ? (item.request.from_track_ids ?? []).map((id) => tracksById[id]?.name || "Untitled track").join(", ") || "—" : "";
   const toNames = item.kind === "switch" ? (item.request.to_track_ids ?? []).map((id) => tracksById[id]?.name || "Untitled track").join(", ") || "—" : "";
@@ -17934,10 +18052,10 @@ function TrackPricingDealCaption({ track, program, paymentType }: { track: Progr
   return (
     <p className="mt-0.5 text-right text-xs font-semibold text-[#B8860B]">
       {paymentType === "annual"
-        ? `⭐ Saved ${formatPrice(deal.savingsCents)}`
+        ? `⭐ Saves ${formatPrice(deal.savingsCents)}`
         : paymentType === "monthly"
           ? `⭐ Save ${formatPrice(deal.savingsCents)} paying in full`
-          : `⭐ Save ${formatPrice(deal.savingsCents)} — ${formatPrice(deal.annualPriceCents)} pay in full`}
+          : `⭐ Save ${formatPrice(deal.savingsCents)} by paying in full`}
     </p>
   );
 }
@@ -18000,6 +18118,7 @@ function ProgramScheduleOptionsDisplay({
                       <p key={line} className="text-xs font-medium leading-5 text-[#17624F]">{line}</p>
                     ))}
                   </div>
+                  {program ? <TrackPayInFullPriceCaption track={track} program={program} /> : null}
                 </div>
                 {track.eligibility_comment ? <p className="mt-1.5 text-xs leading-5 text-[#7B858C]">{track.eligibility_comment}</p> : null}
                 {capacityBadge?.tone === "full" ? <span className="mt-2 inline-block rounded-full bg-[#E1E8EC] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#7B858C]">Full</span> : null}
@@ -18026,6 +18145,7 @@ function ProgramScheduleOptionsDisplay({
                     <p key={line} className="text-xs font-medium leading-5 text-[#17624F]">{line}</p>
                   ))}
                 </div>
+                {program ? <TrackPayInFullPriceCaption track={null} program={program} /> : null}
               </div>
             </div>
           );
@@ -18033,6 +18153,14 @@ function ProgramScheduleOptionsDisplay({
       )}
     </div>
   );
+}
+
+function TrackPayInFullPriceCaption({ track, program }: { track: ProgramTrack | null; program: Program }) {
+  const deal = trackPricingDeal(track, program);
+  if (!deal) {
+    return null;
+  }
+  return <p className="shrink-0 text-xs font-semibold text-[#6B747B]">Pay in full: {formatPrice(deal.annualPriceCents)}</p>;
 }
 
 function ProgramPaymentOptionsDisplay({ program }: { program: Program }) {
@@ -18236,7 +18364,7 @@ function ProgramTrackSelector({
                     }
                     return (
                       <span className="mt-0.5 block text-xs font-semibold text-[#B8860B]">
-                        {selectedPaymentType === "annual" ? `⭐ Saved ${formatPrice(deal.savingsCents)}` : `⭐ Save ${formatPrice(deal.savingsCents)} paying in full`}
+                        {selectedPaymentType === "annual" ? `⭐ Saves ${formatPrice(deal.savingsCents)}` : `⭐ Save ${formatPrice(deal.savingsCents)} paying in full`}
                       </span>
                     );
                   })()}
@@ -18249,6 +18377,13 @@ function ProgramTrackSelector({
                     <span key={line} className="block text-xs font-medium leading-5 text-[#17624F]">{line}</span>
                   ))}
                 </span>
+                {(() => {
+                  const deal = trackPricingDeal(track, program);
+                  if (!deal) {
+                    return null;
+                  }
+                  return <span className="shrink-0 text-xs font-semibold text-[#6B747B]">Pay in full: {formatPrice(deal.annualPriceCents)}</span>;
+                })()}
               </span>
               {full ? <span className="mt-2 inline-block rounded-full bg-[#E1E8EC] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#7B858C]">Full</span> : null}
             </button>
@@ -18535,7 +18670,7 @@ function MyApplicationsList({
                 <div className="mt-3">
                   {action.kind === "confirmation" ? (
                     <Link
-                      href={`/m/${slug}/registration/${row.request.id}`}
+                      href={`/m/${slug}/registration/${row.request.id}?returnTo=${encodeURIComponent(`/m/${slug}/portal/classes?tab=applications`)}`}
                       className="inline-flex min-h-10 w-full items-center justify-center rounded-[9px] bg-[#2E6E52] px-4 text-sm font-semibold !text-white shadow-[0_8px_18px_rgba(46,110,82,0.22)] transition-colors hover:bg-[#265D45] md:w-auto md:px-10"
                     >
                       {action.label}
@@ -18678,7 +18813,7 @@ function ApplicantDetailsDrawer({
           ) : null}
           {row.program ? (
             <Link
-              href={`/m/${slug}/programs/${row.program.id}`}
+              href={`/m/${slug}/programs/${row.program.id}?returnTo=${encodeURIComponent(`/m/${slug}/portal/classes`)}`}
               className="flex min-h-10 w-full items-center justify-center rounded-[9px] border border-[#D6DCE0] bg-white px-3 text-xs font-semibold text-[#26323A] transition-colors hover:bg-[#F7FAFB]"
             >
               View Program Page
@@ -18972,7 +19107,7 @@ function ProgramCard({
       <div className="space-y-3 p-4 pt-5">
         {(() => {
           const visibility = program.coverDirectorVisibility ?? "name_and_photo";
-          const showPhoto = visibility === "name_and_photo" || visibility === "photo_only";
+          const showPhoto = visibility === "name_and_photo";
           const showName = visibility === "name_and_photo" || visibility === "name_only";
           const directorName = program.coverDirectorDisplayName?.trim() || program.teacher?.full_name;
           return (
@@ -19148,11 +19283,13 @@ function HomeUpcomingRows({
   ownerLabelsByProgramId = {},
   canCancelSessions = false,
   currentUserId = null,
+  slug,
 }: {
   programs: ProgramScheduleSource[];
   ownerLabelsByProgramId?: Record<string, string[]>;
   canCancelSessions?: boolean;
   currentUserId?: string | null;
+  slug?: string;
 }) {
   const [cancellations, setCancellations] = useState<ProgramSessionCancellation[]>([]);
   const [cancellationsLoadedKey, setCancellationsLoadedKey] = useState<string | null>(null);
@@ -19316,7 +19453,13 @@ function HomeUpcomingRows({
                 <h3 className="px-1 text-sm font-semibold text-[#26323A]">{formatHomeDate(group.day)}</h3>
                 <div className="space-y-3">
                   {group.lessons.map((lesson) => (
-                    <HomeUpcomingLesson key={[lesson.program.id, lesson.ownerLabel ?? "self", dayKey(lesson.date), normalizeScheduleTime(lesson.start) || lesson.start, normalizeScheduleTime(lesson.end) || lesson.end].join("|")} lesson={lesson} canCancel={canCancelSessions} onCancel={() => openCancelModal(lesson)} />
+                    <HomeUpcomingLesson
+                      key={[lesson.program.id, lesson.ownerLabel ?? "self", dayKey(lesson.date), normalizeScheduleTime(lesson.start) || lesson.start, normalizeScheduleTime(lesson.end) || lesson.end].join("|")}
+                      lesson={lesson}
+                      canCancel={canCancelSessions}
+                      onCancel={() => openCancelModal(lesson)}
+                      viewStudentsHref={canCancelSessions && slug ? homeLessonViewStudentsHref(slug, lesson) : undefined}
+                    />
                   ))}
                 </div>
               </section>
@@ -19388,7 +19531,16 @@ function WeekCalendar({ days, lessonsByDay }: { days: Date[]; lessonsByDay: Map<
   );
 }
 
-function HomeUpcomingLesson({ lesson, canCancel = false, onCancel }: { lesson: HomeLesson; canCancel?: boolean; onCancel?: () => void }) {
+function homeLessonViewStudentsHref(slug: string, lesson: HomeLesson) {
+  const trackId = lesson.trackKey?.includes(":") ? lesson.trackKey.split(":")[1] : undefined;
+  const params = new URLSearchParams({ from: "home", day: weekdayName(lesson.date) });
+  if (trackId) {
+    params.set("trackId", trackId);
+  }
+  return `/m/${slug}/teacher/classes/${lesson.program.id}/students?${params.toString()}`;
+}
+
+function HomeUpcomingLesson({ lesson, canCancel = false, onCancel, viewStudentsHref }: { lesson: HomeLesson; canCancel?: boolean; onCancel?: () => void; viewStudentsHref?: string }) {
   const detailParts = [lesson.ownerLabel, lesson.trackName, lessonTimeRange(lesson)].filter(Boolean);
   return (
     <div className="flex items-center gap-3 rounded-[24px] bg-white px-4 py-3 shadow-[0_8px_24px_rgba(38,50,58,0.06)]">
@@ -19398,7 +19550,7 @@ function HomeUpcomingLesson({ lesson, canCancel = false, onCancel }: { lesson: H
         <p className="mt-0.5 truncate text-sm text-[#6B747B]">{detailParts.join(" • ")}</p>
       </div>
       {canCancel ? (
-        <UpcomingLessonActionMenu onCancel={onCancel} />
+        <UpcomingLessonActionMenu onCancel={onCancel} viewStudentsHref={viewStudentsHref} />
       ) : (
         <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: lesson.color }} aria-hidden />
       )}
@@ -19406,7 +19558,7 @@ function HomeUpcomingLesson({ lesson, canCancel = false, onCancel }: { lesson: H
   );
 }
 
-function UpcomingLessonActionMenu({ onCancel }: { onCancel?: () => void }) {
+function UpcomingLessonActionMenu({ onCancel, viewStudentsHref }: { onCancel?: () => void; viewStudentsHref?: string }) {
   const [menuOpen, setMenuOpen] = useState(false);
 
   return (
@@ -19420,7 +19572,16 @@ function UpcomingLessonActionMenu({ onCancel }: { onCancel?: () => void }) {
         <MoreVerticalIcon />
       </button>
       {menuOpen ? (
-        <span className="absolute right-0 top-10 z-30 w-36 overflow-hidden rounded-[16px] border border-[#DDE5E9] bg-white p-1 text-sm shadow-[0_18px_44px_rgba(38,50,58,0.18)]">
+        <span className="absolute right-0 top-10 z-30 w-40 overflow-hidden rounded-[16px] border border-[#DDE5E9] bg-white p-1 text-sm shadow-[0_18px_44px_rgba(38,50,58,0.18)]">
+          {viewStudentsHref ? (
+            <Link
+              href={viewStudentsHref}
+              onClick={() => setMenuOpen(false)}
+              className="flex w-full items-center gap-2 rounded-[12px] px-3 py-2.5 text-left font-semibold text-[#26323A] hover:bg-[#F1F5F6] no-underline"
+            >
+              View students
+            </Link>
+          ) : null}
           <button
             type="button"
             onClick={() => {
@@ -19463,6 +19624,29 @@ function currentWeekDays() {
   });
 }
 
+// A weekly-pattern match against "this week" alone can't tell whether a program has actually
+// started yet or already ended, so upcoming-session lists would otherwise show a class before
+// its configured start_date and keep showing it forever past end_date.
+function dateWithinProgramDuration(date: Date, program: Pick<ProgramScheduleSource, "start_date" | "end_date" | "is_ongoing">) {
+  const dayStart = new Date(date);
+  dayStart.setHours(0, 0, 0, 0);
+  if (program.start_date) {
+    const start = new Date(program.start_date);
+    start.setHours(0, 0, 0, 0);
+    if (dayStart < start) {
+      return false;
+    }
+  }
+  if (!program.is_ongoing && program.end_date) {
+    const end = new Date(program.end_date);
+    end.setHours(0, 0, 0, 0);
+    if (dayStart > end) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function weekLessons(sources: Array<{ program: ProgramScheduleSource; ownerLabel?: string }>, week: Date[]) {
   const lessons: HomeLesson[] = [];
   const seenLessonKeys = new Set<string>();
@@ -19476,7 +19660,7 @@ function weekLessons(sources: Array<{ program: ProgramScheduleSource; ownerLabel
       const trackColor = programLessonColor(trackKey);
       rows.forEach((row) => {
         const date = week.find((day) => weekdayName(day).toLowerCase() === row.day.toLowerCase());
-        if (!date) {
+        if (!date || !dateWithinProgramDuration(date, program)) {
           return;
         }
 

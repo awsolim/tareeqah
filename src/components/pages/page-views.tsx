@@ -411,10 +411,10 @@ export function PublicProgramDetailPage({ programId, slug, returnTo }: { program
   );
 }
 
-export function RegistrationConfirmationPage({ requestId, slug }: { requestId: string; slug: string }) {
+export function RegistrationConfirmationPage({ requestId, slug, returnTo }: { requestId: string; slug: string; returnTo?: string }) {
   return (
     <PageShell slug={slug}>
-      <PageTitleBar title="Complete Registration" backHref={`/m/${slug}/portal`} backLabel="Portal" tone="teal" />
+      <PageTitleBar title="Complete Registration" closeHref={returnTo ?? `/m/${slug}/portal/classes`} closeLabel="Close" tone="teal" />
       <Workspace>
         <RegistrationConfirmationData slug={slug} requestId={requestId} />
       </Workspace>
@@ -703,10 +703,14 @@ export function TeacherAccountPage({ slug }: { slug: string }) {
   return <PortalAccountData slug={slug} />;
 }
 
-export function TeacherStudentsPage({ slug, programId }: { slug: string; programId: string }) {
+export function TeacherStudentsPage({ slug, programId, fromHome }: { slug: string; programId: string; fromHome?: boolean }) {
   return (
     <>
-      <PageTitleBar title="Students" backHref={`/m/${slug}/teacher/classes`} backLabel="Classes" />
+      {fromHome ? (
+        <PageTitleBar title="Students" closeHref={`/m/${slug}/teacher`} closeLabel="Home" />
+      ) : (
+        <PageTitleBar title="Students" backHref={`/m/${slug}/teacher/classes`} backLabel="Classes" />
+      )}
       <Workspace>
         <TeacherStudentsData slug={slug} programId={programId} />
       </Workspace>
