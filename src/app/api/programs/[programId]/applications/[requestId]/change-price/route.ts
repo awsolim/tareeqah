@@ -1,5 +1,6 @@
 import { requireProgramManageAccess } from "@/lib/programs/auth";
 import { recordFinanceAuditEvent } from "@/lib/finance/audit";
+import { createApprovedPaymentTerms } from "@/lib/finance/payment-terms";
 import { sendPushNotification } from "@/lib/push/send-push";
 import { createSupabaseServiceClient } from "@/lib/supabase/service";
 
@@ -72,6 +73,22 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
     if (updateError) {
       return Response.json({ error: updateError.message }, { status: 500 });
     }
+
+    const { data: programForTerms, error: programForTermsError } = await supabase.from("programs").select("*").eq("id", programId).maybeSingle();
+    if (programForTermsError || !programForTerms) {
+      return Response.json({ error: programForTermsError?.message ?? "Class not found." }, { status: 404 });
+    }
+
+    await createApprovedPaymentTerms(supabase, {
+      enrollmentRequest,
+      program: programForTerms,
+      actorProfileId: user.id,
+      paymentType,
+      priceMonthlyCents: paymentType === "monthly" ? priceCents : null,
+      priceAnnualCents: paymentType === "annual" ? priceCents : null,
+      paymentBypassed: false,
+      note,
+    });
 
     const { data: student } = await supabase.from("profiles").select("full_name, email").eq("id", enrollmentRequest.student_profile_id).maybeSingle();
     await recordFinanceAuditEvent(supabase, {

@@ -1,5 +1,6 @@
 import { activateEnrollmentForRequest } from "@/lib/programs/enrollment-activation";
 import { recordFinanceAuditEvent } from "@/lib/finance/audit";
+import { ensurePaymentTermsForRequest, markPaymentTermsNoPaymentCompleted } from "@/lib/finance/payment-terms";
 import { createSupabaseServiceClient } from "@/lib/supabase/service";
 
 export const runtime = "nodejs";
@@ -52,11 +53,21 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
       return Response.json({ error: "Payment is required to complete this registration." }, { status: 409 });
     }
 
+    const terms = await ensurePaymentTermsForRequest(supabase, requestId, user.id);
+    if (terms.payment_type === "monthly" || terms.payment_type === "pay_in_full") {
+      return Response.json({ error: "Payment is required to complete this registration." }, { status: 409 });
+    }
+
     await activateEnrollmentForRequest(supabase, {
       enrollmentRequestId: requestId,
       programId,
       studentProfileId: enrollmentRequest.student_profile_id,
       fallbackTrackId: enrollmentRequest.program_track_id,
+    });
+
+    await markPaymentTermsNoPaymentCompleted(supabase, {
+      paymentTermsId: terms.id,
+      paymentType: terms.payment_type,
     });
 
     const { data: student } = await supabase.from("profiles").select("full_name, email").eq("id", enrollmentRequest.student_profile_id).maybeSingle();

@@ -1,5 +1,6 @@
 import { getStripe, shouldUseStripeConnect } from "@/lib/stripe/server";
 import { getCheckoutOrigin, getRegistrationConfirmationPath } from "@/lib/stripe/checkout-url";
+import { ensurePaymentTermsForRequest, markPaymentTermsCheckoutStarted } from "@/lib/finance/payment-terms";
 import { toProgramStatusFields } from "@/lib/programs/status";
 import { createSupabaseServiceClient } from "@/lib/supabase/service";
 
@@ -75,11 +76,11 @@ export async function POST(request: Request) {
       return Response.json({ error: "This program is no longer available for payment." }, { status: 409 });
     }
 
-    if (!program.is_paid) {
-      return Response.json({ error: "This class is not paid." }, { status: 409 });
+    const paymentTerms = await ensurePaymentTermsForRequest(supabase, enrollmentRequest.id, user.id);
+    if (paymentTerms.status === "superseded" || paymentTerms.status === "cancelled" || paymentTerms.status === "ended") {
+      return Response.json({ error: "These payment terms are no longer active." }, { status: 409 });
     }
-
-    if (enrollmentRequest.payment_bypassed) {
+    if (paymentTerms.payment_type === "free" || paymentTerms.payment_type === "waived") {
       return Response.json({ error: "Payment is not required for this registration." }, { status: 409 });
     }
 
@@ -89,11 +90,8 @@ export async function POST(request: Request) {
       return Response.json({ error: "An active subscription already exists for this registration." }, { status: 409 });
     }
 
-    const paymentType = enrollmentRequest.payment_type === "annual" ? "annual" : "monthly";
-    const approvedAmount =
-      paymentType === "annual"
-        ? enrollmentRequest.approved_price_annual_cents ?? program.price_annual_cents
-        : enrollmentRequest.approved_price_monthly_cents ?? program.price_monthly_cents;
+    const paymentType = paymentTerms.payment_type === "pay_in_full" ? "annual" : "monthly";
+    const approvedAmount = paymentTerms.amount_cents;
     if (!approvedAmount || approvedAmount < 50) {
       return Response.json({ error: `This approval does not have a valid ${paymentType === "annual" ? "one-time annual" : "monthly"} price.` }, { status: 409 });
     }
@@ -115,17 +113,21 @@ export async function POST(request: Request) {
         unit_amount: approvedAmount,
         ...(paymentType === "monthly" ? { recurring: { interval: "month" as const } } : {}),
         metadata: {
+          payment_terms_id: paymentTerms.id,
           enrollment_request_id: enrollmentRequest.id,
           mosque_id: enrollmentRequest.mosque_id,
           program_id: enrollmentRequest.program_id,
           student_profile_id: enrollmentRequest.student_profile_id,
           payment_type: paymentType,
+          billing_months: paymentTerms.billing_months ? String(paymentTerms.billing_months) : "",
+          billing_end_behavior: paymentTerms.billing_end_behavior,
         },
       },
       stripeRequestOptions,
     );
 
     const checkoutMetadata = {
+      payment_terms_id: paymentTerms.id,
       enrollment_request_id: enrollmentRequest.id,
       mosque_id: enrollmentRequest.mosque_id,
       program_id: enrollmentRequest.program_id,
@@ -133,6 +135,8 @@ export async function POST(request: Request) {
       parent_profile_id: enrollmentRequest.parent_profile_id ?? "",
       stripe_account_id: mosque.stripe_account_id,
       payment_type: paymentType,
+      billing_months: paymentTerms.billing_months ? String(paymentTerms.billing_months) : "",
+      billing_end_behavior: paymentTerms.billing_end_behavior,
       stripe_price_id: dynamicPrice.id,
     };
 
@@ -157,15 +161,25 @@ export async function POST(request: Request) {
         student_profile_id: enrollmentRequest.student_profile_id,
         parent_profile_id: enrollmentRequest.parent_profile_id,
         enrollment_request_id: enrollmentRequest.id,
+        payment_terms_id: paymentTerms.id,
         stripe_account_id: mosque.stripe_account_id,
         stripe_checkout_session_id: session.id,
         stripe_price_id: dynamicPrice.id,
         payment_type: paymentType,
+        amount_cents: approvedAmount,
+        billing_months: paymentTerms.billing_months,
+        currency: paymentTerms.currency,
         status: "checkout_started",
         updated_at: new Date().toISOString(),
       },
       { onConflict: "program_id,student_profile_id" },
     );
+
+    await markPaymentTermsCheckoutStarted(supabase, {
+      paymentTermsId: paymentTerms.id,
+      stripeCheckoutSessionId: session.id,
+      stripePriceId: dynamicPrice.id,
+    });
 
     return Response.json({ url: session.url });
   } catch (error) {

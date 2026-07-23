@@ -50,6 +50,7 @@ type MosqueMembership = Database["public"]["Tables"]["mosque_memberships"]["Row"
 type ProgramTeacher = Database["public"]["Tables"]["program_teachers"]["Row"];
 type ProgramInstructorEvent = Database["public"]["Tables"]["program_instructor_events"]["Row"];
 type ProgramSubscription = Database["public"]["Tables"]["program_subscriptions"]["Row"];
+type ProgramPaymentTerms = Database["public"]["Tables"]["program_payment_terms"]["Row"];
 type ProgramFinanceAuditEvent = Database["public"]["Tables"]["program_finance_audit_events"]["Row"];
 type AnnouncementReceipt = Database["public"]["Tables"]["program_announcement_receipts"]["Row"];
 type ProgramSessionCancellation = Database["public"]["Tables"]["program_session_cancellations"]["Row"];
@@ -367,6 +368,40 @@ function monthsBetweenDates(startDate: string, endDate: string): number | null {
     return null;
   }
   const months = (end.getFullYear() - start.getFullYear()) * 12 + (end.getMonth() - start.getMonth());
+  return Math.max(1, months);
+}
+
+/**
+ * Suggested number of monthly billing cycles for a fixed-duration program. monthsBetweenDates
+ * counts exact calendar-month boundaries crossed, which systematically undercounts a range like
+ * Sep 1 -> Jun 30 as 9 (not the "10 months of school" a director actually means) since the end
+ * date never quite reaches the 10th boundary. This rounds the leftover days after the last whole
+ * month instead, so >=20 leftover days counts as another billing cycle. It's only ever a starting
+ * suggestion for the editable "Number of billing months" field, never the calendar duration shown
+ * elsewhere (that stays exact, driven by monthsBetweenDates/start_date/end_date directly).
+ */
+function estimateBillingMonths(startDate: string, endDate: string): number | null {
+  if (!startDate || !endDate) {
+    return null;
+  }
+  const start = new Date(`${startDate}T00:00:00`);
+  const end = new Date(`${endDate}T00:00:00`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end.getTime() <= start.getTime()) {
+    return null;
+  }
+
+  let months = (end.getFullYear() - start.getFullYear()) * 12 + (end.getMonth() - start.getMonth());
+  const monthMark = new Date(start);
+  monthMark.setMonth(monthMark.getMonth() + months);
+  let leftoverDays = Math.round((end.getTime() - monthMark.getTime()) / 86400000);
+  if (leftoverDays < 0) {
+    months -= 1;
+    monthMark.setMonth(monthMark.getMonth() - 1);
+    leftoverDays = Math.round((end.getTime() - monthMark.getTime()) / 86400000);
+  }
+  if (leftoverDays >= 20) {
+    months += 1;
+  }
   return Math.max(1, months);
 }
 
@@ -1358,10 +1393,12 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
         : "Schedule to be announced";
   const billingDurationMonths = program.is_ongoing ? null : programPayInFullDurationMonths(program);
   const registrationState = programRegistrationLabel(program);
-  const registrationDeadlineText =
-    registrationState.label === "Registration open" && program.application_close_at
-      ? `Closes ${formatFinanceShortDate(program.application_close_at)}`
-      : "";
+  const registrationIsOpen = registrationState.label === "Registration open";
+  const registrationDeadlineText = registrationIsOpen
+    ? program.registration_deadline_at
+      ? `Registration deadline: ${formatFinanceShortDate(program.registration_deadline_at)}`
+      : "No registration deadline"
+    : "";
   const learningIntro = details?.learning_intro?.trim() ?? "";
   const learningOutcomes = outcomes.map((item) => item.text);
   const hasLearningSection = Boolean(learningIntro) || learningOutcomes.length > 0;
@@ -1502,7 +1539,9 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
                       </span>
                       Registration deadline
                     </dt>
-                    <dd className="max-w-[55%] text-right font-semibold text-[#C0392B]">{registrationDeadlineText}</dd>
+                    <dd className={cn("max-w-[55%] text-right font-semibold", program.registration_deadline_at ? "text-[#C0392B]" : "text-[#7B858C]")}>
+                      {program.registration_deadline_at ? formatFinanceShortDate(program.registration_deadline_at) : "No registration deadline"}
+                    </dd>
                   </div>
                 ) : null}
               </div>
@@ -2331,9 +2370,8 @@ export function RegistrationConfirmationData({ slug, requestId }: { slug: string
     : program.start_date && program.end_date
       ? `${formatDurationDate(program.start_date)} – ${formatDurationDate(program.end_date)}`
       : "Dates to be announced";
-  const listedPrice = request.payment_bypassed
-    ? "Waived"
-    : formatPrice(request.payment_type === "annual" ? request.approved_price_annual_cents ?? track?.price_annual_cents ?? program.price_annual_cents : request.approved_price_monthly_cents ?? track?.price_monthly_cents ?? program.price_monthly_cents);
+  const listedPriceCents = request.payment_type === "annual" ? request.approved_price_annual_cents : request.approved_price_monthly_cents;
+  const listedPrice = request.payment_bypassed ? "Waived" : listedPriceCents != null ? formatPrice(listedPriceCents) : "Payment terms not set";
   const programHref = `/m/${slug}/programs/${program.id}`;
 
   return (
@@ -6444,6 +6482,8 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
   const [roomVisible, setRoomVisible] = useState(false);
   const [eventTimeVisible, setEventTimeVisible] = useState(false);
   const [audienceGender, setAudienceGender] = useState("all");
+  const [billingMonthsTouched, setBillingMonthsTouched] = useState(false);
+  const [billingMonthsConfirm, setBillingMonthsConfirm] = useState<{ suggested: number; chosen: number } | null>(null);
   const [isPaid, setIsPaid] = useState(false);
   const [price, setPrice] = useState("");
   const [offersMonthlyPayment, setOffersMonthlyPayment] = useState(true);
@@ -6754,7 +6794,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
           trackSwitchPolicy: effectiveBuilderStatus.trackSwitchPolicy,
           trackSwitchAllowAll: effectiveBuilderStatus.trackSwitchAllowAll,
           contactEmail: contactEmailOmitted ? "" : effectiveBuilderStatus.contactEmail.trim() || null,
-          contactPhone: effectiveBuilderStatus.contactPhone.trim() || null,
+          contactPhone: contactPhoneOmitted ? "" : instructorContactPhone.trim() || null,
           coverPriceLabelEnabled: effectiveBuilderStatus.coverPriceLabelEnabled,
           coverPriceLabel: effectiveBuilderStatus.coverPriceLabel.trim() || null,
           thumbnailUrl: thumbnailFile ? null : thumbnailUrl.trim() || null,
@@ -6826,7 +6866,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
             trackSwitchPolicy: effectiveBuilderStatus.trackSwitchPolicy,
             trackSwitchAllowAll: effectiveBuilderStatus.trackSwitchAllowAll,
             contactEmail: contactEmailOmitted ? "" : effectiveBuilderStatus.contactEmail.trim() || null,
-            contactPhone: effectiveBuilderStatus.contactPhone.trim() || null,
+            contactPhone: contactPhoneOmitted ? "" : instructorContactPhone.trim() || null,
             coverPriceLabelEnabled: effectiveBuilderStatus.coverPriceLabelEnabled,
             coverPriceLabel: effectiveBuilderStatus.coverPriceLabel.trim() || null,
             thumbnailUrl: nextThumbnailUrl,
@@ -6957,6 +6997,23 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
     }
   }
 
+  // Suggest a billing-cycle count from the date range until the director types their own value —
+  // once touched, their number wins even if the dates change slightly afterward.
+  useEffect(() => {
+    if (builderStatus.durationType !== "fixed_months" || billingMonthsTouched) {
+      return;
+    }
+    const estimate = estimateBillingMonths(builderStatus.startDate, builderStatus.endDate);
+    if (estimate == null) {
+      return;
+    }
+    setBuilderStatus((current) => (current.billingDurationMonths === String(estimate) ? current : { ...current, billingDurationMonths: String(estimate) }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [builderStatus.durationType, builderStatus.startDate, builderStatus.endDate, billingMonthsTouched]);
+
+  const billingMonthsFieldVisible =
+    builderStatus.paymentKind === "tareeqah" && builderStatus.programType !== "event" && offersMonthlyPayment && builderStatus.durationType === "fixed_months" && builderStatus.billingEndBehavior === "fixed_months";
+
   if (previewOpen) {
     return (
       <ProgramEditorPreview
@@ -7050,6 +7107,14 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
         setMissingFieldsModal({ fields: missingOnThisStep, allowContinue: true });
         return;
       }
+      if (builderStep === "pricing" && billingMonthsTouched && billingMonthsFieldVisible) {
+        const suggested = estimateBillingMonths(builderStatus.startDate, builderStatus.endDate);
+        const chosen = Number(builderStatus.billingDurationMonths || "0");
+        if (suggested != null && chosen && chosen !== suggested) {
+          setBillingMonthsConfirm({ suggested, chosen });
+          return;
+        }
+      }
       const index = programBuilderSteps.findIndex((step) => step.id === builderStep);
       setBuilderStep(programBuilderSteps[Math.min(programBuilderSteps.length - 1, index + 1)]?.id ?? "review");
       scrollBuilderToTop();
@@ -7109,6 +7174,25 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
                 <option value="tareeqah">Paid through Tareeqah</option>
               </select>
             </label>
+            {billingMonthsFieldVisible ? (
+              <label className="block">
+                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Number of billing months</span>
+                <input
+                  value={builderStatus.billingDurationMonths}
+                  onChange={(event) => {
+                    setBillingMonthsTouched(true);
+                    setBuilderStatus((current) => ({ ...current, billingDurationMonths: event.target.value.replace(/\D/g, "") }));
+                  }}
+                  className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]"
+                />
+                <p className="mt-1 text-xs leading-5 text-[#7B858C]">How many times a monthly subscription will charge each enrolled student. Suggested from the program dates — change if you want a different number.</p>
+              </label>
+            ) : builderStatus.paymentKind === "tareeqah" && builderStatus.durationType === "ongoing" && builderStatus.programType !== "event" && offersMonthlyPayment ? (
+              <label className="block">
+                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Number of billing months</span>
+                <input value="Ongoing — billed until cancelled" disabled className="h-10 w-full rounded-[8px] border border-[#D6DCE0] bg-[#F1F4F5] px-3 text-sm font-medium text-[#8A949B] outline-none" />
+              </label>
+            ) : null}
             {builderStatus.paymentKind === "tareeqah" ? (
               <label className="block">
                 <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Tax receipt policy</span>
@@ -7124,15 +7208,23 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
               </label>
             ) : null}
             <ProgramApplicationAvailabilityFields builderStatus={builderStatus} setBuilderStatus={setBuilderStatus} />
-            {builderStatus.paymentKind === "tareeqah" && builderStatus.programType !== "event" && offersMonthlyPayment && builderStatus.billingEndBehavior === "fixed_months" ? (
-              <label className="block">
-                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Number of months in billing cycle</span>
-                <input value={builderStatus.billingDurationMonths} onChange={(event) => setBuilderStatus((current) => ({ ...current, billingDurationMonths: event.target.value.replace(/\D/g, "") }))} className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]" />
-              </label>
-            ) : null}
           </div>
         ) : null}
       </section>
+
+      {billingMonthsConfirm ? (
+        <BillingMonthsConfirmModal
+          suggested={billingMonthsConfirm.suggested}
+          chosen={billingMonthsConfirm.chosen}
+          onCancel={() => setBillingMonthsConfirm(null)}
+          onConfirm={() => {
+            setBillingMonthsConfirm(null);
+            const index = programBuilderSteps.findIndex((step) => step.id === builderStep);
+            setBuilderStep(programBuilderSteps[Math.min(programBuilderSteps.length - 1, index + 1)]?.id ?? "review");
+            scrollBuilderToTop();
+          }}
+        />
+      ) : null}
 
       {builderStep === "basics" ? (
         <section className="overflow-hidden rounded-2xl border border-[#E1E8EC] bg-white">
@@ -7322,6 +7414,8 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
   const [roomVisible, setRoomVisible] = useState(false);
   const [eventTimeVisible, setEventTimeVisible] = useState(false);
   const [audienceGender, setAudienceGender] = useState("");
+  const [billingMonthsTouched, setBillingMonthsTouched] = useState(false);
+  const [billingMonthsConfirm, setBillingMonthsConfirm] = useState<{ suggested: number; chosen: number } | null>(null);
   const [isPaid, setIsPaid] = useState(false);
   const [price, setPrice] = useState("");
   const [offersMonthlyPayment, setOffersMonthlyPayment] = useState(true);
@@ -7579,6 +7673,23 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
     loadedDirectorRef.current = selectedDirectorId;
   }, [directorOptions, isAdminEditor, loading, selectedDirectorId]);
 
+  // Suggest a billing-cycle count from the date range until the director types their own value —
+  // once touched, their number wins even if the dates change slightly afterward.
+  useEffect(() => {
+    if (builderStatus.durationType !== "fixed_months" || billingMonthsTouched) {
+      return;
+    }
+    const estimate = estimateBillingMonths(builderStatus.startDate, builderStatus.endDate);
+    if (estimate == null) {
+      return;
+    }
+    setBuilderStatus((current) => (current.billingDurationMonths === String(estimate) ? current : { ...current, billingDurationMonths: String(estimate) }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [builderStatus.durationType, builderStatus.startDate, builderStatus.endDate, billingMonthsTouched]);
+
+  const billingMonthsFieldVisible =
+    builderStatus.paymentKind === "tareeqah" && builderStatus.programType !== "event" && offersMonthlyPayment && builderStatus.durationType === "fixed_months" && builderStatus.billingEndBehavior === "fixed_months";
+
   function handleThumbnailFile(file: File | null) {
     if (!file) {
       return;
@@ -7645,7 +7756,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
     setMessage("Photo uploaded. Save changes to publish it.");
   }
 
-  async function saveProgram(statusOverride?: Partial<ProgramBuilderStatus>) {
+  async function saveProgram(statusOverride?: Partial<ProgramBuilderStatus>, confirmFutureApplicantsOnly = false) {
     if (!program) {
       return;
     }
@@ -7825,10 +7936,21 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         trackSelectionMode: savedTrackSelectionMode,
         trackSelectionCount: savedTrackSelectionCount,
         directorProfileId: isAdminEditor ? selectedDirectorId : null,
+        confirmFutureApplicantsOnly,
       }),
     });
 
-    const result = (await response.json()) as { program?: Program; error?: string };
+    const result = (await response.json()) as { program?: Program; error?: string; requiresFutureApplicantConfirmation?: boolean };
+    if (!response.ok && result.requiresFutureApplicantConfirmation) {
+      setBusy(false);
+      const confirmed = window.confirm(
+        "Existing students will keep their current approved payment terms. These changes apply only to future applicants. To change a current student's billing, use Manage Finances.",
+      );
+      if (confirmed) {
+        void saveProgram(statusOverride, true);
+      }
+      return;
+    }
     if (!response.ok || !result.program) {
       setToast({ tone: "error", message: result.error ?? "Could not save class." });
       setBusy(false);
@@ -8072,6 +8194,14 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
         setMissingFieldsModal({ fields: missingOnThisStep, allowContinue: true });
         return;
       }
+      if (builderStep === "pricing" && billingMonthsTouched && billingMonthsFieldVisible) {
+        const suggested = estimateBillingMonths(builderStatus.startDate, builderStatus.endDate);
+        const chosen = Number(builderStatus.billingDurationMonths || "0");
+        if (suggested != null && chosen && chosen !== suggested) {
+          setBillingMonthsConfirm({ suggested, chosen });
+          return;
+        }
+      }
       const index = programBuilderSteps.findIndex((step) => step.id === builderStep);
       setBuilderStep(programBuilderSteps[Math.min(programBuilderSteps.length - 1, index + 1)]?.id ?? "review");
       scrollBuilderToTop();
@@ -8125,6 +8255,25 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
                 <option value="tareeqah">Paid through Tareeqah</option>
               </select>
             </label>
+            {billingMonthsFieldVisible ? (
+              <label className="block">
+                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Number of billing months</span>
+                <input
+                  value={builderStatus.billingDurationMonths}
+                  onChange={(event) => {
+                    setBillingMonthsTouched(true);
+                    setBuilderStatus((current) => ({ ...current, billingDurationMonths: event.target.value.replace(/\D/g, "") }));
+                  }}
+                  className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]"
+                />
+                <p className="mt-1 text-xs leading-5 text-[#7B858C]">How many times a monthly subscription will charge each enrolled student. Suggested from the program dates — change if you want a different number.</p>
+              </label>
+            ) : builderStatus.paymentKind === "tareeqah" && builderStatus.durationType === "ongoing" && builderStatus.programType !== "event" && offersMonthlyPayment ? (
+              <label className="block">
+                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Number of billing months</span>
+                <input value="Ongoing — billed until cancelled" disabled className="h-10 w-full rounded-[8px] border border-[#D6DCE0] bg-[#F1F4F5] px-3 text-sm font-medium text-[#8A949B] outline-none" />
+              </label>
+            ) : null}
             {builderStatus.paymentKind === "tareeqah" ? (
               <label className="block">
                 <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-[#6B747B]">Tax receipt policy</span>
@@ -8141,6 +8290,20 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
             ) : null}
             <ProgramApplicationAvailabilityFields builderStatus={builderStatus} setBuilderStatus={setBuilderStatus} />
           </div>
+        ) : null}
+
+        {billingMonthsConfirm ? (
+          <BillingMonthsConfirmModal
+            suggested={billingMonthsConfirm.suggested}
+            chosen={billingMonthsConfirm.chosen}
+            onCancel={() => setBillingMonthsConfirm(null)}
+            onConfirm={() => {
+              setBillingMonthsConfirm(null);
+              const index = programBuilderSteps.findIndex((step) => step.id === builderStep);
+              setBuilderStep(programBuilderSteps[Math.min(programBuilderSteps.length - 1, index + 1)]?.id ?? "review");
+              scrollBuilderToTop();
+            }}
+          />
         ) : null}
       </section>
     </>
@@ -8728,6 +8891,40 @@ function MissingFieldsModal({
               Continue Anyway
             </button>
           ) : null}
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+function BillingMonthsConfirmModal({
+  suggested,
+  chosen,
+  onCancel,
+  onConfirm,
+}: {
+  suggested: number;
+  chosen: number;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  useModalFocusTrap(containerRef, true, onCancel);
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#26323A]/35 px-5 backdrop-blur-sm">
+      <div ref={containerRef} role="dialog" aria-modal="true" tabIndex={-1} className="w-full max-w-md rounded-[24px] bg-white p-5 text-[#26323A] shadow-[0_24px_60px_rgba(38,50,58,0.22)] outline-none">
+        <h2 className="text-lg font-semibold">Double-check billing months</h2>
+        <p className="mt-2 text-sm leading-6 text-[#52616A]">
+          You set <span className="font-semibold text-[#26323A]">{chosen} billing month{chosen === 1 ? "" : "s"}</span> — each enrolled student will be charged {chosen} time{chosen === 1 ? "" : "s"} for their monthly subscription. Based on the program dates, that is different from the suggested {suggested} month{suggested === 1 ? "" : "s"}.
+        </p>
+        <div className="mt-5 flex justify-end gap-2">
+          <button type="button" onClick={onCancel} className="min-h-10 rounded-[10px] border border-[#C9D3D8] bg-white px-4 text-sm font-semibold text-[#26323A]">
+            Change it
+          </button>
+          <button type="button" onClick={onConfirm} className="min-h-10 rounded-[10px] bg-[#17624F] px-4 text-sm font-semibold text-white">
+            Continue with {chosen}
+          </button>
         </div>
       </div>
     </div>,
@@ -11408,6 +11605,27 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
         {error ? <div className="border-l-4 border-[#E25241] bg-[#FDEDEA] p-3 text-sm text-[#A4352A]">{error}</div> : null}
 
         <section className="space-y-4">
+          {tracks.some((track) => track.capacity != null) ? (
+            <div className="flex flex-wrap gap-2">
+              {tracks
+                .filter((track) => track.capacity != null)
+                .map((track) => {
+                  const enrolled = students.filter((student) => student.trackIds.includes(track.id)).length;
+                  const atCapacity = enrolled >= (track.capacity ?? 0);
+                  return (
+                    <span
+                      key={track.id}
+                      className={cn(
+                        "inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold",
+                        atCapacity ? "bg-[#FBEAE7] text-[#C0392B]" : "bg-[#F0F4F5] text-[#52616A]",
+                      )}
+                    >
+                      {track.name}: {enrolled} / {track.capacity}
+                    </span>
+                  );
+                })}
+            </div>
+          ) : null}
           <TeacherStudentListControls
             search={studentSearch}
             gender={genderFilter}
@@ -11759,6 +11977,8 @@ type FinanceEnrollmentRow = {
   approver: Profile | null;
   request: EnrollmentRequest | null;
   subscription: ProgramSubscription | null;
+  paymentTerms: ProgramPaymentTerms | null;
+  paymentTermsHistory: ProgramPaymentTerms[];
 };
 
 type FinanceAction = "waive" | "change_price" | "end_subscription";
@@ -12002,10 +12222,11 @@ export function ProgramFinancesData({ slug, programId, mode = "teacher" }: { slu
       return;
     }
 
-    const [{ data: enrollmentRows, error: enrollmentError }, { data: requestRows }, { data: subscriptionRows }, { data: auditRows }] = await Promise.all([
+    const [{ data: enrollmentRows, error: enrollmentError }, { data: requestRows }, { data: subscriptionRows }, { data: paymentTermsRows }, { data: auditRows }] = await Promise.all([
       supabase.from("enrollments").select("*").eq("program_id", programId).order("created_at", { ascending: true }),
       supabase.from("enrollment_requests").select("*").eq("program_id", programId).order("requested_at", { ascending: false }),
       supabase.from("program_subscriptions").select("*").eq("program_id", programId).order("updated_at", { ascending: false }),
+      supabase.from("program_payment_terms").select("*").eq("program_id", programId).order("created_at", { ascending: false }),
       supabase.from("program_finance_audit_events").select("*").eq("program_id", programId).order("created_at", { ascending: false }).limit(20),
     ]);
 
@@ -12025,6 +12246,7 @@ export function ProgramFinancesData({ slug, programId, mode = "teacher" }: { slu
         ...(linkRows ?? []).map((link) => link.parent_profile_id),
         ...(requestRows ?? []).map((request) => request.parent_profile_id).filter(Boolean) as string[],
         ...(subscriptionRows ?? []).map((subscription) => subscription.parent_profile_id).filter(Boolean) as string[],
+        ...(paymentTermsRows ?? []).map((terms) => terms.parent_profile_id).filter(Boolean) as string[],
       ]),
     );
     const profileIds = Array.from(new Set([...studentIds, ...parentIds, ...reviewerIds]));
@@ -12037,7 +12259,10 @@ export function ProgramFinancesData({ slug, programId, mode = "teacher" }: { slu
       (enrollmentRows ?? []).map((enrollment) => {
         const request = (requestRows ?? []).find((item) => item.student_profile_id === enrollment.student_profile_id) ?? null;
         const subscription = (subscriptionRows ?? []).find((item) => item.student_profile_id === enrollment.student_profile_id) ?? null;
+        const paymentTermsHistory = (paymentTermsRows ?? []).filter((terms) => terms.student_profile_id === enrollment.student_profile_id);
+        const paymentTerms = selectCurrentPaymentTerms(paymentTermsHistory, request, subscription);
         const parentId =
+          paymentTerms?.parent_profile_id ??
           request?.parent_profile_id ??
           subscription?.parent_profile_id ??
           (linkRows ?? []).find((link) => link.child_profile_id === enrollment.student_profile_id)?.parent_profile_id ??
@@ -12046,6 +12271,8 @@ export function ProgramFinancesData({ slug, programId, mode = "teacher" }: { slu
           enrollment,
           request,
           subscription,
+          paymentTerms,
+          paymentTermsHistory,
           student: (profileRows ?? []).find((profile) => profile.id === enrollment.student_profile_id) as StudentDisplay | null,
           approver: request?.reviewed_by ? ((profileRows ?? []).find((profile) => profile.id === request.reviewed_by) as Profile | undefined) ?? null : null,
           parent: parentId ? ((profileRows ?? []).find((profile) => profile.id === parentId) as ParentDisplay | undefined) ?? null : null,
@@ -12151,7 +12378,7 @@ export function ProgramFinancesData({ slug, programId, mode = "teacher" }: { slu
           options={["paid", "awaiting payment", "no payment required", "waived", "paid externally", "past due", "payment failed", "checkout sent", "needs billing decision"]}
           onChange={setPayStatusFilter}
         />
-        <FinanceSelect label="Subscription" value={subStatusFilter} options={["n/a", "active", "paused", "ending", "past due", "ended"]} labels={{ "n/a": "N/A" }} onChange={setSubStatusFilter} />
+        <FinanceSelect label="Subscription" value={subStatusFilter} options={["n/a", "setup pending", "active", "paused", "ending", "past due", "payment failed", "ended"]} labels={{ "n/a": "N/A" }} onChange={setSubStatusFilter} />
         <FinanceSelect label="Payment type" value={paymentFilter} options={["waived", "paid externally", "monthly", "pay in full"]} labels={{ "pay in full": "Pay in Full" }} onChange={setPaymentFilter} />
         <FinanceSelect label="Type" value={typeFilter} options={["adult", "child"]} labels={{ adult: "Adult student", child: "Child student" }} onChange={setTypeFilter} />
         <FinanceSelect label="Gender" value={genderFilter} options={["male", "female"]} labels={{ male: "Brothers", female: "Sisters" }} onChange={setGenderFilter} />
@@ -12423,10 +12650,17 @@ function FinanceActionModal({
   onClose: () => void;
   onSuccess: () => void;
 }) {
-  const [price, setPrice] = useState(((row.request?.approved_price_monthly_cents ?? program.price_monthly_cents ?? 0) / 100).toFixed(2).replace(/\.00$/, ""));
-  const [billingMode, setBillingMode] = useState<"monthly" | "one_time">("monthly");
+  const initialPriceCents =
+    row.paymentTerms?.amount_cents ??
+    row.subscription?.amount_cents ??
+    row.request?.approved_price_monthly_cents ??
+    row.request?.approved_price_annual_cents ??
+    program.price_monthly_cents ??
+    program.price_annual_cents ??
+    0;
+  const [price, setPrice] = useState((initialPriceCents / 100).toFixed(2).replace(/\.00$/, ""));
+  const [billingMode, setBillingMode] = useState<"monthly" | "one_time">(row.paymentTerms?.payment_type === "pay_in_full" || row.subscription?.payment_type === "annual" ? "one_time" : "monthly");
   const [note, setNote] = useState("");
-  const [confirmedActiveOverride, setConfirmedActiveOverride] = useState(false);
   const [reason, setReason] = useState("");
   const [timing, setTiming] = useState<"period_end" | "immediate">("period_end");
   const [busy, setBusy] = useState(false);
@@ -12467,8 +12701,8 @@ function FinanceActionModal({
       setError("Enter a valid price.");
       return;
     }
-    if (hasActiveSubscription && !confirmedActiveOverride) {
-      setError("Please confirm ending the current subscription before sending a new link.");
+    if (hasActiveSubscription) {
+      setError("End the current subscription before sending a new checkout link.");
       return;
     }
     setBusy(true);
@@ -12561,11 +12795,7 @@ function FinanceActionModal({
               {hasActiveSubscription ? (
                 <div className="rounded-[14px] border border-[#F3D9A6] bg-[#FFF7E6] p-3 text-xs leading-5 text-[#8A5A00]">
                   <p className="font-semibold">This student already has an active subscription.</p>
-                  <p className="mt-1">Sending a new link will end it immediately to avoid double billing.</p>
-                  <label className="mt-2 flex items-center gap-2 font-semibold">
-                    <input type="checkbox" checked={confirmedActiveOverride} onChange={(event) => setConfirmedActiveOverride(event.target.checked)} disabled={busy || Boolean(checkoutUrl)} />
-                    I understand, end the current subscription and send a new link
-                  </label>
+                  <p className="mt-1">End the current subscription first, then send a new checkout link. This avoids double billing and keeps Stripe aligned with the student&apos;s payment terms.</p>
                 </div>
               ) : null}
               <div className="grid grid-cols-[1fr_auto] gap-2">
@@ -12669,7 +12899,7 @@ function FinanceActionModal({
             {action === "change_price" && !checkoutUrl ? (
               <button
                 type="button"
-                disabled={busy || (hasActiveSubscription && !confirmedActiveOverride)}
+                disabled={busy || hasActiveSubscription}
                 onClick={handleChangePrice}
                 className="min-h-10 rounded-[10px] bg-[#26323A] px-4 text-sm font-semibold text-white transition-opacity disabled:opacity-50"
               >
@@ -12790,6 +13020,23 @@ function FinanceDetailsDrawer({
               <span className="text-[#6B747B]">Approved price</span>
               <span className="font-semibold">{financePrice(row, program)}</span>
             </div>
+            {row.paymentTerms ? (
+              <>
+                <div className="flex items-center justify-between">
+                  <span className="text-[#6B747B]">Payment terms</span>
+                  <span className="font-semibold">{financePaymentTermsStatusLabel(row.paymentTerms)}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-[#6B747B]">Billing cycle</span>
+                  <span className="font-semibold">{financeBillingCycleLabel(row.paymentTerms)}</span>
+                </div>
+              </>
+            ) : (
+              <div className="flex items-center justify-between">
+                <span className="text-[#6B747B]">Payment terms</span>
+                <span className="font-semibold">Legacy record</span>
+              </div>
+            )}
             <div className="flex items-center justify-between">
               <span className="text-[#6B747B]">Payment status</span>
               <span className={cn("rounded-full px-2.5 py-1 text-xs font-semibold", programStatusBadgeToneClass(financeBadgeTone(financePaymentStatus(row, program))))}>{financePaymentStatus(row, program)}</span>
@@ -12812,6 +13059,10 @@ function FinanceDetailsDrawer({
             <div className="flex items-center justify-between">
               <span className="text-[#6B747B]">Checkout link</span>
               <span className="font-semibold">{checkoutLinkStatus}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-[#6B747B]">Terms history</span>
+              <span className="font-semibold">{row.paymentTermsHistory.length || 0}</span>
             </div>
           </section>
 
@@ -13490,6 +13741,7 @@ function ApplicationReviewOverlay({
   const [confirmAction, setConfirmAction] = useState<"cancel_approval" | "reopen" | null>(null);
   const [toast, setToast] = useState<EditorToastState | null>(null);
   const [closing, setClosing] = useState(false);
+  const [trackEnrolledCount, setTrackEnrolledCount] = useState<number | null>(null);
 
   useEffect(() => {
     window.dispatchEvent(new CustomEvent("tareeqah:overlay-chrome", { detail: { hidden: true } }));
@@ -13522,9 +13774,15 @@ function ApplicationReviewOverlay({
       const linkedTrackIds = (trackLinkRows ?? []).map((linkRow) => linkRow.program_track_id);
       const primaryTrackId = request.program_track_id ?? linkedTrackIds[0] ?? null;
       let trackRow: ProgramTrack | null = null;
+      let nextTrackEnrolledCount: number | null = null;
       if (primaryTrackId) {
         const trackResult = await supabase.from("program_tracks").select("*").eq("id", primaryTrackId).maybeSingle();
         trackRow = trackResult.data ?? null;
+        const { data: activeEnrollments } = await supabase.from("enrollments").select("id").eq("program_id", programId).eq("status", "active");
+        const activeEnrollmentIds = (activeEnrollments ?? []).map((enrollment) => enrollment.id);
+        nextTrackEnrolledCount = activeEnrollmentIds.length
+          ? (await supabase.from("enrollment_tracks").select("enrollment_id").eq("program_track_id", primaryTrackId).in("enrollment_id", activeEnrollmentIds)).data?.length ?? 0
+          : 0;
       }
       const { data: subscriptionRow } = await supabase
         .from("program_subscriptions")
@@ -13549,6 +13807,7 @@ function ApplicationReviewOverlay({
         subscription: subscriptionRow ?? null,
         approver: request.reviewed_by ? ((profileRows ?? []).find((profile) => profile.id === request.reviewed_by) as Profile | undefined) ?? null : null,
       });
+      setTrackEnrolledCount(nextTrackEnrolledCount);
       setLoading(false);
     }
 
@@ -13634,7 +13893,7 @@ function ApplicationReviewOverlay({
   return (
     <>
       <EditorToast toast={toast} onClose={() => setToast(null)} />
-      <ApplicationDetailsDrawer row={row} program={program} slug={slug} mode={mode} onClose={onClose} onAction={handleAction} />
+      <ApplicationDetailsDrawer row={row} program={program} slug={slug} mode={mode} trackEnrolledCount={trackEnrolledCount} onClose={onClose} onAction={handleAction} />
       {decisionAction ? (
         <ApplicationDecisionModal
           target={{ request: { ...row.request, program, student: row.student, parent: row.parent, track: row.track }, action: decisionAction }}
@@ -13690,6 +13949,7 @@ function ApplicationDetailsDrawer({
   program,
   slug,
   mode,
+  trackEnrolledCount = null,
   onClose,
   onAction,
 }: {
@@ -13697,6 +13957,7 @@ function ApplicationDetailsDrawer({
   program: Program;
   slug: string;
   mode: "teacher" | "admin";
+  trackEnrolledCount?: number | null;
   onClose: () => void;
   onAction: (action: ApplicationRowAction) => void;
 }) {
@@ -13840,6 +14101,14 @@ function ApplicationDetailsDrawer({
                   <div className="flex items-center justify-between">
                     <span className="text-[#6B747B]">Schedule</span>
                     <span className="font-semibold">{scheduleSummary(row.track.schedule, null).full}</span>
+                  </div>
+                ) : null}
+                {row.track?.capacity != null ? (
+                  <div className="flex items-center justify-between">
+                    <span className="text-[#6B747B]">Track capacity</span>
+                    <span className={cn("font-semibold", trackEnrolledCount != null && trackEnrolledCount >= row.track.capacity ? "text-[#C0392B]" : "text-[#26323A]")}>
+                      {trackEnrolledCount ?? "—"} / {row.track.capacity}
+                    </span>
                   </div>
                 ) : null}
                 <div className="flex items-center justify-between">
@@ -14211,7 +14480,36 @@ function ApplicationConfirmActionModal({
   );
 }
 
+const TERMINAL_PAYMENT_TERM_STATUSES = new Set(["superseded", "cancelled", "ended"]);
+
+function selectCurrentPaymentTerms(
+  termsRows: ProgramPaymentTerms[],
+  request: EnrollmentRequest | null,
+  subscription: ProgramSubscription | null,
+) {
+  if (!termsRows.length) {
+    return null;
+  }
+  const directMatch = termsRows.find((terms) => terms.id === request?.payment_terms_id || terms.id === subscription?.payment_terms_id);
+  if (directMatch && !TERMINAL_PAYMENT_TERM_STATUSES.has(directMatch.status)) {
+    return directMatch;
+  }
+  return termsRows.find((terms) => !TERMINAL_PAYMENT_TERM_STATUSES.has(terms.status)) ?? directMatch ?? termsRows[0] ?? null;
+}
+
 function financePaymentType(row: FinanceEnrollmentRow, program: Program | null) {
+  if (row.paymentTerms) {
+    if (row.paymentTerms.payment_type === "pay_in_full") {
+      return "Pay in Full";
+    }
+    if (row.paymentTerms.payment_type === "monthly") {
+      return "Monthly";
+    }
+    if (row.paymentTerms.payment_type === "waived") {
+      return "Waived";
+    }
+    return "Free";
+  }
   if (!program?.is_paid) {
     return "Free";
   }
@@ -14225,6 +14523,16 @@ function financePaymentType(row: FinanceEnrollmentRow, program: Program | null) 
 }
 
 function financePrice(row: FinanceEnrollmentRow, program: Program | null) {
+  if (row.paymentTerms) {
+    if (row.paymentTerms.payment_type === "free") {
+      return "Free";
+    }
+    if (row.paymentTerms.payment_type === "waived") {
+      return "Waived";
+    }
+    const amount = formatPrice(row.paymentTerms.amount_cents);
+    return row.paymentTerms.payment_type === "monthly" ? `${amount}/month` : amount;
+  }
   if (row.request?.payment_bypassed) {
     return row.request.payment_bypass_external ? "Paid Externally" : "Waived";
   }
@@ -14253,23 +14561,77 @@ function financeStudentType(row: FinanceEnrollmentRow) {
 }
 
 function financeSubscriptionStatus(row: FinanceEnrollmentRow) {
+  if (row.subscription?.stripe_subscription_id) {
+    const stripeStatus = row.subscription.status?.toLowerCase();
+    if (stripeStatus === "past_due" || stripeStatus === "unpaid") {
+      return "Past due";
+    }
+    if (!hasActiveRecurringSubscription(row.subscription)) {
+      return "Ended";
+    }
+    if (row.subscription.payment_paused) {
+      return "Paused";
+    }
+    return row.subscription.cancel_at_period_end ? "Ending" : "Active";
+  }
+  if (row.paymentTerms) {
+    if (row.paymentTerms.payment_type !== "monthly") {
+      return "N/A";
+    }
+  }
   if (!row.subscription?.stripe_subscription_id) {
+    if (row.paymentTerms?.status === "checkout_pending" || row.paymentTerms?.status === "payment_required") {
+      return "Setup pending";
+    }
+    if (row.paymentTerms?.status === "past_due") {
+      return "Past due";
+    }
+    if (row.paymentTerms?.status === "failed") {
+      return "Payment failed";
+    }
+    if (row.paymentTerms && ["ended", "cancelled", "superseded"].includes(row.paymentTerms.status)) {
+      return "Ended";
+    }
     return "N/A";
   }
-  const stripeStatus = row.subscription.status?.toLowerCase();
-  if (stripeStatus === "past_due" || stripeStatus === "unpaid") {
-    return "Past due";
-  }
-  if (!hasActiveRecurringSubscription(row.subscription)) {
-    return "Ended";
-  }
-  if (row.subscription.payment_paused) {
-    return "Paused";
-  }
-  return row.subscription.cancel_at_period_end ? "Ending" : "Active";
+  return "N/A";
 }
 
 function financePaymentStatus(row: FinanceEnrollmentRow, program: Program | null) {
+  if (row.paymentTerms) {
+    const stripeStatus = row.subscription?.status?.toLowerCase();
+    if (row.paymentTerms.payment_type === "monthly" && row.subscription?.stripe_subscription_id && hasActiveRecurringSubscription(row.subscription)) {
+      if (stripeStatus === "past_due") {
+        return "Past due";
+      }
+      if (stripeStatus === "unpaid") {
+        return "Payment failed";
+      }
+      return "Paid";
+    }
+    switch (row.paymentTerms.status) {
+      case "payment_required":
+        return "Awaiting payment";
+      case "checkout_pending":
+        return "Checkout sent";
+      case "active":
+        return row.paymentTerms.payment_type === "monthly" ? "Paid" : "No payment required";
+      case "paid":
+        return "Paid";
+      case "waived":
+        return "Waived";
+      case "past_due":
+        return "Past due";
+      case "failed":
+        return "Payment failed";
+      case "ended":
+      case "cancelled":
+      case "superseded":
+        return "Ended";
+      default:
+        return "Needs billing decision";
+    }
+  }
   if (!program?.is_paid) {
     return "No payment required";
   }
@@ -14301,12 +14663,40 @@ function financePaymentStatus(row: FinanceEnrollmentRow, program: Program | null
   return "Needs billing decision";
 }
 
+function financePaymentTermsStatusLabel(terms: ProgramPaymentTerms) {
+  const status = terms.status.replace(/_/g, " ");
+  return `${financePaymentTypeFromTerms(terms)} - ${titleCase(status)}`;
+}
+
+function financePaymentTypeFromTerms(terms: ProgramPaymentTerms) {
+  if (terms.payment_type === "pay_in_full") {
+    return "Pay in Full";
+  }
+  if (terms.payment_type === "monthly") {
+    return "Monthly";
+  }
+  if (terms.payment_type === "waived") {
+    return "Waived";
+  }
+  return "Free";
+}
+
+function financeBillingCycleLabel(terms: ProgramPaymentTerms) {
+  if (terms.payment_type !== "monthly") {
+    return "Not applicable";
+  }
+  if (terms.billing_end_behavior === "fixed_month_count" && terms.billing_months) {
+    return `${terms.billing_months} month${terms.billing_months === 1 ? "" : "s"}`;
+  }
+  return "Ongoing until cancelled";
+}
+
 function financeBadgeTone(label: string): "neutral" | "positive" | "warning" | "danger" {
   const value = label.toLowerCase();
   if (["active", "paid"].includes(value)) {
     return "positive";
   }
-  if (["paused", "ending", "awaiting payment", "checkout sent"].includes(value)) {
+  if (["paused", "ending", "awaiting payment", "checkout sent", "setup pending"].includes(value)) {
     return "warning";
   }
   if (["kicked", "past due", "payment failed", "needs billing decision"].includes(value)) {
@@ -14316,6 +14706,9 @@ function financeBadgeTone(label: string): "neutral" | "positive" | "warning" | "
 }
 
 function financeCurrentPeriodLabel(row: FinanceEnrollmentRow) {
+  if (row.paymentTerms?.current_period_start && row.paymentTerms.current_period_end) {
+    return `${formatFinanceShortDate(row.paymentTerms.current_period_start)} – ${formatFinanceShortDate(row.paymentTerms.current_period_end)}`;
+  }
   if (!row.subscription?.current_period_start || !row.subscription.current_period_end) {
     return "—";
   }
@@ -14324,7 +14717,13 @@ function financeCurrentPeriodLabel(row: FinanceEnrollmentRow) {
 
 function financeNextBillingLabel(row: FinanceEnrollmentRow) {
   const subscription = row.subscription;
+  if (row.paymentTerms?.payment_type !== "monthly" && row.paymentTerms) {
+    return row.paymentTerms.payment_type === "pay_in_full" ? "Paid once" : "—";
+  }
   if (!subscription?.stripe_subscription_id || !hasActiveRecurringSubscription(subscription)) {
+    if (row.paymentTerms?.current_period_end && ["ended", "cancelled"].includes(row.paymentTerms.status)) {
+      return `Ended ${formatFinanceShortDate(row.paymentTerms.current_period_end)}`;
+    }
     return "—";
   }
   if (subscription.payment_paused) {
@@ -14347,7 +14746,11 @@ function formatDurationDate(value: string | null | undefined) {
   if (!value) {
     return "—";
   }
-  return new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  // Parse as local midnight (matching monthsBetweenDates) rather than letting a bare "YYYY-MM-DD"
+  // parse as UTC midnight, which shifted the displayed date back a day in negative-UTC-offset
+  // timezones (e.g. a Sep 1 start_date rendering as "Aug 31").
+  const parsed = value.includes("T") ? new Date(value) : new Date(`${value}T00:00:00`);
+  return parsed.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
 function hasActiveRecurringSubscription(subscription: ProgramSubscription | null | undefined) {
@@ -14366,6 +14769,12 @@ function financeStudentSubtitle(row: FinanceEnrollmentRow) {
 }
 
 function financeMonthlyAmountCents(row: FinanceEnrollmentRow, program: Program | null) {
+  if (row.paymentTerms) {
+    if (row.paymentTerms.payment_type !== "monthly" || TERMINAL_PAYMENT_TERM_STATUSES.has(row.paymentTerms.status)) {
+      return 0;
+    }
+    return row.paymentTerms.amount_cents ?? 0;
+  }
   if (!program?.is_paid || row.request?.payment_bypassed) {
     return 0;
   }
@@ -14386,6 +14795,18 @@ function formatCurrencyAmount(cents: number | null) {
 function financeAuditFallbackSummary(row: FinanceEnrollmentRow, program: Program) {
   const actor = row.approver?.full_name ?? "Director";
   const student = row.student?.full_name || "Student";
+  if (row.paymentTerms?.internal_note) {
+    return row.paymentTerms.internal_note;
+  }
+  if (row.paymentTerms?.payment_type === "waived") {
+    return `${actor} waived payment indefinitely for ${student}.`;
+  }
+  if (row.paymentTerms?.payment_type === "monthly" && row.paymentTerms.amount_cents != null) {
+    return `${actor} approved ${student} for ${formatPrice(row.paymentTerms.amount_cents)}/month.`;
+  }
+  if (row.paymentTerms?.payment_type === "pay_in_full" && row.paymentTerms.amount_cents != null) {
+    return `${actor} approved ${student} for Pay in Full of ${formatPrice(row.paymentTerms.amount_cents)}.`;
+  }
   if (row.request?.payment_bypassed || row.subscription?.payment_waived) {
     return `${actor} waived payment indefinitely for ${student}.`;
   }
@@ -19142,8 +19563,10 @@ function ProgramCard({
                 {registration.label}
               </span>
             </div>
-            {!relationship && registration.label === "Registration open" && program.application_close_at ? (
-              <p className="mt-1 text-right text-[#C0392B]">Closes {formatFinanceShortDate(program.application_close_at)}</p>
+            {!relationship && registration.label === "Registration open" ? (
+              <p className={cn("mt-1 text-right", program.registration_deadline_at ? "text-[#C0392B]" : "text-[#8A949B]")}>
+                {program.registration_deadline_at ? `Registration deadline: ${formatFinanceShortDate(program.registration_deadline_at)}` : "No registration deadline"}
+              </p>
             ) : null}
           </div>
         </div>

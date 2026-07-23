@@ -1,6 +1,7 @@
 import { getStripe, shouldUseStripeConnect } from "@/lib/stripe/server";
 import { createSupabaseServiceClient } from "@/lib/supabase/service";
 import type { Database, Json } from "@/lib/supabase/types";
+import { recordFinanceAuditEvent } from "@/lib/finance/audit";
 import { deriveLifecycleStatus, normalizeProgramStatusFields, validateProgramStatusCombination, type ProgramStatusFields } from "@/lib/programs/status";
 
 export const runtime = "nodejs";
@@ -65,6 +66,7 @@ type UpdateProgramBody = {
   trackSelectionCount?: number;
   directorProfileId?: string | null;
   tags?: unknown;
+  confirmFutureApplicantsOnly?: boolean;
 };
 
 function cleanTitle(value: unknown) {
@@ -213,6 +215,27 @@ async function canManageProgram(programId: string, userId: string) {
     check_profile_id: userId,
   });
   return !error && Boolean(data);
+}
+
+function billingDefaultsChanged(existingProgram: Database["public"]["Tables"]["programs"]["Row"], updatePayload: Record<string, unknown>) {
+  const billingFields = [
+    "is_paid",
+    "payment_kind",
+    "billing_start_behavior",
+    "billing_end_behavior",
+    "billing_duration_months",
+    "offers_monthly_payment",
+    "offers_annual_payment",
+    "price_monthly_cents",
+    "price_annual_cents",
+    "start_now",
+    "start_date",
+    "end_date",
+    "duration_months",
+    "is_ongoing",
+  ] as const;
+
+  return billingFields.some((field) => existingProgram[field] !== updatePayload[field]);
 }
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ programId: string }> }) {
@@ -477,6 +500,34 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
       ...(nextDirectorProfileId ? { director_profile_id: nextDirectorProfileId } : {}),
     };
 
+    const changedBillingDefaults = billingDefaultsChanged(existingProgram, updatePayload);
+    if (changedBillingDefaults) {
+      const [{ count: paidApprovalCount }, { count: subscriptionCount }] = await Promise.all([
+        supabase
+          .from("enrollment_requests")
+          .select("id", { count: "exact", head: true })
+          .eq("program_id", programId)
+          .eq("status", "approved")
+          .eq("payment_bypassed", false),
+        supabase
+          .from("program_subscriptions")
+          .select("id", { count: "exact", head: true })
+          .eq("program_id", programId)
+          .in("status", ["active", "trialing", "paid", "past_due", "checkout_started"]),
+      ]);
+      const hasProtectedBilling = Boolean((paidApprovalCount ?? 0) > 0 || (subscriptionCount ?? 0) > 0);
+      if (hasProtectedBilling && !body.confirmFutureApplicantsOnly) {
+        return Response.json(
+          {
+            error:
+              "Existing students will keep their current approved payment terms. These changes apply only to future applicants unless you update a student from Manage Finances.",
+            requiresFutureApplicantConfirmation: true,
+          },
+          { status: 409 },
+        );
+      }
+    }
+
     const { data: program, error: updateError } = await updateProgramWithSchemaFallback(supabase, programId, updatePayload);
 
     if (updateError || !program) {
@@ -497,6 +548,22 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
       if (teacherError) {
         return Response.json({ error: teacherError.message }, { status: 500 });
       }
+    }
+
+    if (changedBillingDefaults && body.confirmFutureApplicantsOnly) {
+      await recordFinanceAuditEvent(supabase, {
+        programId,
+        studentProfileId: null,
+        actorProfileId: auth.userId,
+        eventType: "program_billing_defaults_changed_future_only",
+        summary: "Program billing defaults were changed for future applicants only. Existing students keep their approved payment terms.",
+        metadata: {
+          priceMonthlyCents: updatePayload.price_monthly_cents as number | null,
+          priceAnnualCents: updatePayload.price_annual_cents as number | null,
+          billingEndBehavior: updatePayload.billing_end_behavior as string,
+          billingDurationMonths: updatePayload.billing_duration_months as number | null,
+        },
+      });
     }
 
     return Response.json({ program });

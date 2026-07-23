@@ -81,6 +81,56 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
       .eq("child_profile_id", body.studentProfileId)
       .maybeSingle();
     const parentProfileId = link?.parent_profile_id ?? subscription?.parent_profile_id ?? null;
+    const [{ data: enrollment }, { data: enrollmentRequest }] = await Promise.all([
+      supabase
+        .from("enrollments")
+        .select("id")
+        .eq("program_id", programId)
+        .eq("student_profile_id", body.studentProfileId)
+        .maybeSingle(),
+      supabase
+        .from("enrollment_requests")
+        .select("id")
+        .eq("program_id", programId)
+        .eq("student_profile_id", body.studentProfileId)
+        .order("requested_at", { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+    ]);
+
+    await supabase
+      .from("program_payment_terms")
+      .update({ status: "superseded", updated_at: now })
+      .eq("program_id", programId)
+      .eq("student_profile_id", body.studentProfileId)
+      .not("status", "in", "(superseded,cancelled,ended)");
+
+    const { data: waivedTerms, error: waivedTermsError } = await supabase
+      .from("program_payment_terms")
+      .insert({
+        mosque_id: program.mosque_id,
+        program_id: programId,
+        enrollment_request_id: enrollmentRequest?.id ?? subscription?.enrollment_request_id ?? null,
+        enrollment_id: enrollment?.id ?? null,
+        student_profile_id: body.studentProfileId,
+        parent_profile_id: parentProfileId,
+        payment_type: "waived",
+        amount_cents: 0,
+        currency: "cad",
+        billing_months: null,
+        billing_start_behavior: "not_applicable",
+        billing_end_behavior: "not_applicable",
+        status: "waived",
+        approved_by: user.id,
+        approved_at: now,
+        internal_note: note ? `${reason} - ${note}` : reason,
+        updated_at: now,
+      })
+      .select("id")
+      .single();
+    if (waivedTermsError || !waivedTerms) {
+      return Response.json({ error: waivedTermsError?.message ?? "Could not record waived payment terms." }, { status: 500 });
+    }
 
     await supabase.from("program_subscriptions").upsert(
       {
@@ -88,6 +138,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
         program_id: programId,
         student_profile_id: body.studentProfileId,
         parent_profile_id: parentProfileId,
+        enrollment_request_id: enrollmentRequest?.id ?? subscription?.enrollment_request_id ?? null,
+        payment_terms_id: waivedTerms.id,
         payment_waived: true,
         payment_waived_reason: reason,
         payment_waived_at: now,
@@ -105,7 +157,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
       actorProfileId: user.id,
       eventType: "tuition_waived",
       summary: note ? `${summary} Note: ${note}` : summary,
-      metadata: { timing, reason, note, hadActiveSubscription: hasActiveSubscription },
+      metadata: { paymentTermsId: waivedTerms.id, timing, reason, note, hadActiveSubscription: hasActiveSubscription },
     });
 
     return Response.json({ ok: true });

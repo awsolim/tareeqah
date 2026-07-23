@@ -1,5 +1,6 @@
 import { requireProgramManageAccess } from "@/lib/programs/auth";
 import { recordFinanceAuditEvent } from "@/lib/finance/audit";
+import { createApprovedPaymentTerms } from "@/lib/finance/payment-terms";
 import { sendPushNotification } from "@/lib/push/send-push";
 import { createSupabaseServiceClient } from "@/lib/supabase/service";
 
@@ -92,6 +93,18 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
     if (updateError) {
       return Response.json({ error: updateError.message }, { status: 500 });
     }
+
+    await createApprovedPaymentTerms(supabase, {
+      enrollmentRequest,
+      program,
+      actorProfileId: user.id,
+      paymentType: approvalPaymentType,
+      priceMonthlyCents: paymentBypassed ? 0 : approvalPaymentType === "monthly" ? body.priceMonthlyCents ?? program.price_monthly_cents ?? null : null,
+      priceAnnualCents: paymentBypassed ? 0 : approvalPaymentType === "annual" ? body.priceAnnualCents ?? program.price_annual_cents ?? null : null,
+      paymentBypassed,
+      paymentBypassedExternal,
+      note,
+    });
 
     const { data: student } = await supabase.from("profiles").select("full_name, email").eq("id", enrollmentRequest.student_profile_id).maybeSingle();
     const label = student?.full_name || student?.email || "this student";

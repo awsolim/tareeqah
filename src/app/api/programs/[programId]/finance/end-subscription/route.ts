@@ -56,6 +56,12 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
 
     if (timing === "immediate") {
       await cancelProgramSubscription(supabase, subscription);
+      if (subscription.payment_terms_id) {
+        await supabase
+          .from("program_payment_terms")
+          .update({ status: "ended", updated_at: new Date().toISOString() })
+          .eq("id", subscription.payment_terms_id);
+      }
       await recordFinanceAuditEvent(supabase, {
         programId,
         studentProfileId: body.studentProfileId,
@@ -73,6 +79,12 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
       .from("program_subscriptions")
       .update({ cancel_at_period_end: true, updated_at: new Date().toISOString() })
       .eq("id", subscription.id);
+    if (subscription.payment_terms_id) {
+      await supabase
+        .from("program_payment_terms")
+        .update({ status: "ended", current_period_end: subscription.current_period_end, updated_at: new Date().toISOString() })
+        .eq("id", subscription.payment_terms_id);
+    }
 
     await recordFinanceAuditEvent(supabase, {
       programId,

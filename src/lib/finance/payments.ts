@@ -27,6 +27,7 @@ export async function insertProgramPayment(
     stripeChargeId?: string | null;
     stripePaymentIntentId?: string | null;
     stripeInvoiceId?: string | null;
+    paymentTermsId?: string | null;
     amountCents: number;
     currency: string;
     paidAt: string;
@@ -57,6 +58,7 @@ export async function insertProgramPayment(
       stripe_charge_id: payment.stripeChargeId ?? null,
       stripe_payment_intent_id: payment.stripePaymentIntentId ?? null,
       stripe_invoice_id: payment.stripeInvoiceId ?? null,
+      payment_terms_id: payment.paymentTermsId ?? null,
       amount_cents: payment.amountCents,
       currency: payment.currency,
       paid_at: payment.paidAt,

@@ -1,6 +1,6 @@
 import { getStripe, shouldUseStripeConnect } from "@/lib/stripe/server";
 import { getCheckoutOrigin, getPortalReturnPath } from "@/lib/stripe/checkout-url";
-import { cancelProgramSubscription } from "@/lib/stripe/subscriptions";
+import { isActiveStripeSubscriptionStatus } from "@/lib/stripe/subscriptions";
 import { requireProgramFinanceAccess } from "@/lib/finance/auth";
 import { recordFinanceAuditEvent } from "@/lib/finance/audit";
 import { createSupabaseServiceClient } from "@/lib/supabase/service";
@@ -70,7 +70,15 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
       .eq("student_profile_id", body.studentProfileId)
       .maybeSingle();
 
-    await cancelProgramSubscription(supabase, existingSubscription);
+    if (existingSubscription?.stripe_subscription_id && isActiveStripeSubscriptionStatus(existingSubscription.status)) {
+      return Response.json(
+        {
+          error:
+            "This student already has an active subscription. End the current subscription before sending a new payment setup to avoid double billing.",
+        },
+        { status: 409 },
+      );
+    }
 
     const [{ data: link }, { data: student }] = await Promise.all([
       supabase
@@ -88,6 +96,48 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
 
     const stripeRequestOptions = shouldUseStripeConnect() && mosque.stripe_account_id ? { stripeAccount: mosque.stripe_account_id } : undefined;
     const stripe = getStripe();
+    const now = new Date().toISOString();
+    const note = body.note?.trim() || null;
+    const paymentTermsType = billingMode === "monthly" ? "monthly" : "pay_in_full";
+    const billingMonths =
+      billingMode === "monthly" && program.billing_end_behavior === "fixed_months"
+        ? program.billing_duration_months ?? program.duration_months ?? null
+        : null;
+
+    await supabase
+      .from("program_payment_terms")
+      .update({ status: "superseded", updated_at: now })
+      .eq("program_id", programId)
+      .eq("student_profile_id", body.studentProfileId)
+      .not("status", "in", "(superseded,cancelled,ended)");
+
+    const { data: terms, error: termsError } = await supabase
+      .from("program_payment_terms")
+      .insert({
+        mosque_id: program.mosque_id,
+        program_id: programId,
+        enrollment_request_id: existingSubscription?.enrollment_request_id ?? null,
+        student_profile_id: body.studentProfileId,
+        parent_profile_id: parentProfileId,
+        payment_type: paymentTermsType,
+        amount_cents: amountCents,
+        currency: "cad",
+        billing_months: billingMonths,
+        billing_start_behavior: billingMode === "monthly" ? program.billing_start_behavior ?? "on_payment" : "not_applicable",
+        billing_end_behavior: billingMode === "monthly" && billingMonths ? "fixed_month_count" : billingMode === "monthly" ? "ongoing_until_cancelled" : "not_applicable",
+        program_start_date_snapshot: program.start_date ?? null,
+        program_end_date_snapshot: program.end_date ?? null,
+        status: "checkout_pending",
+        approved_by: user.id,
+        approved_at: now,
+        internal_note: note,
+        updated_at: now,
+      })
+      .select("*")
+      .single();
+    if (termsError || !terms) {
+      return Response.json({ error: termsError?.message ?? "Could not create payment terms." }, { status: 500 });
+    }
 
     const dynamicPrice = await stripe.prices.create(
       {
@@ -96,10 +146,13 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
         unit_amount: amountCents,
         ...(billingMode === "monthly" ? { recurring: { interval: "month" as const } } : {}),
         metadata: {
+          payment_terms_id: terms.id,
           program_id: programId,
           mosque_id: program.mosque_id,
           student_profile_id: body.studentProfileId,
           payment_type: billingMode === "monthly" ? "monthly" : "annual",
+          billing_months: billingMonths ? String(billingMonths) : "",
+          billing_end_behavior: terms.billing_end_behavior,
           changed_by_profile_id: user.id,
         },
       },
@@ -109,12 +162,15 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
     const origin = getCheckoutOrigin(request);
     const returnPath = getPortalReturnPath(origin, mosque.slug);
     const checkoutMetadata = {
+      payment_terms_id: terms.id,
       program_id: programId,
       mosque_id: program.mosque_id,
       student_profile_id: body.studentProfileId,
       parent_profile_id: parentProfileId ?? "",
       stripe_account_id: mosque.stripe_account_id,
       payment_type: billingMode === "monthly" ? "monthly" : "annual",
+      billing_months: billingMonths ? String(billingMonths) : "",
+      billing_end_behavior: terms.billing_end_behavior,
       stripe_price_id: dynamicPrice.id,
     };
 
@@ -137,10 +193,15 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
         program_id: programId,
         student_profile_id: body.studentProfileId,
         parent_profile_id: parentProfileId,
+        enrollment_request_id: existingSubscription?.enrollment_request_id ?? null,
+        payment_terms_id: terms.id,
         stripe_account_id: mosque.stripe_account_id,
         stripe_checkout_session_id: session.id,
         stripe_price_id: dynamicPrice.id,
         payment_type: billingMode === "monthly" ? "monthly" : "annual",
+        amount_cents: amountCents,
+        billing_months: billingMonths,
+        currency: "cad",
         status: "checkout_started",
         payment_paused: false,
         payment_paused_until: null,
@@ -149,14 +210,18 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
       { onConflict: "program_id,student_profile_id" },
     );
 
-    const note = body.note?.trim() || null;
+    await supabase
+      .from("program_payment_terms")
+      .update({ stripe_checkout_session_id: session.id, updated_at: new Date().toISOString() })
+      .eq("id", terms.id);
+
     await recordFinanceAuditEvent(supabase, {
       programId,
       studentProfileId: body.studentProfileId,
       actorProfileId: user.id,
       eventType: "price_changed",
       summary: `New checkout link sent to ${student?.full_name || student?.email || "this student"} for ${(amountCents / 100).toFixed(2)} CAD (${billingMode === "monthly" ? "monthly" : "one-time"}).${note ? ` Note: ${note}` : ""}`,
-      metadata: { amountCents, billingMode, stripePriceId: dynamicPrice.id, checkoutSessionId: session.id, note },
+      metadata: { paymentTermsId: terms.id, amountCents, billingMode, billingMonths, stripePriceId: dynamicPrice.id, checkoutSessionId: session.id, note },
     });
 
     return Response.json({ url: session.url });

@@ -7,6 +7,99 @@ import { sendPushNotification } from "@/lib/push/send-push";
 import { logServerError } from "@/lib/monitoring/log-error";
 import { insertProgramPayment } from "@/lib/finance/payments";
 import { createSupabaseServiceClient } from "@/lib/supabase/service";
+import type { Database } from "@/lib/supabase/types";
+
+type ProgramPaymentTermsRow = Database["public"]["Tables"]["program_payment_terms"]["Row"];
+
+async function ensureFixedDurationSchedule(
+  supabase: ReturnType<typeof createSupabaseServiceClient>,
+  terms: ProgramPaymentTermsRow | null,
+  subscription: Stripe.Subscription | null,
+  stripeAccountId: string | undefined,
+) {
+  if (
+    !terms ||
+    terms.payment_type !== "monthly" ||
+    terms.billing_end_behavior !== "fixed_month_count" ||
+    !terms.billing_months ||
+    terms.billing_months <= 0 ||
+    !subscription?.id
+  ) {
+    return null;
+  }
+  if (terms.stripe_subscription_schedule_id) {
+    return terms.stripe_subscription_schedule_id;
+  }
+
+  const stripeRequestOptions = shouldUseStripeConnect() && stripeAccountId ? { stripeAccount: stripeAccountId } : undefined;
+  const stripe = getStripe();
+  const existingSchedule = typeof subscription.schedule === "string" ? subscription.schedule : subscription.schedule?.id ?? null;
+  const schedule = existingSchedule
+    ? await stripe.subscriptionSchedules.retrieve(existingSchedule, undefined, stripeRequestOptions)
+    : await stripe.subscriptionSchedules.create(
+        {
+          from_subscription: subscription.id,
+          metadata: {
+            payment_terms_id: terms.id,
+            enrollment_request_id: terms.enrollment_request_id ?? "",
+            program_id: terms.program_id,
+            student_profile_id: terms.student_profile_id,
+          },
+        },
+        stripeRequestOptions,
+      );
+
+  const phase = schedule.phases[0];
+  const items = (phase?.items ?? subscription.items.data).map((item) => ({
+    price: typeof item.price === "string" ? item.price : item.price.id,
+    quantity: item.quantity ?? 1,
+  }));
+
+  const updatedSchedule = await stripe.subscriptionSchedules.update(
+    schedule.id,
+    {
+      end_behavior: "cancel",
+      phases: [
+        {
+          start_date: phase?.start_date ?? "now",
+          items,
+          duration: { interval: "month", interval_count: terms.billing_months },
+          metadata: {
+            payment_terms_id: terms.id,
+            enrollment_request_id: terms.enrollment_request_id ?? "",
+            program_id: terms.program_id,
+            student_profile_id: terms.student_profile_id,
+          },
+        },
+      ],
+    },
+    stripeRequestOptions,
+  );
+
+  await supabase
+    .from("program_payment_terms")
+    .update({
+      stripe_subscription_schedule_id: updatedSchedule.id,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", terms.id);
+
+  await recordFinanceAuditEvent(supabase, {
+    programId: terms.program_id,
+    studentProfileId: terms.student_profile_id,
+    actorProfileId: null,
+    eventType: "subscription_schedule_created",
+    summary: `Subscription schedule created for ${terms.billing_months} monthly billing period${terms.billing_months === 1 ? "" : "s"}.`,
+    metadata: {
+      paymentTermsId: terms.id,
+      stripeSubscriptionId: subscription.id,
+      stripeSubscriptionScheduleId: updatedSchedule.id,
+      billingMonths: terms.billing_months,
+    },
+  });
+
+  return updatedSchedule.id;
+}
 
 async function notifyProgramManagers(
   supabase: ReturnType<typeof createSupabaseServiceClient>,
@@ -62,6 +155,7 @@ async function upsertPaidEnrollmentFromSession(session: Stripe.Checkout.Session,
   const programId = metadata.program_id;
   const studentProfileId = metadata.student_profile_id;
   const parentProfileId = metadata.parent_profile_id || null;
+  const paymentTermsId = metadata.payment_terms_id || null;
   const paymentType = metadata.payment_type === "annual" ? "annual" : "monthly";
 
   if (!enrollmentRequestId || !mosqueId || !programId || !studentProfileId) {
@@ -69,12 +163,16 @@ async function upsertPaidEnrollmentFromSession(session: Stripe.Checkout.Session,
   }
 
   const supabase = createSupabaseServiceClient();
+  const { data: paymentTerms } = paymentTermsId
+    ? await supabase.from("program_payment_terms").select("*").eq("id", paymentTermsId).maybeSingle()
+    : { data: null };
   const subscriptionId = typeof session.subscription === "string" ? session.subscription : session.subscription?.id ?? null;
   let subscription: Stripe.Subscription | null = null;
   if (subscriptionId) {
     const stripeRequestOptions = shouldUseStripeConnect() && stripeAccountId ? { stripeAccount: stripeAccountId } : undefined;
     subscription = await getStripe().subscriptions.retrieve(subscriptionId, undefined, stripeRequestOptions);
   }
+  const scheduleId = await ensureFixedDurationSchedule(supabase, paymentTerms, subscription, stripeAccountId);
   const period = getSubscriptionPeriod(subscription);
 
   const { data: enrollmentRequest } = await supabase
@@ -92,12 +190,17 @@ async function upsertPaidEnrollmentFromSession(session: Stripe.Checkout.Session,
       parent_profile_id: parentProfileId,
       program_track_id: trackIds[0] ?? enrollmentRequest?.program_track_id ?? null,
       enrollment_request_id: enrollmentRequestId,
+      payment_terms_id: paymentTerms?.id ?? null,
       stripe_account_id: stripeAccountId ?? metadata.stripe_account_id ?? null,
       stripe_customer_id: typeof session.customer === "string" ? session.customer : session.customer?.id ?? null,
       stripe_subscription_id: subscriptionId,
+      stripe_subscription_schedule_id: scheduleId,
       stripe_checkout_session_id: session.id,
       stripe_price_id: subscription?.items.data[0]?.price.id ?? metadata.stripe_price_id ?? null,
       payment_type: paymentType,
+      amount_cents: paymentTerms?.amount_cents ?? null,
+      billing_months: paymentTerms?.billing_months ?? null,
+      currency: paymentTerms?.currency ?? session.currency ?? "cad",
       status: subscription?.status ?? (paymentType === "annual" ? "paid" : "active"),
       current_period_start: period.start,
       current_period_end: period.end,
@@ -130,6 +233,7 @@ async function upsertPaidEnrollmentFromSession(session: Stripe.Checkout.Session,
           parentProfileId,
           stripeChargeId: charge.id,
           stripePaymentIntentId: paymentIntentId,
+          paymentTermsId: paymentTerms?.id ?? null,
           amountCents: charge.amount,
           currency: charge.currency,
           paidAt: new Date(charge.created * 1000).toISOString(),
@@ -145,6 +249,23 @@ async function upsertPaidEnrollmentFromSession(session: Stripe.Checkout.Session,
     studentProfileId,
     fallbackTrackId: enrollmentRequest?.program_track_id ?? null,
   });
+
+  if (paymentTerms) {
+    await supabase
+      .from("program_payment_terms")
+      .update({
+        status: paymentType === "annual" ? "paid" : "active",
+        stripe_customer_id: typeof session.customer === "string" ? session.customer : session.customer?.id ?? null,
+        stripe_checkout_session_id: session.id,
+        stripe_subscription_id: subscriptionId,
+        stripe_subscription_schedule_id: scheduleId,
+        stripe_payment_intent_id: typeof session.payment_intent === "string" ? session.payment_intent : session.payment_intent?.id ?? null,
+        current_period_start: period.start,
+        current_period_end: period.end,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", paymentTerms.id);
+  }
 
   const { data: student } = await supabase.from("profiles").select("full_name, email").eq("id", studentProfileId).maybeSingle();
   const studentLabel = student?.full_name || student?.email || "this student";
@@ -170,6 +291,7 @@ async function updateSubscription(subscription: Stripe.Subscription, stripeAccou
   const metadata = subscription.metadata ?? {};
   const supabase = createSupabaseServiceClient();
   const period = getSubscriptionPeriod(subscription);
+  const scheduleId = typeof subscription.schedule === "string" ? subscription.schedule : subscription.schedule?.id ?? null;
 
   await supabase
     .from("program_subscriptions")
@@ -177,6 +299,7 @@ async function updateSubscription(subscription: Stripe.Subscription, stripeAccou
       status: subscription.status,
       stripe_customer_id: typeof subscription.customer === "string" ? subscription.customer : subscription.customer.id,
       stripe_price_id: subscription.items.data[0]?.price.id ?? null,
+      stripe_subscription_schedule_id: scheduleId,
       current_period_start: period.start,
       current_period_end: period.end,
       cancel_at_period_end: subscription.cancel_at_period_end,
@@ -186,6 +309,22 @@ async function updateSubscription(subscription: Stripe.Subscription, stripeAccou
       updated_at: new Date().toISOString(),
     })
     .eq("stripe_subscription_id", subscription.id);
+
+  const termsId = metadata.payment_terms_id;
+  if (termsId) {
+    await supabase
+      .from("program_payment_terms")
+      .update({
+        status: subscription.status === "past_due" ? "past_due" : subscription.status === "canceled" ? "ended" : "active",
+        stripe_customer_id: typeof subscription.customer === "string" ? subscription.customer : subscription.customer.id,
+        stripe_subscription_id: subscription.id,
+        stripe_subscription_schedule_id: scheduleId,
+        current_period_start: period.start,
+        current_period_end: period.end,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", termsId);
+  }
 }
 
 async function handleInvoicePaid(invoice: Stripe.Invoice) {
@@ -197,7 +336,7 @@ async function handleInvoicePaid(invoice: Stripe.Invoice) {
   const supabase = createSupabaseServiceClient();
   const { data: subscriptionRow } = await supabase
     .from("program_subscriptions")
-    .select("id, mosque_id, program_id, student_profile_id, parent_profile_id")
+    .select("id, mosque_id, program_id, student_profile_id, parent_profile_id, payment_terms_id")
     .eq("stripe_subscription_id", subscriptionId)
     .maybeSingle();
   if (!subscriptionRow?.program_id || !subscriptionRow.student_profile_id) {
@@ -221,11 +360,25 @@ async function handleInvoicePaid(invoice: Stripe.Invoice) {
       studentProfileId: subscriptionRow.student_profile_id,
       parentProfileId: subscriptionRow.parent_profile_id,
       stripeInvoiceId: invoice.id,
+      paymentTermsId: subscriptionRow.payment_terms_id,
       amountCents: invoice.amount_paid,
       currency: invoice.currency,
       paidAt: stripeTimestampToIso(invoice.status_transitions.paid_at) ?? new Date().toISOString(),
       receiptUrl: invoice.hosted_invoice_url ?? invoice.invoice_pdf ?? null,
     });
+  }
+
+  if (subscriptionRow.payment_terms_id) {
+    await supabase
+      .from("program_payment_terms")
+      .update({
+        status: "active",
+        stripe_invoice_id: invoice.id,
+        current_period_start: stripeTimestampToIso(invoice.period_start),
+        current_period_end: stripeTimestampToIso(invoice.period_end),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", subscriptionRow.payment_terms_id);
   }
 
   const { data: student } = await supabase.from("profiles").select("full_name, email").eq("id", subscriptionRow.student_profile_id).maybeSingle();
@@ -254,7 +407,7 @@ async function handleInvoicePaymentFailed(invoice: Stripe.Invoice) {
   const supabase = createSupabaseServiceClient();
   const { data: subscriptionRow } = await supabase
     .from("program_subscriptions")
-    .select("id, program_id, student_profile_id")
+    .select("id, program_id, student_profile_id, payment_terms_id")
     .eq("stripe_subscription_id", subscriptionId)
     .maybeSingle();
   if (!subscriptionRow?.program_id || !subscriptionRow.student_profile_id) {
@@ -276,6 +429,30 @@ async function handleInvoicePaymentFailed(invoice: Stripe.Invoice) {
     title: "Payment failed",
     body: `A payment from ${studentLabel} failed. Billing will show as past due.`,
   });
+
+  if (subscriptionRow.payment_terms_id) {
+    await supabase
+      .from("program_payment_terms")
+      .update({ status: "past_due", updated_at: new Date().toISOString() })
+      .eq("id", subscriptionRow.payment_terms_id);
+  }
+}
+
+async function updateSubscriptionSchedule(schedule: Stripe.SubscriptionSchedule) {
+  const termsId = schedule.metadata?.payment_terms_id;
+  if (!termsId) {
+    return;
+  }
+  const supabase = createSupabaseServiceClient();
+  const nextStatus = schedule.status === "completed" ? "ended" : schedule.status === "canceled" ? "cancelled" : null;
+  await supabase
+    .from("program_payment_terms")
+    .update({
+      stripe_subscription_schedule_id: schedule.id,
+      ...(nextStatus ? { status: nextStatus } : {}),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", termsId);
 }
 
 export async function POST(request: Request) {
@@ -310,6 +487,10 @@ export async function POST(request: Request) {
 
     if (event.type === "invoice.payment_failed") {
       await handleInvoicePaymentFailed(event.data.object as Stripe.Invoice);
+    }
+
+    if (event.type.startsWith("subscription_schedule.")) {
+      await updateSubscriptionSchedule(event.data.object as Stripe.SubscriptionSchedule);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Stripe webhook handling failed.";
