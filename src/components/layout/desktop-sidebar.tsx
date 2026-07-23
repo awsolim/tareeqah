@@ -580,11 +580,11 @@ function isHrefActive(pathname: string, searchParams: SearchParamReader, href: s
 }
 
 function Badge({ count, actionRequired = false }: { count?: number; actionRequired?: boolean }) {
+  if (actionRequired) {
+    return <span className="h-3 w-3 rounded-full bg-[#2F8FB3]" />;
+  }
   if (count) {
     return <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-[#E25241] px-1 text-[11px] font-semibold leading-none text-white">{count > 9 ? "9+" : count}</span>;
-  }
-  if (actionRequired) {
-    return <span className="h-2.5 w-2.5 rounded-full bg-[#2F8FB3]" />;
   }
   return null;
 }

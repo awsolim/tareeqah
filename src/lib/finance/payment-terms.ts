@@ -2,7 +2,6 @@ import "server-only";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/types";
-import { recordFinanceAuditEvent } from "@/lib/finance/audit";
 
 type SupaClient = SupabaseClient<Database>;
 type EnrollmentRequestRow = Database["public"]["Tables"]["enrollment_requests"]["Row"];
@@ -115,21 +114,6 @@ export async function createApprovedPaymentTerms(supabase: SupaClient, input: Ap
       payment_bypass_external: Boolean(input.paymentBypassedExternal),
     })
     .eq("id", input.enrollmentRequest.id);
-
-  await recordFinanceAuditEvent(supabase, {
-    programId: input.enrollmentRequest.program_id,
-    studentProfileId: input.enrollmentRequest.student_profile_id,
-    actorProfileId: input.actorProfileId,
-    eventType: "payment_terms_created",
-    summary: "Approved payment terms were created for this student.",
-    metadata: {
-      paymentTermsId: terms.id,
-      paymentType,
-      amountCents: amountCents ?? null,
-      billingMonths: terms.billing_months,
-      billingEndBehavior: terms.billing_end_behavior,
-    },
-  });
 
   return terms;
 }

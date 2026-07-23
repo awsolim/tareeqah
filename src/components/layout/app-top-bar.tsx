@@ -196,15 +196,15 @@ function isNavItemActive(pathname: string, item: NavItem) {
 }
 
 function NavBadge({ count, actionRequired = false }: { count?: number; actionRequired?: boolean }) {
+  if (actionRequired) {
+    return <span className="absolute -right-1 -top-1 h-3 w-3 rounded-full bg-[#2F8FB3] ring-2 ring-white" />;
+  }
   if (count) {
     return (
       <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-[#E25241] px-1 text-[11px] font-semibold leading-none text-white shadow-[0_4px_10px_rgba(226,82,65,0.35)] ring-2 ring-white">
         {count > 9 ? "9+" : count}
       </span>
     );
-  }
-  if (actionRequired) {
-    return <span className="absolute -right-1 -top-1 h-3 w-3 rounded-full bg-[#2F8FB3] ring-2 ring-white" />;
   }
   return null;
 }

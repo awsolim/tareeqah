@@ -10,7 +10,7 @@ import type { Dispatch, PointerEvent as ReactPointerEvent, ReactNode, RefObject,
 import { useEffect, useMemo, useRef, useState } from "react";
 import { EmptyState } from "@/components/data/empty-state";
 import { FlatLink } from "@/components/ui/flat-button";
-import { getAccountLabel, getDefaultLandingHref } from "@/lib/authz";
+import { getAccountLabel, getDefaultLandingHref, loadUserAccessByMosqueSlug } from "@/lib/authz";
 import { clearUserScopedCaches, loadCachedSession, loadCachedUserAccess, performClientLogout, setCachedProfileName, setCachedProfileSummary, setCachedSessionSnapshot } from "@/lib/client-cache";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import type { Database, Json } from "@/lib/supabase/types";
@@ -437,6 +437,7 @@ type RequestWithContext = EnrollmentRequest & {
   student?: StudentDisplay | null;
   parent?: ParentDisplay | null;
   track?: ProgramTrack | null;
+  subscription?: ProgramSubscription | null;
 };
 type WithdrawalRequestWithContext = WithdrawalRequest & {
   program?: Program | null;
@@ -737,11 +738,10 @@ function teacherRequestNotificationKey(request: Pick<EnrollmentRequest, "id" | "
   if (request.admission_completed_at) {
     return ["admission-complete", request.id, request.admission_completed_at].join(":");
   }
-  // Folding status + reviewed_at into the key (mirroring studentRequestNotificationKey) means a
-  // decision made anywhere (inbox or the Applications table) always mints a fresh, never-seen
-  // key the moment status flips — so a resolved application surfaces as unread automatically,
-  // with no need for the approve/reject/waitlist API routes to touch notification state at all.
-  return ["application", request.id, request.status, request.reviewed_at ?? request.requested_at ?? ""].join(":");
+  // Keep the teacher-side application key stable across approval/rejection/waitlist decisions.
+  // A new application stays unread until opened, but a director decision should not create a
+  // second unread notification for the same request.
+  return ["application", request.id].join(":");
 }
 
 function teacherInstructorNotificationKey(notification: Pick<InstructorLifecycleNotification, "id" | "event_type" | "teacher_profile_id">) {
@@ -1157,9 +1157,36 @@ export function StudentHomeData({ slug }: { slug: string }) {
 }
 
 export function PublicProgramsData({ slug }: { slug: string }) {
+  const router = useRouter();
   const { mosque, programs, loading, error } = useMosquePrograms(slug);
+  const [checkingSignedInRedirect, setCheckingSignedInRedirect] = useState(true);
 
-  if (loading) {
+  useEffect(() => {
+    let active = true;
+    async function redirectSignedInAccounts() {
+      const session = await loadCachedSession();
+      if (!active) {
+        return;
+      }
+      if (!session?.user.id) {
+        setCheckingSignedInRedirect(false);
+        return;
+      }
+      const access = await loadUserAccessByMosqueSlug(slug);
+      if (!active) {
+        return;
+      }
+      const landing = getDefaultLandingHref(slug, access);
+      router.replace(access.accountType?.toLowerCase() === "teacher" ? `${landing}/classes` : access.accountType?.toLowerCase() === "admin" ? `${landing}/programs` : `${landing}/classes`);
+    }
+
+    void redirectSignedInAccounts();
+    return () => {
+      active = false;
+    };
+  }, [router, slug]);
+
+  if (checkingSignedInRedirect || loading) {
     return <DirectorySkeleton />;
   }
 
@@ -3816,6 +3843,9 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
   const [paymentNotice, setPaymentNotice] = useState<"success" | "cancelled" | null>(null);
   const [protectedClear, setProtectedClear] = useState<{ mode: "single" | "all"; requestIds: string[]; count: number } | null>(null);
   const [toast, setToast] = useState<EditorToastState | null>(null);
+  const [applicationDetailsRow, setApplicationDetailsRow] = useState<ApplicantApplicationRow | null>(null);
+  const [cancelRegistrationTarget, setCancelRegistrationTarget] = useState<ApplicantApplicationRow | null>(null);
+  const [cancelRegistrationBusy, setCancelRegistrationBusy] = useState(false);
   const [paymentConfirming, setPaymentConfirming] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -3994,7 +4024,9 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
     const requestStudentIds = Array.from(new Set((requestRows ?? []).map((request) => request.student_profile_id)));
     const withdrawalStudentIds = Array.from(new Set((withdrawalRows ?? []).map((request) => request.student_profile_id)));
     const noteStudentIds = Array.from(new Set(noteRows.map((note) => note.student_profile_id)));
-    const [{ data: programs }, { data: requestStudents }, { data: noteStudents }] = await Promise.all([
+    const requestIds = (requestRows ?? []).map((request) => request.id);
+    const requestParentIds = Array.from(new Set((requestRows ?? []).map((request) => request.parent_profile_id).filter(Boolean))) as string[];
+    const [{ data: programs }, { data: requestStudents }, { data: noteStudents }, { data: requestParents }, { data: requestTrackLinkRows }, { data: programTrackRows }, { data: requestSubscriptions }] = await Promise.all([
       knownProgramIds.length ? supabase.from("programs").select("*").in("id", knownProgramIds) : Promise.resolve({ data: [] as Program[] }),
       [...requestStudentIds, ...withdrawalStudentIds].length
         ? supabase.from("profiles").select("id, full_name, email, phone_number, avatar_url, age, gender, date_of_birth, account_type").in("id", Array.from(new Set([...requestStudentIds, ...withdrawalStudentIds])))
@@ -4002,7 +4034,15 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
       noteStudentIds.length
         ? supabase.from("profiles").select("id, full_name, email, phone_number, avatar_url, age, gender, date_of_birth, account_type").in("id", noteStudentIds)
         : Promise.resolve({ data: [] as StudentDisplay[] }),
+      requestParentIds.length ? supabase.from("profiles").select("id, full_name, email, phone_number, avatar_url").in("id", requestParentIds) : Promise.resolve({ data: [] as ParentDisplay[] }),
+      requestIds.length ? supabase.from("enrollment_request_tracks").select("enrollment_request_id, program_track_id").in("enrollment_request_id", requestIds) : Promise.resolve({ data: [] as Array<{ enrollment_request_id: string; program_track_id: string }> }),
+      knownProgramIds.length ? supabase.from("program_tracks").select("*").in("program_id", knownProgramIds).eq("is_active", true).order("sort_order", { ascending: true }) : Promise.resolve({ data: [] as ProgramTrack[] }),
+      requestStudentIds.length ? supabase.from("program_subscriptions").select("*").in("program_id", knownProgramIds).in("student_profile_id", requestStudentIds) : Promise.resolve({ data: [] as ProgramSubscription[] }),
     ]);
+    const requestTrackIdsByRequestId = new Map<string, string[]>();
+    for (const linkRow of requestTrackLinkRows ?? []) {
+      requestTrackIdsByRequestId.set(linkRow.enrollment_request_id, [...(requestTrackIdsByRequestId.get(linkRow.enrollment_request_id) ?? []), linkRow.program_track_id]);
+    }
     const childProfiles = isParent ? [...children, ...((requestStudents ?? []) as StudentDisplay[])] : ((requestStudents ?? []) as StudentDisplay[]);
     const enrolledProgramSet = new Set(enrolledProgramIds);
     setEnrolledProgramsForInbox((programs ?? []).filter((program) => enrolledProgramSet.has(program.id)));
@@ -4012,6 +4052,9 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
         ...request,
         program: (programs ?? []).find((program) => program.id === request.program_id) ?? null,
         student: childProfiles.find((student) => student.id === request.student_profile_id) ?? null,
+        parent: request.parent_profile_id ? ((requestParents ?? []).find((parent) => parent.id === request.parent_profile_id) as ParentDisplay | undefined) ?? null : null,
+        track: resolveRequestTrack(request, requestTrackIdsByRequestId, programTrackRows ?? []),
+        subscription: (requestSubscriptions ?? []).find((subscription) => subscription.program_id === request.program_id && subscription.student_profile_id === request.student_profile_id) ?? null,
       })),
     );
     setStudentWithdrawals(
@@ -4144,6 +4187,24 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
       return;
     }
     await dismissRequests([requestId]);
+  }
+
+  async function confirmCancelRegistrationFromApplication() {
+    if (!cancelRegistrationTarget?.program) {
+      return;
+    }
+    setCancelRegistrationBusy(true);
+    const result = await callApplicationAction(cancelRegistrationTarget.program.id, cancelRegistrationTarget.request.id, "cancel-registration", {});
+    setCancelRegistrationBusy(false);
+    if (!result.ok) {
+      setToast({ tone: "error", message: result.error });
+      return;
+    }
+    setToast({ tone: "success", message: "Registration cancelled." });
+    setCancelRegistrationTarget(null);
+    setApplicationDetailsRow(null);
+    window.dispatchEvent(new Event("tareeqah:notifications-changed"));
+    await loadInbox();
   }
 
   async function clearAllReturnedRequests() {
@@ -4544,7 +4605,7 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
                     <StudentRequestCard
                       key={request.id}
                       request={request}
-                      completeRegistrationHref={request.status === "approved" && !request.admission_completed_at ? `/m/${slug}/registration/${request.id}?returnTo=${encodeURIComponent(`/m/${slug}/portal/announcements`)}` : undefined}
+                      onViewApplication={request.status === "approved" && !request.admission_completed_at ? () => setApplicationDetailsRow(applicantRowFromRequest(request)) : undefined}
                       viewClassHref={request.status === "approved" && request.admission_completed_at ? `/m/${slug}/portal/classes/${request.program_id}` : undefined}
                       onDismiss={() => dismissRequest(request.id)}
                     />
@@ -4572,6 +4633,29 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
         />
       ) : null}
       {paymentConfirming ? <PaymentConfirmingModal /> : null}
+      {applicationDetailsRow ? (
+        <ApplicantDetailsDrawer
+          row={applicationDetailsRow}
+          slug={slug}
+          returnTo={`/m/${slug}/portal/announcements`}
+          onClose={() => setApplicationDetailsRow(null)}
+          onRescind={() => null}
+          onCancelRegistration={() => setCancelRegistrationTarget(applicationDetailsRow)}
+        />
+      ) : null}
+      {cancelRegistrationTarget ? (
+        <ConfirmStudentRescindModal
+          mode="cancel_registration"
+          request={{ ...cancelRegistrationTarget.request, student: cancelRegistrationTarget.student, parent: cancelRegistrationTarget.request.parent_profile_id ? cancelRegistrationTarget.parent ?? null : null, program: cancelRegistrationTarget.program, track: cancelRegistrationTarget.track }}
+          busy={cancelRegistrationBusy}
+          onCancel={() => {
+            if (!cancelRegistrationBusy) {
+              setCancelRegistrationTarget(null);
+            }
+          }}
+          onConfirm={() => void confirmCancelRegistrationFromApplication()}
+        />
+      ) : null}
       {protectedClear ? (
         <ProtectedPaidApplicationClearModal
           count={protectedClear.count}
@@ -4644,29 +4728,34 @@ function useModalFocusTrap<T extends HTMLElement>(containerRef: RefObject<T | nu
 function ConfirmStudentRescindModal({
   request,
   busy,
+  mode = "rescind",
   onCancel,
   onConfirm,
 }: {
   request: RequestWithContext;
   busy: boolean;
+  mode?: "rescind" | "cancel_registration";
   onCancel: () => void;
   onConfirm: () => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   useModalFocusTrap(containerRef, true, onCancel);
+  const isCancelRegistration = mode === "cancel_registration";
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#26323A]/35 px-5 backdrop-blur-sm">
       <div ref={containerRef} role="dialog" aria-modal="true" tabIndex={-1} className="w-full max-w-sm rounded-[28px] bg-white p-6 text-[#26323A] shadow-[0_24px_60px_rgba(38,50,58,0.22)] outline-none">
         <div className="flex h-14 w-14 items-center justify-center rounded-full bg-[#FFF2EF] text-[#C84B3E]">
           <XIcon />
         </div>
-        <h2 className="mt-4 text-xl font-semibold">Rescind application?</h2>
+        <h2 className="mt-4 text-xl font-semibold">{isCancelRegistration ? "Cancel registration?" : "Rescind application?"}</h2>
         <p className="mt-2 text-sm leading-6 text-[#6B747B]">
-          This will cancel the pending application for {request.student?.full_name ?? "this student"} in {request.program?.title ?? "this class"}.
+          {isCancelRegistration
+            ? `This will cancel the approved registration for ${request.student?.full_name ?? "this student"} in ${request.program?.title ?? "this class"}.`
+            : `This will cancel the pending application for ${request.student?.full_name ?? "this student"} in ${request.program?.title ?? "this class"}.`}
         </p>
         <div className="mt-6 grid gap-2">
           <button type="button" onClick={onConfirm} disabled={busy} className="min-h-11 rounded-[8px] bg-[#26323A] px-4 text-sm font-semibold text-white disabled:opacity-60">
-            {busy ? "Rescinding..." : "Rescind application"}
+            {busy ? (isCancelRegistration ? "Cancelling..." : "Rescinding...") : isCancelRegistration ? "Cancel registration" : "Rescind application"}
           </button>
           <button type="button" onClick={onCancel} disabled={busy} className="min-h-11 rounded-[8px] bg-[#EEF3F5] px-4 text-sm font-semibold text-[#52616A] disabled:opacity-60">
             Cancel
@@ -5273,14 +5362,9 @@ export function TeacherInboxData({ slug }: { slug: string }) {
   const otherUnreadCount = otherInboxItems.filter((item) => item.unread).length;
 
   function openInboxItem(item: TeacherInboxMessageItem) {
-    // Action-required items must stay visually unread until the underlying action is actually
-    // resolved — merely opening one to review/decide must not mark it read (it'd otherwise dim
-    // out while still needing a decision). Once resolved, the notification key changes (see
-    // teacherRequestNotificationKey/studentWithdrawalNotificationKey/trackSwitchNotificationKey),
-    // so the item naturally re-surfaces as unread and only clears on this same click-to-open path.
-    if (!item.requiresAction) {
-      markSeenOptimistically([item.key]);
-    }
+    // Read/unread is separate from "requires action": opening marks the item read, while the
+    // pending underlying request keeps the row active and keeps the nav/home attention state.
+    markSeenOptimistically([item.key]);
     if (item.kind === "application") {
       window.dispatchEvent(new CustomEvent("tareeqah:nav-preview", { detail: { fromPath: pathname, kind: "subpage" } }));
       setReviewTarget({ programId: item.request.program_id, requestId: item.request.id });
@@ -5408,7 +5492,8 @@ export function TeacherAnnouncementData({ slug, programId }: { slug: string; pro
   const [announcements, setAnnouncements] = useState<AnnouncementWithContext[]>([]);
   const [readersByAnnouncementId, setReadersByAnnouncementId] = useState<Record<string, Profile[]>>({});
   const [message, setMessage] = useState("");
-  const [selectedAnnouncementTargetValue, setSelectedAnnouncementTargetValue] = useState(announcementTargetValue(programId, null));
+  const [selectedAnnouncementFeedValue, setSelectedAnnouncementFeedValue] = useState(announcementTargetValue(programId, null));
+  const [selectedAnnouncementTrackIds, setSelectedAnnouncementTrackIds] = useState<string[]>([]);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -5476,11 +5561,16 @@ export function TeacherAnnouncementData({ slug, programId }: { slug: string; pro
     const activeTracks = trackRows ?? [];
     setProgram(programRow);
     setTracks(activeTracks);
-    setSelectedAnnouncementTargetValue((current) => {
+    setSelectedAnnouncementFeedValue((current) => {
       const target = parseAnnouncementTargetValue(current);
       return target.programId === programRow.id && (!target.trackId || activeTracks.some((track) => track.id === target.trackId))
         ? current
         : announcementTargetValue(programRow.id, null);
+    });
+    setSelectedAnnouncementTrackIds((current) => {
+      const activeTrackIds = activeTracks.map((track) => track.id);
+      const next = current.filter((trackId) => activeTrackIds.includes(trackId));
+      return next.length ? next : activeTrackIds;
     });
     setReadersByAnnouncementId(nextReaders);
     setAnnouncements(
@@ -5506,8 +5596,11 @@ export function TeacherAnnouncementData({ slug, programId }: { slug: string; pro
       return;
     }
 
-    const target = parseAnnouncementTargetValue(selectedAnnouncementTargetValue || announcementTargetValue(program.id, null));
-    const targetTrackIds = target.trackId ? [target.trackId] : [];
+    const allTrackIds = tracks.map((track) => track.id);
+    const targetTrackIds =
+      selectedAnnouncementTrackIds.length && selectedAnnouncementTrackIds.length < allTrackIds.length
+        ? selectedAnnouncementTrackIds.filter((trackId) => allTrackIds.includes(trackId))
+        : [];
 
     const supabase = createSupabaseBrowserClient();
     const { data: inserted, error: insertError } = await supabase
@@ -5527,7 +5620,7 @@ export function TeacherAnnouncementData({ slug, programId }: { slug: string; pro
     }
 
     setMessage("");
-    setSelectedAnnouncementTargetValue(announcementTargetValue(program.id, null));
+    setSelectedAnnouncementTrackIds(tracks.map((track) => track.id));
     window.dispatchEvent(new Event("tareeqah:notifications-changed"));
     if (inserted) {
       void notifyAnnouncementPosted(program.id, inserted.id);
@@ -5543,6 +5636,14 @@ export function TeacherAnnouncementData({ slug, programId }: { slug: string; pro
     return <EmptyState title="Could not load announcements" text={error} onRetry={() => window.location.reload()} />;
   }
 
+  const feedTarget = parseAnnouncementTargetValue(selectedAnnouncementFeedValue);
+  const visibleAnnouncements = feedTarget.trackId
+    ? announcements.filter((announcement) => {
+        const targetTrackIds = getAnnouncementTargetTrackIds(announcement);
+        return targetTrackIds.length === 0 || targetTrackIds.includes(feedTarget.trackId as string);
+      })
+    : announcements;
+
   return (
     <section className="space-y-4 bg-[var(--workspace)] p-4">
       {program ? (
@@ -5552,35 +5653,72 @@ export function TeacherAnnouncementData({ slug, programId }: { slug: string; pro
           <p className="mt-1 text-sm text-[#6B747B]">{scheduleSummary(program.schedule, program.schedule_notes).full}</p>
         </div>
       ) : null}
-      <div>
-        <label className="block text-xs font-semibold uppercase tracking-wide text-[#6B747B]">Send to</label>
-        <select
-          value={selectedAnnouncementTargetValue}
-          onChange={(event) => setSelectedAnnouncementTargetValue(event.target.value)}
-          className="mt-2 h-11 w-full border border-[#B9C3C8] bg-white px-3 text-sm text-[#26323A] outline-none focus:border-[#2F8FB3]"
-        >
-          {program ? <option value={announcementTargetValue(program.id, null)}>{announcementTargetLabel(program, null)}</option> : null}
-          {program
-            ? tracks.map((track) => (
-                <option key={track.id} value={announcementTargetValue(program.id, track.id)}>
-                  {announcementTargetLabel(program, track)}
-                </option>
-              ))
-            : null}
-        </select>
+      <div className="rounded-[24px] border border-[#E1E8EC] bg-white p-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">Previous Announcements</p>
+            <h3 className="mt-1 text-lg font-semibold text-[#26323A]">Feed</h3>
+          </div>
+          <select
+            value={selectedAnnouncementFeedValue}
+            onChange={(event) => setSelectedAnnouncementFeedValue(event.target.value)}
+            className="h-10 min-w-0 rounded-full border border-[#D6DCE0] bg-white px-3 text-xs font-semibold text-[#52616A] outline-none focus:border-[#2F8FB3]"
+          >
+            {program ? <option value={announcementTargetValue(program.id, null)}>All tracks</option> : null}
+            {program
+              ? tracks.map((track) => (
+                  <option key={track.id} value={announcementTargetValue(program.id, track.id)}>
+                    {track.name}
+                  </option>
+                ))
+              : null}
+          </select>
+        </div>
+        <div className="mt-4">
+          <ProgramAnnouncementFeed program={program} announcements={visibleAnnouncements} readersByAnnouncementId={readersByAnnouncementId} viewer="teacher" />
+        </div>
+      </div>
+      <div className="rounded-[24px] border border-[#E1E8EC] bg-white p-4">
+        <p className="text-xs font-semibold uppercase tracking-wide text-[#6B747B]">New Announcement</p>
+        <h3 className="mt-1 text-lg font-semibold text-[#26323A]">Compose</h3>
+        {tracks.length ? (
+          <div className="mt-3 rounded-[18px] bg-[#F7FAFB] p-2">
+            <div className="mb-2 grid grid-cols-2 gap-1.5">
+              <button type="button" onClick={() => setSelectedAnnouncementTrackIds(tracks.map((track) => track.id))} className="min-h-8 rounded-[10px] bg-[#EAF7F1] px-2 text-xs font-semibold text-[#17624F]">
+                Select all
+              </button>
+              <button type="button" onClick={() => setSelectedAnnouncementTrackIds([])} className="min-h-8 rounded-[10px] bg-[#EEF2F4] px-2 text-xs font-semibold text-[#52616A]">
+                Deselect all
+              </button>
+            </div>
+            <div className="grid gap-1">
+              {tracks.map((track) => (
+                <RosterTrackOption
+                  key={track.id}
+                  checked={selectedAnnouncementTrackIds.includes(track.id)}
+                  label={track.name}
+                  onClick={() =>
+                    setSelectedAnnouncementTrackIds((current) =>
+                      current.includes(track.id) ? current.filter((trackId) => trackId !== track.id) : [...current, track.id],
+                    )
+                  }
+                />
+              ))}
+            </div>
+          </div>
+        ) : null}
         <textarea
           value={message}
           onChange={(event) => setMessage(event.target.value)}
           placeholder="Write an announcement..."
-          className="mt-3 min-h-24 w-full resize-none border border-[#B9C3C8] bg-white px-3 py-2 text-sm text-[#26323A] outline-none focus:border-[#2F8FB3]"
+          className="mt-3 min-h-24 w-full resize-none rounded-[16px] border border-[#B9C3C8] bg-white px-3 py-2 text-sm text-[#26323A] outline-none focus:border-[#2F8FB3]"
         />
         <div className="mt-2 flex justify-end">
-          <button type="button" onClick={sendAnnouncement} className="inline-flex min-h-10 items-center justify-center rounded-lg bg-[#17624F] px-5 text-sm font-semibold text-white hover:bg-[#0F4537]">
+          <button type="button" onClick={sendAnnouncement} disabled={tracks.length > 0 && selectedAnnouncementTrackIds.length === 0} className="inline-flex min-h-10 items-center justify-center rounded-lg bg-[#17624F] px-5 text-sm font-semibold text-white hover:bg-[#0F4537] disabled:opacity-50">
             Send
           </button>
         </div>
       </div>
-      <ProgramAnnouncementFeed program={program} announcements={announcements} readersByAnnouncementId={readersByAnnouncementId} viewer="teacher" />
     </section>
   );
 }
@@ -6525,7 +6663,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
   const [previewOpen, setPreviewOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const thumbnailInputRef = useRef<HTMLInputElement | null>(null);
-  const pricingDurationMonths = builderStatus.durationType === "fixed_months" ? String(monthsBetweenDates(builderStatus.startDate, builderStatus.endDate) ?? builderStatus.durationMonths) : builderStatus.billingDurationMonths;
+  const pricingDurationMonths = builderStatus.billingDurationMonths || (builderStatus.durationType === "fixed_months" ? String(builderStatus.durationMonths || monthsBetweenDates(builderStatus.startDate, builderStatus.endDate) || "") : "");
 
   useEffect(() => {
     async function loadDefaults() {
@@ -7188,7 +7326,11 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
                   }}
                   className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]"
                 />
-                <p className="mt-1 text-xs leading-5 text-[#7B858C]">How many times a monthly subscription will charge each enrolled student. Suggested from the program dates — change if you want a different number.</p>
+                <BillingMonthsHint
+                  startDate={builderStatus.startDate}
+                  endDate={builderStatus.endDate}
+                  chosenMonths={builderStatus.billingDurationMonths}
+                />
               </label>
             ) : builderStatus.paymentKind === "tareeqah" && builderStatus.durationType === "ongoing" && builderStatus.programType !== "event" && offersMonthlyPayment ? (
               <label className="block">
@@ -7459,7 +7601,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
   const loadedDirectorRef = useRef<string | null>(null);
   const startDateChangeModalRef = useRef<HTMLDivElement>(null);
   useModalFocusTrap(startDateChangeModalRef, startDateChangeConfirmOpen, () => setStartDateChangeConfirmOpen(false));
-  const pricingDurationMonths = builderStatus.durationType === "fixed_months" ? String(monthsBetweenDates(builderStatus.startDate, builderStatus.endDate) ?? builderStatus.durationMonths) : builderStatus.billingDurationMonths;
+  const pricingDurationMonths = builderStatus.billingDurationMonths || (builderStatus.durationType === "fixed_months" ? String(builderStatus.durationMonths || monthsBetweenDates(builderStatus.startDate, builderStatus.endDate) || "") : "");
 
   useEffect(() => {
     const supabase = createSupabaseBrowserClient();
@@ -8269,7 +8411,11 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
                   }}
                   className="h-10 w-full rounded-[8px] border border-[#B9C3C8] bg-white px-3 text-sm font-medium text-[#26323A] outline-none focus:border-[#2F8FB3]"
                 />
-                <p className="mt-1 text-xs leading-5 text-[#7B858C]">How many times a monthly subscription will charge each enrolled student. Suggested from the program dates — change if you want a different number.</p>
+                <BillingMonthsHint
+                  startDate={builderStatus.startDate}
+                  endDate={builderStatus.endDate}
+                  chosenMonths={builderStatus.billingDurationMonths}
+                />
               </label>
             ) : builderStatus.paymentKind === "tareeqah" && builderStatus.durationType === "ongoing" && builderStatus.programType !== "event" && offersMonthlyPayment ? (
               <label className="block">
@@ -10561,7 +10707,7 @@ function ProgramEditorFields({
                   {offersAnnualPayment && !perTrackPricingEnabled ? (
                     <div className="space-y-2">
                       <EditBox label="Pay in Full price" required value={annualPrice} onChange={setAnnualPrice} />
-                      {formatAnnualSavings(price, annualPrice, durationMonthsForPricing) ? <p className="inline-flex rounded-full bg-[#E9F4F8] px-3 py-1 text-xs font-semibold text-[#2F6077]">{formatAnnualSavings(price, annualPrice, durationMonthsForPricing)}</p> : null}
+                      {offersMonthlyPayment && formatAnnualSavings(price, annualPrice, durationMonthsForPricing) ? <p className="inline-flex rounded-full bg-[#E9F4F8] px-3 py-1 text-xs font-semibold text-[#2F6077]">{formatAnnualSavings(price, annualPrice, durationMonthsForPricing)}</p> : null}
                     </div>
                   ) : null}
                 </>
@@ -10593,7 +10739,7 @@ function ProgramEditorFields({
                               value={track.priceAnnual ?? ""}
                               onChange={(value) => setTrackRows((current) => current.map((item) => item.id === track.id ? { ...item, priceAnnual: value, pricingOverrideEnabled: true } : item))}
                             />
-                            {formatAnnualSavings(track.priceMonthly ?? "", track.priceAnnual ?? "", durationMonthsForPricing) ? <p className="inline-flex rounded-full bg-[#E9F4F8] px-3 py-1 text-xs font-semibold text-[#2F6077]">{formatAnnualSavings(track.priceMonthly ?? "", track.priceAnnual ?? "", durationMonthsForPricing)}</p> : null}
+                            {offersMonthlyPayment && formatAnnualSavings(track.priceMonthly ?? "", track.priceAnnual ?? "", durationMonthsForPricing) ? <p className="inline-flex rounded-full bg-[#E9F4F8] px-3 py-1 text-xs font-semibold text-[#2F6077]">{formatAnnualSavings(track.priceMonthly ?? "", track.priceAnnual ?? "", durationMonthsForPricing)}</p> : null}
                           </div>
                         ) : null}
                       </div>
@@ -11222,6 +11368,7 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
   const [program, setProgram] = useState<Program | null>(null);
   const [students, setStudents] = useState<Array<{ enrollment: Enrollment; profile: StudentDisplay | null; parent?: ParentDisplay | null; subscription?: ProgramSubscription | null; trackIds: string[] }>>([]);
   const [tracks, setTracks] = useState<ProgramTrack[]>([]);
+  const [trackDaysById, setTrackDaysById] = useState<Map<string, string[]>>(new Map());
   const [selectedRosterTrackIds, setSelectedRosterTrackIds] = useState<string[]>(() => (sessionTrackIdParam ? [sessionTrackIdParam] : []));
   const [selectedRosterDays, setSelectedRosterDays] = useState<string[]>(() => (sessionDayParam ? [sessionDayParam] : [...scheduleDayOptions]));
   const [sessionFilterActive, setSessionFilterActive] = useState(Boolean(sessionTrackIdParam || sessionDayParam));
@@ -11308,6 +11455,27 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
       return;
     }
 
+    const activeTrackRows = trackRows ?? [];
+    const activeTrackIds = activeTrackRows.map((track) => track.id);
+    const [{ data: sessionRows }, { data: trackSessionRows }] = await Promise.all([
+      supabase.from("program_sessions").select("*").eq("program_id", programData.id),
+      activeTrackIds.length
+        ? supabase.from("program_track_sessions").select("*").in("program_track_id", activeTrackIds)
+        : Promise.resolve({ data: [] as ProgramTrackSession[] }),
+    ]);
+    const sessionById = new Map((sessionRows ?? []).map((session) => [session.id, session]));
+    const nextTrackDaysById = new Map<string, string[]>();
+    for (const track of activeTrackRows) {
+      const linkedDays = (trackSessionRows ?? [])
+        .filter((link) => link.program_track_id === track.id)
+        .map((link) => sessionById.get(link.program_session_id))
+        .filter((session): session is ProgramSession => Boolean(session))
+        .map((session) => scheduleRowFromProgramSession(session).day);
+      const fallbackDays = parseProgramSchedule(track.schedule).map((row) => row.day);
+      nextTrackDaysById.set(track.id, Array.from(new Set(linkedDays.length ? linkedDays : fallbackDays)));
+    }
+    const availableRosterDays = Array.from(new Set(Array.from(nextTrackDaysById.values()).flat()));
+
     const studentIds = Array.from(new Set([...(enrollmentRows ?? []).map((enrollment) => enrollment.student_profile_id), ...(waitlistRows ?? []).map((request) => request.student_profile_id)]));
     const enrollmentIds = (enrollmentRows ?? []).map((enrollment) => enrollment.id);
     const [{ data: enrollmentTrackRows }, { data: subscriptionRows }] = await Promise.all([
@@ -11335,11 +11503,22 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
 
     setMosque(mosqueData);
     setProgram(programData);
-    setTracks(trackRows ?? []);
+    setTracks(activeTrackRows);
+    setTrackDaysById(nextTrackDaysById);
     setSelectedRosterTrackIds((current) => {
-      const availableTrackIds = new Set((trackRows ?? []).map((track) => track.id));
+      const availableTrackIds = new Set(activeTrackRows.map((track) => track.id));
       const next = current.filter((trackId) => availableTrackIds.has(trackId));
-      return next.length ? next : (trackRows ?? []).map((track) => track.id);
+      return next.length ? next : activeTrackRows.map((track) => track.id);
+    });
+    setSelectedRosterDays((current) => {
+      const next = current.filter((day) => availableRosterDays.includes(day));
+      if (next.length) {
+        return next;
+      }
+      if (sessionDayParam && availableRosterDays.includes(sessionDayParam)) {
+        return [sessionDayParam];
+      }
+      return availableRosterDays.length ? availableRosterDays : [...scheduleDayOptions];
     });
     setStudents(
       (enrollmentRows ?? []).map((enrollment) => ({
@@ -11473,10 +11652,14 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
   const trackDayMap = useMemo(() => {
     const map = new Map<string, string[]>();
     for (const track of tracks) {
-      map.set(track.id, parseProgramSchedule(track.schedule).map((row) => row.day));
+      map.set(track.id, trackDaysById.get(track.id) ?? parseProgramSchedule(track.schedule).map((row) => row.day));
     }
     return map;
-  }, [tracks]);
+  }, [trackDaysById, tracks]);
+  const rosterDayOptions = useMemo(() => {
+    const days = Array.from(new Set(Array.from(trackDayMap.values()).flat()));
+    return scheduleDayOptions.filter((day) => days.includes(day));
+  }, [trackDayMap]);
 
   const filteredStudents = useMemo(() => {
     const query = studentSearch.trim().toLowerCase();
@@ -11496,7 +11679,8 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
         }
         const dayMatches =
           tracks.length === 0 ||
-          selectedRosterDays.length === scheduleDayOptions.length ||
+          rosterDayOptions.length === 0 ||
+          (selectedRosterDays.length === rosterDayOptions.length && rosterDayOptions.every((day) => selectedRosterDays.includes(day))) ||
           ((student.trackIds ?? []).length
             ? (student.trackIds ?? []).some((trackId) => (trackDayMap.get(trackId) ?? []).some((day) => selectedRosterDays.includes(day)))
             : selectedRosterDays.length > 0);
@@ -11534,7 +11718,7 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
         return sortDirection === "asc" ? comparison : -comparison;
       });
     return sorted;
-  }, [genderFilter, selectedRosterDays, selectedRosterTrackIds, sortDirection, studentSearch, studentSort, studentView, students, trackDayMap, tracks]);
+  }, [genderFilter, rosterDayOptions, selectedRosterDays, selectedRosterTrackIds, sortDirection, studentSearch, studentSort, studentView, students, trackDayMap, tracks]);
   const familyGroups = useMemo(() => {
     const groups = new Map<string, { parent: ParentDisplay | null; children: TeacherStudentItem[] }>();
     for (const student of filteredStudents) {
@@ -11595,7 +11779,7 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
             type="button"
             onClick={() => {
               setSelectedRosterTrackIds(tracks.map((track) => track.id));
-              setSelectedRosterDays([...scheduleDayOptions]);
+              setSelectedRosterDays(rosterDayOptions.length ? rosterDayOptions : [...scheduleDayOptions]);
               setSessionFilterActive(false);
             }}
             className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-[#2F8FB3] shadow-[0_4px_10px_rgba(38,50,58,0.08)]"
@@ -11608,25 +11792,45 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
         {error ? <div className="border-l-4 border-[#E25241] bg-[#FDEDEA] p-3 text-sm text-[#A4352A]">{error}</div> : null}
 
         <section className="space-y-4">
-          {tracks.some((track) => track.capacity != null) ? (
-            <div className="flex flex-wrap gap-2">
-              {tracks
-                .filter((track) => track.capacity != null)
-                .map((track) => {
-                  const enrolled = students.filter((student) => student.trackIds.includes(track.id)).length;
-                  const atCapacity = enrolled >= (track.capacity ?? 0);
+          {tracks.length ? (
+            <div className="rounded-[24px] bg-[#F6FAFA] p-3">
+              <div className="flex items-center justify-between gap-3 px-1 pb-2">
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-wide text-[#7B858C]">Track Snapshot</p>
+                  <h2 className="text-lg font-semibold text-[#26323A]">{program.title}</h2>
+                </div>
+                <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-[#52616A] shadow-[0_4px_12px_rgba(38,50,58,0.06)]">
+                  {students.filter((student) => student.enrollment.status === "active").length} active
+                </span>
+              </div>
+              <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                {tracks.map((track) => {
+                  const activeCount = students.filter((student) => student.enrollment.status === "active" && student.trackIds.includes(track.id)).length;
+                  const capacity = track.capacity ?? null;
+                  const atCapacity = capacity != null && activeCount >= capacity;
+                  const days = trackDayMap.get(track.id) ?? [];
                   return (
-                    <span
-                      key={track.id}
-                      className={cn(
-                        "inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold",
-                        atCapacity ? "bg-[#FBEAE7] text-[#C0392B]" : "bg-[#F0F4F5] text-[#52616A]",
-                      )}
-                    >
-                      {track.name}: {enrolled} / {track.capacity}
-                    </span>
+                    <div key={track.id} className="rounded-[18px] border border-[#E1E8EC] bg-white p-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <p className="min-w-0 truncate text-sm font-semibold text-[#26323A]">{track.name}</p>
+                        <span className={cn("shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold", atCapacity ? "bg-[#FBEAE7] text-[#C0392B]" : "bg-[#EAF7F1] text-[#17624F]")}>
+                          {capacity == null ? "No cap" : `${activeCount}/${capacity}`}
+                        </span>
+                      </div>
+                      <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+                        <div className="rounded-[12px] bg-[#F7FAFB] px-2.5 py-2">
+                          <p className="font-semibold text-[#26323A]">{activeCount}</p>
+                          <p className="mt-0.5 font-medium text-[#7B858C]">Active students</p>
+                        </div>
+                        <div className="rounded-[12px] bg-[#F7FAFB] px-2.5 py-2">
+                          <p className="font-semibold text-[#26323A]">{days.length ? days.map(formatDayAbbreviation).join(", ") : "—"}</p>
+                          <p className="mt-0.5 font-medium text-[#7B858C]">Meeting days</p>
+                        </div>
+                      </div>
+                    </div>
                   );
                 })}
+              </div>
             </div>
           ) : null}
           <TeacherStudentListControls
@@ -11638,6 +11842,7 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
             tracks={tracks}
             selectedTrackIds={selectedRosterTrackIds}
             selectedDays={selectedRosterDays}
+            dayOptions={rosterDayOptions}
             onSearchChange={setStudentSearch}
             onGenderChange={setGenderFilter}
             onTrackToggle={(trackId) =>
@@ -11654,7 +11859,7 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
             }
             onDayToggle={(day) =>
               setSelectedRosterDays((current) => {
-                const allDays = [...scheduleDayOptions];
+                const allDays = rosterDayOptions.length ? rosterDayOptions : [...scheduleDayOptions];
                 if (day === "select_all") {
                   return allDays;
                 }
@@ -13861,9 +14066,8 @@ function ApplicationReviewOverlay({
 
   async function closeAfterChange() {
     setClosing(true);
-    await onChanged();
-    setClosing(false);
     onClose();
+    await onChanged();
   }
 
   if (loading) {
@@ -15548,7 +15752,19 @@ type ApplicantApplicationRow = {
   track: ProgramTrack | null;
   subscription: ProgramSubscription | null;
   student: StudentDisplay | null;
+  parent?: ParentDisplay | null;
 };
+
+function applicantRowFromRequest(request: RequestWithContext): ApplicantApplicationRow {
+  return {
+    request,
+    program: request.program ?? null,
+    track: request.track ?? null,
+    subscription: request.subscription ?? null,
+    student: request.student ?? null,
+    parent: request.parent ?? null,
+  };
+}
 
 /**
  * Every enrollment_requests row for the current user (or, for a parent, every
@@ -15918,7 +16134,7 @@ export function useTeacherNotificationCounts(slug: string) {
     };
   }, [slug, pathname]);
 
-  return { requestCount, actionRequired, totalCount: requestCount };
+  return { requestCount, actionRequired, totalCount: (requestCount || actionRequired) ? Math.max(requestCount, 1) : 0 };
 }
 
 function FloatingInboxTabs({
@@ -15958,15 +16174,15 @@ function FloatingInboxTabs({
 }
 
 function NotificationBadge({ count, actionRequired, className = "" }: { count?: number; actionRequired?: boolean; className?: string }) {
+  if (actionRequired) {
+    return <span className={cn("absolute h-3 w-3 rounded-full bg-[#2F8FB3] ring-2 ring-white", className)} />;
+  }
   if (count) {
     return (
       <span className={cn("absolute flex h-5 min-w-5 items-center justify-center rounded-full bg-[#E25241] px-1 text-[11px] font-semibold leading-none text-white shadow-[0_4px_10px_rgba(226,82,65,0.35)] ring-2 ring-white", className)}>
         {count > 9 ? "9+" : count}
       </span>
     );
-  }
-  if (actionRequired) {
-    return <span className={cn("absolute h-2.5 w-2.5 rounded-full bg-[#2F8FB3] ring-2 ring-white", className)} />;
   }
   return null;
 }
@@ -16429,19 +16645,19 @@ function StudentRequestCard({
   request,
   viewHref,
   onDismiss,
-  completeRegistrationHref,
+  onViewApplication,
   viewClassHref,
 }: {
   request: RequestWithContext;
   viewHref?: string;
   onDismiss?: () => void;
-  completeRegistrationHref?: string;
+  onViewApplication?: () => void;
   viewClassHref?: string;
 }) {
   const statusLabel = studentRequestStatusLabel(request);
   const statusTime = request.reviewed_at ?? request.requested_at;
   const childName = request.parent_profile_id ? request.student?.full_name?.trim() : null;
-  const needsConfirmation = Boolean(completeRegistrationHref);
+  const needsConfirmation = Boolean(onViewApplication);
   const reviewedMessage = request.review_note ?? request.decision_note;
   const message =
     request.status === "pending"
@@ -16478,13 +16694,14 @@ function StudentRequestCard({
             ) : null}
           </div>
           {message ? <p className="mt-2 text-sm leading-5 text-[#26323A]">{message}</p> : null}
-          {completeRegistrationHref ? (
-            <Link
-              href={completeRegistrationHref}
+          {onViewApplication ? (
+            <button
+              type="button"
+              onClick={onViewApplication}
               className="mt-3 inline-flex min-h-10 w-full items-center justify-center rounded-[6px] bg-[#2E6E52] px-4 text-sm font-semibold !text-white shadow-[0_8px_18px_rgba(46,110,82,0.22)] transition-colors hover:bg-[#265D45] md:w-auto md:px-10"
             >
-              Complete registration
-            </Link>
+              View Application
+            </button>
           ) : viewClassHref ? (
             <Link
               href={viewClassHref}
@@ -17141,7 +17358,7 @@ function ApplicationDecisionModal({
                     !bypassExternal ? "bg-[#EEF3F5] text-[#26323A]" : "bg-white text-[#6B747B] ring-1 ring-inset ring-[#D6DCE0]",
                   )}
                 >
-                  Waived — no payment
+                  No Payment
                 </button>
                 <button
                   type="button"
@@ -17194,6 +17411,26 @@ function ApplicationDecisionModal({
   );
 }
 
+function BillingMonthsHint({ startDate, endDate, chosenMonths }: { startDate: string; endDate: string; chosenMonths: string }) {
+  const suggested = estimateBillingMonths(startDate, endDate);
+  const exactDuration = monthsBetweenDates(startDate, endDate);
+  return (
+    <div className="mt-2 rounded-[12px] border border-[#E1E8EC] bg-[#F7FAFB] px-3 py-2 text-xs text-[#52616A]">
+      <div className="grid grid-cols-2 gap-2">
+        <div>
+          <p className="font-semibold text-[#26323A]">{exactDuration ? `${exactDuration} calendar mo` : "Set dates"}</p>
+          <p className="mt-0.5 font-medium">Program duration</p>
+        </div>
+        <div>
+          <p className="font-semibold text-[#26323A]">{suggested ? `${suggested} suggested` : "No suggestion"}</p>
+          <p className="mt-0.5 font-medium">Billing cycles</p>
+        </div>
+      </div>
+      {chosenMonths ? <p className="mt-2 font-semibold text-[#17624F]">Using {chosenMonths} monthly {Number(chosenMonths) === 1 ? "charge" : "charges"} for price calculations.</p> : null}
+    </div>
+  );
+}
+
 function TeacherMetricTile({ icon, label, value }: { icon: ReactNode; label: string; value: string }) {
   return (
     <div className="rounded-[22px] border border-[#E1E8EC] bg-white p-4 shadow-[0_10px_26px_rgba(38,50,58,0.06)]">
@@ -17227,6 +17464,7 @@ function TeacherStudentListControls({
   tracks,
   selectedTrackIds,
   selectedDays,
+  dayOptions,
   onSearchChange,
   onGenderChange,
   onTrackToggle,
@@ -17243,6 +17481,7 @@ function TeacherStudentListControls({
   tracks: ProgramTrack[];
   selectedTrackIds: string[];
   selectedDays: string[];
+  dayOptions: string[];
   onSearchChange: (value: string) => void;
   onGenderChange: (value: string) => void;
   onTrackToggle: (trackId: string) => void;
@@ -17256,7 +17495,8 @@ function TeacherStudentListControls({
   const [dayMenuOpen, setDayMenuOpen] = useState(false);
   const allTracksSelected = tracks.length > 0 && selectedTrackIds.length === tracks.length;
   const trackLabel = tracks.length === 0 || allTracksSelected ? "All tracks" : selectedTrackIds.length === 0 ? "No tracks" : selectedTrackIds.length === 1 ? tracks.find((track) => track.id === selectedTrackIds[0])?.name ?? "1 track" : `${selectedTrackIds.length} tracks`;
-  const allDaysSelected = selectedDays.length === scheduleDayOptions.length;
+  const availableDayOptions = dayOptions.length ? dayOptions : [...scheduleDayOptions];
+  const allDaysSelected = selectedDays.length === availableDayOptions.length && availableDayOptions.every((day) => selectedDays.includes(day));
   const dayLabel = allDaysSelected ? "All days" : selectedDays.length === 0 ? "No days" : selectedDays.length === 1 ? formatDayAbbreviation(selectedDays[0]) : `${selectedDays.length} days`;
 
   return (
@@ -17396,8 +17636,8 @@ function TeacherStudentListControls({
                   </button>
                 </div>
                 <div className="pt-1">
-                  {scheduleDayOptions.map((day) => (
-                    <RosterTrackOption key={day} checked={selectedDays.includes(day)} label={formatDayAbbreviation(day)} onClick={() => onDayToggle(day)} />
+                  {availableDayOptions.map((day) => (
+                    <RosterTrackOption key={day} checked={selectedDays.includes(day)} label={day} onClick={() => onDayToggle(day)} />
                   ))}
                 </div>
               </div>
@@ -17980,9 +18220,7 @@ function TeacherStudentNotesPage({
               </div>
               <h1 className="mt-1 truncate text-xl font-semibold leading-6">{recipientName}</h1>
               <p className="mt-1 truncate text-sm font-semibold text-[#17624F]">{program.title}</p>
-              <p className="mt-1 truncate text-xs text-[#7B858C]">
-                {[target.profile?.email, target.profile?.phone_number].filter(Boolean).join(" - ") || "No student contact on file"}
-              </p>
+              
             </div>
           </div>
         </section>
@@ -19128,13 +19366,17 @@ function MyApplicationsList({
 function ApplicantDetailsDrawer({
   row,
   slug,
+  returnTo,
   onClose,
   onRescind,
+  onCancelRegistration,
 }: {
   row: ApplicantApplicationRow;
   slug: string;
+  returnTo?: string;
   onClose: () => void;
   onRescind: () => void;
+  onCancelRegistration?: () => void;
 }) {
   const status = getApplicationStatus(row.request);
   const paymentStatus = getApplicationPaymentStatus(row.request, row.program, row.subscription);
@@ -19142,6 +19384,9 @@ function ApplicantDetailsDrawer({
   const childName = row.student?.full_name?.trim();
   const decisionNote = row.request.decision_note ?? row.request.review_note;
   const canRescind = status === "pending_review";
+  const canCompleteRegistration = status === "approved_confirmation_required";
+  const confirmationAction = getApplicantPrimaryAction(status, paymentStatus, row.request);
+  const resolvedReturnTo = returnTo ?? `/m/${slug}/portal/classes?tab=applications`;
 
   const containerRef = useRef<HTMLDivElement>(null);
   useModalFocusTrap(containerRef, true, onClose);
@@ -19226,6 +19471,33 @@ function ApplicantDetailsDrawer({
         </div>
 
         <div className="shrink-0 space-y-2 border-t border-[#EEF2F4] px-4 py-3">
+          {canCompleteRegistration ? (
+            <>
+              <Link
+                href={`/m/${slug}/registration/${row.request.id}?returnTo=${encodeURIComponent(resolvedReturnTo)}`}
+                className="flex min-h-12 w-full items-center justify-between rounded-[14px] bg-[#2E6E52] px-4 text-left text-sm font-semibold !text-white shadow-[0_8px_18px_rgba(46,110,82,0.18)] transition-colors hover:bg-[#265D45]"
+              >
+                <span>
+                  <span className="block">{confirmationAction.label}</span>
+                  <span className="mt-0.5 block text-xs font-medium text-white/75">Review payment details and finish enrollment.</span>
+                </span>
+                <span aria-hidden>→</span>
+              </Link>
+              {onCancelRegistration ? (
+                <button
+                  type="button"
+                  onClick={onCancelRegistration}
+                  className="flex min-h-12 w-full items-center justify-between rounded-[14px] border border-[#F0C7BE] bg-[#FFF6F4] px-4 text-left text-sm font-semibold text-[#B43A2E] transition-colors hover:bg-[#FCE8E4]"
+                >
+                  <span>
+                    <span className="block">Cancel registration</span>
+                    <span className="mt-0.5 block text-xs font-medium text-[#9A5A52]">Decline this approved registration before it is completed.</span>
+                  </span>
+                  <span aria-hidden>→</span>
+                </button>
+              ) : null}
+            </>
+          ) : null}
           {canRescind ? (
             <button
               type="button"
@@ -19746,6 +20018,10 @@ function HomeUpcomingRows({
     .filter((lesson) => !cancellationKeys.has(lessonCancellationKey(lesson)))
     .sort((a, b) => a.startsAt.getTime() - b.startsAt.getTime());
   const upcomingLessons = lessons.filter((lesson) => !lessonHasEnded(lesson));
+  const futureFallbackLessons =
+    upcomingLessons.length === 0
+      ? nextFutureLessons(lessonSources, week, 3).filter((lesson) => !cancellationKeys.has(lessonCancellationKey(lesson)))
+      : [];
 
   useEffect(() => {
     const programIds = Array.from(new Set(programs.map((program) => program.id)));
@@ -19855,7 +20131,7 @@ function HomeUpcomingRows({
     return <HomeUpcomingLoadingRows />;
   }
 
-  if (lessons.length === 0) {
+  if (lessons.length === 0 && futureFallbackLessons.length === 0) {
     return <HomeEmptyState title="No upcoming classes" text="Upcoming sessions will appear here after schedules are added." />;
   }
 
@@ -19875,7 +20151,27 @@ function HomeUpcomingRows({
     <div className="space-y-5">
       <WeekCalendar days={week} lessonsByDay={lessonsByDay} />
       {upcomingLessons.length === 0 ? (
-        <HomeEmptyState title="No more classes this week" text="Your scheduled class days are shown above." />
+        futureFallbackLessons.length ? (
+          <section className="space-y-2">
+            <div className="px-1">
+              <h3 className="text-sm font-semibold text-[#26323A]">Next upcoming sessions</h3>
+              <p className="mt-0.5 text-xs font-medium text-[#7B858C]">Nothing else is scheduled this week.</p>
+            </div>
+            <div className="space-y-3">
+              {futureFallbackLessons.map((lesson) => (
+                <HomeUpcomingLesson
+                  key={[lesson.program.id, lesson.ownerLabel ?? "self", dayKey(lesson.date), normalizeScheduleTime(lesson.start) || lesson.start, normalizeScheduleTime(lesson.end) || lesson.end].join("|")}
+                  lesson={lesson}
+                  canCancel={canCancelSessions}
+                  onCancel={() => openCancelModal(lesson)}
+                  viewStudentsHref={canCancelSessions && slug ? homeLessonViewStudentsHref(slug, lesson) : undefined}
+                />
+              ))}
+            </div>
+          </section>
+        ) : (
+          <HomeEmptyState title="No more classes this week" text="Your scheduled class days are shown above." />
+        )
       ) : (
         <div className="space-y-5">
           {week
@@ -20057,6 +20353,16 @@ function currentWeekDays() {
   });
 }
 
+function weekDaysFrom(start: Date) {
+  const first = new Date(start);
+  first.setHours(0, 0, 0, 0);
+  return Array.from({ length: 7 }, (_, index) => {
+    const date = new Date(first);
+    date.setDate(first.getDate() + index);
+    return date;
+  });
+}
+
 // A weekly-pattern match against "this week" alone can't tell whether a program has actually
 // started yet or already ended, so upcoming-session lists would otherwise show a class before
 // its configured start_date and keep showing it forever past end_date.
@@ -20126,6 +20432,18 @@ function weekLessons(sources: Array<{ program: ProgramScheduleSource; ownerLabel
   });
 
   return lessons;
+}
+
+function nextFutureLessons(sources: Array<{ program: ProgramScheduleSource; ownerLabel?: string }>, currentWeek: Date[], limit: number) {
+  const now = new Date();
+  const results: HomeLesson[] = [];
+  for (let weekOffset = 1; weekOffset <= 16 && results.length < limit; weekOffset += 1) {
+    const start = new Date(currentWeek[0]);
+    start.setDate(start.getDate() + weekOffset * 7);
+    const futureWeek = weekDaysFrom(start);
+    results.push(...weekLessons(sources, futureWeek).filter((lesson) => lesson.startsAt > now));
+  }
+  return results.sort((a, b) => a.startsAt.getTime() - b.startsAt.getTime()).slice(0, limit);
 }
 
 function lessonHasEnded(lesson: HomeLesson) {
@@ -21314,11 +21632,10 @@ function ProgramStudentInviteTools({ program }: { program: Program }) {
 
         <div className="mt-5 space-y-3">
           <label className="block">
-            <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-white/70">Comment (optional, e.g. who this is for)</span>
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-white/70">Comment</span>
             <input
               value={comment}
               onChange={(event) => setComment(event.target.value)}
-              placeholder="e.g. Referred by the imam"
               className="h-10 w-full rounded-[8px] border-0 bg-white/12 px-3 text-sm text-white placeholder:text-white/50 outline-none ring-1 ring-white/20 focus:ring-white/50"
             />
           </label>
@@ -22394,11 +22711,11 @@ function formatPrice(cents: number | null) {
 
 type ProgramPaymentOptionsInput = Pick<
   Program,
-  "is_paid" | "offers_monthly_payment" | "offers_annual_payment" | "price_monthly_cents" | "price_annual_cents" | "is_ongoing" | "start_date" | "end_date" | "duration_months"
+  "is_paid" | "offers_monthly_payment" | "offers_annual_payment" | "price_monthly_cents" | "price_annual_cents" | "is_ongoing" | "start_date" | "end_date" | "duration_months" | "billing_duration_months"
 >;
 
-function programPayInFullDurationMonths(program: Pick<Program, "start_date" | "end_date" | "duration_months">) {
-  return monthsBetweenDates(program.start_date ?? "", program.end_date ?? "") ?? program.duration_months ?? null;
+function programPayInFullDurationMonths(program: Pick<Program, "start_date" | "end_date" | "duration_months" | "billing_duration_months">) {
+  return program.billing_duration_months ?? program.duration_months ?? estimateBillingMonths(program.start_date ?? "", program.end_date ?? "") ?? null;
 }
 
 function programOfferedPaymentTypes(program: Pick<Program, "is_paid" | "offers_monthly_payment" | "offers_annual_payment" | "is_ongoing">): PaymentType[] {
@@ -22424,7 +22741,7 @@ function programPaymentOptions(program: ProgramPaymentOptionsInput) {
   const durationMonths = programPayInFullDurationMonths(program);
   const options: Array<{ type: PaymentType; title: string; price: string; subtitle: string; badge?: string }> = [];
   if (monthlyEnabled) {
-    const monthlyBadge = monthlyDealText(program);
+    const monthlyBadge = monthlyEnabled && annualEnabled ? monthlyDealText(program) : "";
     const fixedRange = !program.is_ongoing && program.start_date && program.end_date ? `${formatDurationDate(program.start_date)} to ${formatDurationDate(program.end_date)}` : null;
     options.push({
       type: "monthly",
@@ -22447,13 +22764,13 @@ function programPaymentOptions(program: ProgramPaymentOptionsInput) {
       subtitle: monthlyEquivalent
         ? `Equivalent to ${formatPrice(monthlyEquivalent)}/month for the ${durationMonths}-month program.`
         : "One payment covers the full program.",
-      badge: annualDealText(program),
+      badge: monthlyEnabled && annualEnabled ? annualDealText(program) : "",
     });
   }
   return options;
 }
 
-function annualDealText(program: Pick<Program, "price_monthly_cents" | "price_annual_cents" | "start_date" | "end_date" | "duration_months">) {
+function annualDealText(program: Pick<Program, "price_monthly_cents" | "price_annual_cents" | "start_date" | "end_date" | "duration_months" | "billing_duration_months">) {
   const durationMonths = programPayInFullDurationMonths(program);
   if (!durationMonths) {
     return "";
@@ -22474,7 +22791,7 @@ function mosqueSlugLabel(mosque: Pick<Mosque, "slug" | "name"> | null | undefine
   return titleCase(mosque.slug || mosque.name);
 }
 
-function monthlyDealText(program: Pick<Program, "price_monthly_cents" | "price_annual_cents" | "start_date" | "end_date" | "duration_months">) {
+function monthlyDealText(program: Pick<Program, "price_monthly_cents" | "price_annual_cents" | "start_date" | "end_date" | "duration_months" | "billing_duration_months">) {
   const durationMonths = programPayInFullDurationMonths(program);
   if (!durationMonths) {
     return "";
