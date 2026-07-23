@@ -1402,6 +1402,9 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
   const learningIntro = details?.learning_intro?.trim() ?? "";
   const learningOutcomes = outcomes.map((item) => item.text);
   const hasLearningSection = Boolean(learningIntro) || learningOutcomes.length > 0;
+  const descriptionText = program.description?.trim() ?? "";
+  const contactPhone = program.contact_phone?.trim() || details?.instructor_contact_phone?.trim() || program.teacher?.teacher_whatsapp_number?.trim() || "";
+  const contactEmail = program.contact_email?.trim() ?? "";
   const publicInfoRows = [
     { title: "Topics Covered", body: details?.topics_intro?.trim() ?? "" },
     { title: "Requirements", body: details?.requirements_text?.trim() ?? "" },
@@ -1466,7 +1469,7 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
             </div>
             <div>
               <h1 className="text-2xl font-semibold leading-8 text-[#26323A]">{program.title}</h1>
-              <p className="mt-2 text-sm leading-7 text-[#52616A]">{program.description || mockProgramDescription(program.title)}</p>
+              {descriptionText ? <p className="mt-2 text-sm leading-7 text-[#52616A]">{descriptionText}</p> : null}
             </div>
           </div>
         </section>
@@ -1619,18 +1622,18 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
                 </div>
               </div>
               {teacherCredentials ? <p className="mt-4 text-center text-sm leading-7 text-white/82">{teacherCredentials}</p> : null}
-              {program.contact_phone || program.contact_email ? (
+              {contactPhone || contactEmail ? (
                 <div className="mt-5 space-y-2 rounded-lg bg-white/10 px-4 py-3 text-sm ring-1 ring-white/20">
-                  {program.contact_phone ? (
+                  {contactPhone ? (
                     <div className="flex items-center justify-between gap-3">
                       <span className="text-white/70">Phone</span>
-                      <span className="font-semibold text-white">{program.contact_phone}</span>
+                      <span className="font-semibold text-white">{contactPhone}</span>
                     </div>
                   ) : null}
-                  {program.contact_email ? (
+                  {contactEmail ? (
                     <div className="flex items-center justify-between gap-3">
                       <span className="text-white/70">Email</span>
-                      <span className="font-semibold text-white">{program.contact_email}</span>
+                      <span className="font-semibold text-white">{contactEmail}</span>
                     </div>
                   ) : null}
                 </div>
@@ -8662,7 +8665,7 @@ function ProgramEditorPreview({
           </div>
           <div>
             <h1 className="text-2xl font-semibold leading-8 text-[#26323A]">{program.title}</h1>
-            <p className="mt-2 text-sm leading-7 text-[#52616A]">{program.description || mockProgramDescription(program.title)}</p>
+            {program.description?.trim() ? <p className="mt-2 text-sm leading-7 text-[#52616A]">{program.description.trim()}</p> : null}
           </div>
         </div>
       </section>
@@ -9867,7 +9870,7 @@ function ProgramEditorFields({
               </div>
               <div>
                 <h1 className="text-2xl font-semibold leading-8 text-[#26323A]">{program.title}</h1>
-                <p className="mt-2 text-sm leading-7 text-[#52616A]">{program.description || mockProgramDescription(program.title)}</p>
+                {program.description?.trim() ? <p className="mt-2 text-sm leading-7 text-[#52616A]">{program.description.trim()}</p> : null}
               </div>
             </div>
           </section>
@@ -19227,9 +19230,13 @@ function ApplicantDetailsDrawer({
             <button
               type="button"
               onClick={onRescind}
-              className="min-h-10 w-full rounded-[9px] bg-[#FCE8E4] px-3 text-xs font-semibold text-[#C83F31] transition-colors hover:bg-[#F9D8D1]"
+              className="flex min-h-12 w-full items-center justify-between rounded-[14px] border border-[#F0C7BE] bg-[#FFF6F4] px-4 text-left text-sm font-semibold text-[#B43A2E] transition-colors hover:bg-[#FCE8E4]"
             >
-              Rescind
+              <span>
+                <span className="block">Rescind application</span>
+                <span className="mt-0.5 block text-xs font-medium text-[#9A5A52]">Cancel this pending request before it is reviewed.</span>
+              </span>
+              <span aria-hidden>→</span>
             </button>
           ) : null}
           {row.program ? (
@@ -19563,12 +19570,15 @@ function ProgramCard({
                 {registration.label}
               </span>
             </div>
-            {!relationship && registration.label === "Registration open" ? (
-              <p className={cn("mt-1 text-right", program.registration_deadline_at ? "text-[#C0392B]" : "text-[#8A949B]")}>
-                {program.registration_deadline_at ? `Registration deadline: ${formatFinanceShortDate(program.registration_deadline_at)}` : "No registration deadline"}
-              </p>
-            ) : null}
           </div>
+          {!relationship && registration.label === "Registration open" ? (
+            <div className="flex items-center justify-between gap-3 rounded-[10px] bg-[#F5F8F9] px-3 py-2">
+              <span className="text-[#6B747B]">Deadline</span>
+              <span className={cn("text-right", program.registration_deadline_at ? "text-[#C0392B]" : "text-[#8A949B]")}>
+                {program.registration_deadline_at ? formatFinanceShortDate(program.registration_deadline_at) : "No registration deadline"}
+              </span>
+            </div>
+          ) : null}
         </div>
       </div>
     </TransitionLink>
