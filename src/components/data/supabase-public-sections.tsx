@@ -743,6 +743,19 @@ function teacherRequestNotificationKey(request: Pick<EnrollmentRequest, "id" | "
   return ["application", request.id].join(":");
 }
 
+function teacherRequestShouldBeUnread(
+  request: Pick<EnrollmentRequest, "id" | "status" | "requested_at" | "reviewed_at" | "admission_completed_at">,
+  seenIds: Set<string>,
+) {
+  if (request.admission_completed_at) {
+    return !seenIds.has(teacherRequestNotificationKey(request));
+  }
+  if (request.status !== "pending") {
+    return false;
+  }
+  return !seenIds.has(teacherRequestNotificationKey(request));
+}
+
 function teacherInstructorNotificationKey(notification: Pick<InstructorLifecycleNotification, "id" | "event_type" | "teacher_profile_id">) {
   return ["instructor", notification.event_type, notification.id, notification.teacher_profile_id ?? ""].join(":");
 }
@@ -5391,9 +5404,6 @@ export function TeacherInboxData({ slug }: { slug: string }) {
   const pastInstructorNotifications = instructorNotifications.filter(
     (notification) => seenRequestIds.has(teacherInstructorNotificationKey(notification)) && !dismissedNotificationIds.has(teacherInstructorNotificationKey(notification)),
   );
-  const unseenInstructorCount = newInstructorNotifications.length;
-  const unseenPendingRequestCount = [...pendingRequests, ...completedAdmissionRequests].filter((request) => !seenRequestIds.has(teacherRequestNotificationKey(request))).length;
-  const unseenWithdrawalCount = pendingWithdrawals.filter((request) => !seenRequestIds.has(studentWithdrawalNotificationKey(request))).length;
   const pendingTrackSwitchRequests = trackSwitchRequests.filter((request) => request.status === "pending");
   const pastTrackSwitchRequests = trackSwitchRequests.filter((request) => request.status !== "pending");
   const allTracksById = Object.fromEntries(Object.values(announcementTracksByProgramId).flat().map((track) => [track.id, track]));
@@ -5405,10 +5415,6 @@ export function TeacherInboxData({ slug }: { slug: string }) {
       label: announcementTargetLabel(program, track),
     })),
   ]);
-  const requestNotificationIds = requests.map(teacherRequestNotificationKey);
-  const newInstructorNotificationIds = newInstructorNotifications.map(teacherInstructorNotificationKey);
-  const withdrawalNotificationIds = pendingWithdrawals.map(studentWithdrawalNotificationKey);
-
   function markSeenOptimistically(keys: string[]) {
     if (!keys.length) {
       return;
@@ -5528,7 +5534,7 @@ export function TeacherInboxData({ slug }: { slug: string }) {
         subtitle: applicationMessage(request),
         meta: `${request.program?.title ?? "Class"} · ${timeAgo(request.admission_completed_at ?? request.reviewed_at ?? request.requested_at)}`,
         createdAt: request.admission_completed_at ?? request.reviewed_at ?? request.requested_at,
-        unread: !seenRequestIds.has(key),
+        unread: teacherRequestShouldBeUnread(request, seenRequestIds),
         requiresAction: request.status === "pending",
         request,
       };
@@ -16235,7 +16241,7 @@ export function useTeacherNotificationCounts(slug: string) {
       ]);
       const { seen: seenIds, dismissed: dismissedIds } = await fetchNotificationState(userId);
       if (active) {
-        const unseenApplications = (rows ?? []).filter((row) => !seenIds.has(teacherRequestNotificationKey(row))).length;
+        const unseenApplications = (rows ?? []).filter((row) => teacherRequestShouldBeUnread(row, seenIds)).length;
         const joinedAssignmentIdsWithEvents = new Set((instructorEventRows ?? []).filter((event) => event.event_type === "joined" && event.assignment_id).map((event) => event.assignment_id as string));
         const eventInstructorNotifications: Array<Pick<InstructorLifecycleNotification, "id" | "event_type" | "teacher_profile_id">> = (instructorEventRows ?? []).map((event) => ({
           id: event.id,
