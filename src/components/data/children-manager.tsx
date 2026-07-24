@@ -2,6 +2,7 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { EmptyState } from "@/components/data/empty-state";
+import { invalidateQuery } from "@/lib/query-cache";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import type { Database } from "@/lib/supabase/types";
 import { cn } from "@/lib/utils";
@@ -164,6 +165,9 @@ export function ChildrenManager({ slug }: { slug: string }) {
     setDateOfBirth("");
     setFormOpen(false);
     setSaving(false);
+    if (parentId) {
+      invalidateQuery(`student-enrollments:${slug}:${parentId}`);
+    }
     await loadChildren();
   }
 
@@ -232,6 +236,7 @@ export function ChildrenManager({ slug }: { slug: string }) {
 
     setBusyChildId(null);
     setExpandedChildId((current) => (current === child.id ? null : current));
+    invalidateQuery(`student-enrollments:${slug}:${parentId}`);
     await loadChildren();
   }
 

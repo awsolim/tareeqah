@@ -2,6 +2,7 @@
 
 import type { Session } from "@supabase/supabase-js";
 import { emptyUserAccess, loadUserAccessByMosqueSlug, type UserAccess } from "@/lib/authz";
+import { clearAllQueryCache } from "@/lib/query-cache";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 
 type MosqueChrome = {
@@ -18,6 +19,8 @@ let sessionLoaded = false;
 let cachedSession: Session | null = null;
 let sessionPromise: Promise<Session | null> | null = null;
 let authListenerStarted = false;
+let lastSeenUserId: string | null = null;
+let hasSeenFirstAuthEvent = false;
 
 const sessionSubscribers = new Set<(session: Session | null) => void>();
 const mosqueChromeCache = new Map<string, MosqueChrome>();
@@ -75,6 +78,7 @@ export function clearUserScopedCaches() {
   profileNamePromises.clear();
   profileSummaryCache.clear();
   profileSummaryPromises.clear();
+  clearAllQueryCache();
 }
 
 export function getCachedMosqueChrome(slug: string) {
@@ -264,9 +268,20 @@ function startAuthListener() {
   authListenerStarted = true;
   createSupabaseBrowserClient().auth.onAuthStateChange((_event, session) => {
     setCachedSessionSnapshot(session);
-    if (!session) {
+    const nextUserId = session?.user.id ?? null;
+    // Clear on sign-out (nextUserId null) AND on a direct switch to a different signed-in
+    // user (nextUserId changed but non-null) — the known account-switch flow already calls
+    // clearUserScopedCaches() explicitly and signs out first, but this is a defensive backstop
+    // for any future auth flow that swaps identities without passing through a null session.
+    // The very first callback firing (INITIAL_SESSION, right after this listener is registered)
+    // must never itself count as a "change": lastSeenUserId starts unset regardless of whether
+    // a session already exists, so treating that first event as a transition would wipe every
+    // page's freshly-warmed cache moments after any already-signed-in user loads the app.
+    if (hasSeenFirstAuthEvent && nextUserId !== lastSeenUserId) {
       clearUserScopedCaches();
     }
+    hasSeenFirstAuthEvent = true;
+    lastSeenUserId = nextUserId;
   });
 }
 

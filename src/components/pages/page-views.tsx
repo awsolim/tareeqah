@@ -371,43 +371,39 @@ export function TermsOfServicePage() {
 
 export function PublicMasjidPage({ slug }: { slug: string }) {
   return (
-    <PageShell slug={slug}>
+    <>
       <PageTitleBar title="Home" subtitle="Registration, schedules, and family class updates." />
       <Workspace>
         <PublicMasjidData slug={slug} />
       </Workspace>
-    </PageShell>
+    </>
   );
 }
 
 export function PublicProgramsPage({ slug }: { slug: string }) {
   return (
-    <PageShell slug={slug}>
+    <>
       <PageTitleBar title="Programs" subtitle="Find weekly classes, workshops, and circles." tone="teal" />
       <Workspace>
         <PublicProgramsData slug={slug} />
       </Workspace>
-    </PageShell>
+    </>
   );
 }
 
 export function PublicAccountPage({ slug }: { slug: string }) {
-  return (
-    <PageShell slug={slug}>
-      <PortalAccountData slug={slug} />
-    </PageShell>
-  );
+  return <PortalAccountData slug={slug} />;
 }
 
 export function PublicProgramDetailPage({ programId, slug, returnTo }: { programId: string; slug: string; returnTo?: string }) {
   const backLabel = returnTo?.includes("/admin/programs") || returnTo?.includes("/teacher/classes") || returnTo?.includes("/portal/classes") ? "Classes" : "Programs";
   return (
-    <PageShell slug={slug}>
+    <>
       <PageTitleBar title="Class Details" backHref={returnTo ?? `/m/${slug}/programs`} backLabel={backLabel} tone="teal" />
       <Workspace>
         <ProgramDetailData slug={slug} programId={programId} section="public" />
       </Workspace>
-    </PageShell>
+    </>
   );
 }
 
@@ -424,12 +420,12 @@ export function RegistrationConfirmationPage({ requestId, slug, returnTo }: { re
 
 export function ProgramApplyPage({ programId, slug }: { programId: string; slug: string }) {
   return (
-    <PageShell slug={slug}>
+    <>
       <PageTitleBar title="Apply to Register" backHref={`/m/${slug}/programs/${programId}`} backLabel="Program" tone="teal" />
       <Workspace>
         <ProgramApplyData slug={slug} programId={programId} />
       </Workspace>
-    </PageShell>
+    </>
   );
 }
 
@@ -837,29 +833,29 @@ export function TeacherAttendancePage({ slug }: { slug: string }) {
 
 export function AdminDashboardPage({ slug }: { slug: string }) {
   return (
-    <PageShell section="admin" slug={slug}>
+    <>
       <PageTitleBar title="Home" tone="teal" />
       <Workspace>
         <AdminHomeData slug={slug} />
       </Workspace>
-    </PageShell>
+    </>
   );
 }
 
 export function AdminProgramsPage({ slug }: { slug: string }) {
   return (
-    <PageShell section="admin" slug={slug}>
+    <>
       <PageTitleBar title="Classes" tone="teal" />
       <Workspace>
         <AdminClassesData slug={slug} />
       </Workspace>
-    </PageShell>
+    </>
   );
 }
 
 export function AdminEnrollmentsPage({ slug }: { slug: string }) {
   return (
-    <PageShell section="admin" slug={slug}>
+    <>
       <PageTitleBar title="Enrollments" subtitle="Review registration requests and statuses." />
       <Workspace>
         <Panel className="md:hidden">
@@ -869,146 +865,146 @@ export function AdminEnrollmentsPage({ slug }: { slug: string }) {
         </Panel>
         <DataTable columns={["Student", "Class", "Status"]} rows={enrollments.map((enrollment) => [studentName(enrollment.studentId), className(enrollment.classId), <StatusPill key={enrollment.id} status={enrollment.status} />])} />
       </Workspace>
-    </PageShell>
+    </>
   );
 }
 
 export function AdminStudentsPage({ slug }: { slug: string }) {
   return (
-    <PageShell section="admin" slug={slug}>
+    <>
       <PageTitleBar title="Members" tone="teal" />
       <Workspace>
         <AdminMembersData slug={slug} />
       </Workspace>
-    </PageShell>
+    </>
   );
 }
 
 export function AdminMasjidPage({ slug }: { slug: string }) {
   return (
-    <PageShell section="admin" slug={slug}>
+    <>
       <PageTitleBar title="Masjid" tone="teal" />
       <Workspace>
         <AdminMasjidData slug={slug} />
       </Workspace>
-    </PageShell>
+    </>
   );
 }
 
 export function AdminMasjidInformationPage({ slug }: { slug: string }) {
   return (
-    <PageShell section="admin" slug={slug}>
+    <>
       <PageTitleBar title="Masjid Information" backHref={`/m/${slug}/admin/masjid`} backLabel="Masjid" tone="teal" />
       <Workspace>
         <AdminMasjidInformationData slug={slug} />
       </Workspace>
-    </PageShell>
+    </>
   );
 }
 
 export function AdminProgramDetailPage({ programId, slug }: { programId: string; slug: string }) {
   return (
-    <PageShell section="admin" slug={slug}>
+    <>
       <PageTitleBar title="Edit Program" backHref={`/m/${slug}/admin/programs`} backLabel="Classes" tone="teal" />
       <Workspace>
         <TeacherProgramSettingsData slug={slug} programId={programId} returnHref={`/m/${slug}/admin/programs`} />
       </Workspace>
-    </PageShell>
+    </>
   );
 }
 
 export function AdminProgramCreatePage({ slug }: { slug: string }) {
   return (
-    <PageShell section="admin" slug={slug}>
+    <>
       <PageTitleBar title="Add Class" backHref={`/m/${slug}/admin/programs`} backLabel="Classes" tone="teal" />
       <Workspace>
         <TeacherProgramCreateData slug={slug} />
       </Workspace>
-    </PageShell>
+    </>
   );
 }
 
 export function AdminInstructorsPage({ programId, slug }: { programId: string; slug: string }) {
   return (
-    <PageShell section="admin" slug={slug}>
+    <>
       <PageTitleBar title="Instructors" backHref={`/m/${slug}/admin/programs`} backLabel="Classes" tone="teal" centerBackTitle smallTitle />
       <Workspace overlapOffset="-172px" surfaceClassName="bg-white">
         <TeacherInstructorsData slug={slug} programId={programId} />
       </Workspace>
-    </PageShell>
+    </>
   );
 }
 
 export function AdminProgramStudentsPage({ slug, programId }: { slug: string; programId: string }) {
   return (
-    <PageShell section="admin" slug={slug}>
+    <>
       <PageTitleBar title="Students" backHref={`/m/${slug}/admin/programs`} backLabel="Classes" />
       <Workspace>
         <TeacherStudentsData slug={slug} programId={programId} />
       </Workspace>
-    </PageShell>
+    </>
   );
 }
 
 export function AdminStudentNotesPage({ slug, programId, studentId }: { slug: string; programId: string; studentId: string }) {
   return (
-    <PageShell section="admin" slug={slug}>
+    <>
       <PageTitleBar title="Student Notes" backHref={`/m/${slug}/admin/programs/${programId}/students`} backLabel="Students" />
       <Workspace>
         <TeacherStudentNotesData slug={slug} programId={programId} studentId={studentId} />
       </Workspace>
-    </PageShell>
+    </>
   );
 }
 
 export function AdminAnnouncementPage({ slug, programId }: { slug: string; programId: string }) {
   return (
-    <PageShell section="admin" slug={slug}>
+    <>
       <PageTitleBar title="Announcement" backHref={`/m/${slug}/admin/programs`} backLabel="Classes" />
       <Workspace>
         <TeacherAnnouncementData slug={slug} programId={programId} />
       </Workspace>
-    </PageShell>
+    </>
   );
 }
 
 export function AdminProgramFinancesPage({ slug, programId }: { slug: string; programId: string }) {
   return (
-    <PageShell section="admin" slug={slug}>
+    <>
       <PageTitleBar title="Finances" backHref={`/m/${slug}/admin/programs`} backLabel="Classes" tone="teal" />
       <Workspace overlapOffset="-172px" surfaceClassName="bg-white">
         <ProgramFinancesData slug={slug} programId={programId} mode="admin" />
       </Workspace>
-    </PageShell>
+    </>
   );
 }
 
 export function AdminProgramApplicationsPage({ slug, programId }: { slug: string; programId: string }) {
   return (
-    <PageShell section="admin" slug={slug}>
+    <>
       <PageTitleBar title="Applications" backHref={`/m/${slug}/admin/programs`} backLabel="Classes" tone="teal" />
       <Workspace overlapOffset="-172px" surfaceClassName="bg-white">
         <ProgramApplicationsData slug={slug} programId={programId} mode="admin" />
       </Workspace>
-    </PageShell>
+    </>
   );
 }
 
 export function AdminMasjidFinancesPage({ slug }: { slug: string }) {
   return (
-    <PageShell section="admin" slug={slug}>
+    <>
       <PageTitleBar title="Finances" backHref={`/m/${slug}/admin/masjid`} backLabel="Masjid" tone="teal" />
       <Workspace overlapOffset="-172px" surfaceClassName="bg-white">
         <AdminMasjidFinancesData slug={slug} />
       </Workspace>
-    </PageShell>
+    </>
   );
 }
 
 export function AdminSettingsPage({ slug }: { slug: string }) {
   return (
-    <PageShell section="admin" slug={slug}>
+    <>
       <PortalAccountData slug={slug} />
-    </PageShell>
+    </>
   );
 }

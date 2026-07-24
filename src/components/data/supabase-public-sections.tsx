@@ -11,7 +11,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { EmptyState } from "@/components/data/empty-state";
 import { FlatLink } from "@/components/ui/flat-button";
 import { getAccountLabel, getDefaultLandingHref, loadUserAccessByMosqueSlug } from "@/lib/authz";
-import { clearUserScopedCaches, loadCachedSession, loadCachedUserAccess, performClientLogout, setCachedProfileName, setCachedProfileSummary, setCachedSessionSnapshot } from "@/lib/client-cache";
+import { clearUserScopedCaches, getCachedSessionSnapshot, loadCachedSession, loadCachedUserAccess, performClientLogout, setCachedProfileName, setCachedProfileSummary, setCachedSessionSnapshot, subscribeCachedSession } from "@/lib/client-cache";
+import { invalidateQuery, invalidateQueryPrefix, prefetchQuery, useCachedQuery } from "@/lib/query-cache";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import type { Database, Json } from "@/lib/supabase/types";
 import { cn } from "@/lib/utils";
@@ -541,8 +542,6 @@ type StudentInboxThread =
 type ProgramScheduleSource = (Program | ProgramWithTeacher) & { scheduleTracks?: ProgramTrack[] };
 type EnrollmentTrackSelection = Pick<Enrollment, "id" | "program_id" | "student_profile_id" | "program_track_id" | "created_at">;
 
-const mosqueProgramsCache = new Map<string, MosqueProgramsSnapshot>();
-const mosqueProgramsPromises = new Map<string, Promise<MosqueProgramsSnapshot>>();
 const notificationCountsCache = new Map<string, NotificationCounts>();
 
 type DevSwitchAccount = {
@@ -1162,6 +1161,27 @@ export function PublicProgramsData({ slug }: { slug: string }) {
   const [checkingSignedInRedirect, setCheckingSignedInRedirect] = useState(true);
 
   useEffect(() => {
+    if (loading || error || !programs.length) {
+      return;
+    }
+    let cancelled = false;
+    // Warm the detail-page cache for the first handful of visible cards, so tapping into one
+    // from this list renders instantly instead of paying the full fetch on the next page.
+    loadCachedSession().then((session) => {
+      if (cancelled) {
+        return;
+      }
+      const userId = session?.user.id ?? null;
+      for (const program of programs.slice(0, 6)) {
+        prefetchQuery(`program-detail:${slug}:${program.id}:public:${userId ?? "guest"}`, () => fetchProgramDetailSnapshot(slug, program.id, "public", userId));
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [loading, error, programs, slug]);
+
+  useEffect(() => {
     let active = true;
     async function redirectSignedInAccounts() {
       const session = await loadCachedSession();
@@ -1201,6 +1221,182 @@ export function PublicProgramsData({ slug }: { slug: string }) {
   return <ProgramCardGrid programs={programs} mosqueSlug={mosque.slug} emptyText="No programs are available at this masjid yet." />;
 }
 
+type ProgramDetailSnapshot = {
+  mosque: Mosque | null;
+  program: ProgramWithTeacher | null;
+  details: ProgramDetails | null;
+  outcomes: ProgramOutcome[];
+  contentSections: ProgramContentSection[];
+  faqs: ProgramFaq[];
+  mediaItems: ProgramMedia[];
+  tracks: ProgramTrack[];
+  accountType: string | null;
+  childStatuses: Record<string, { enrolled: boolean; requestStatus: string | null }>;
+  requestStatus: string | null;
+  isEnrolled: boolean;
+  isStaffForProgram: boolean;
+  enrolledCount: number | null;
+  enrolledCountByTrackId: Record<string, number>;
+  error: string | null;
+};
+
+const emptyProgramDetailSnapshot: ProgramDetailSnapshot = {
+  mosque: null,
+  program: null,
+  details: null,
+  outcomes: [],
+  contentSections: [],
+  faqs: [],
+  mediaItems: [],
+  tracks: [],
+  accountType: null,
+  childStatuses: {},
+  requestStatus: null,
+  isEnrolled: false,
+  isStaffForProgram: false,
+  enrolledCount: null,
+  enrolledCountByTrackId: {},
+  error: null,
+};
+
+async function fetchProgramDetailSnapshot(
+  slug: string,
+  programId: string,
+  section: "public" | "portal" | "teacher",
+  userId: string | null,
+): Promise<ProgramDetailSnapshot> {
+  const supabase = createSupabaseBrowserClient();
+  const { data: mosqueData, error: mosqueError } = await supabase.from("mosques").select("*").eq("slug", slug).maybeSingle();
+  if (mosqueError) {
+    return { ...emptyProgramDetailSnapshot, error: mosqueError.message };
+  }
+  if (!mosqueData) {
+    return { ...emptyProgramDetailSnapshot, mosque: null };
+  }
+
+  const { data: programData, error: programError } = await supabase
+    .from("programs")
+    .select("*")
+    .eq("id", programId)
+    .eq("mosque_id", mosqueData.id)
+    .maybeSingle();
+
+  if (programError) {
+    return { ...emptyProgramDetailSnapshot, mosque: mosqueData, error: programError.message };
+  }
+
+  if (section === "public" && programData && !["published", "hidden"].includes(programData.publication_status ?? "published")) {
+    return { ...emptyProgramDetailSnapshot, mosque: mosqueData, error: "This program is not published yet." };
+  }
+
+  let teacher: TeacherDisplay | null = null;
+  const directorProfileId = programData?.director_profile_id ?? programData?.teacher_profile_id ?? null;
+  if (directorProfileId) {
+    const { data: teacherData } = await supabase
+      .from("profiles")
+      .select("id, full_name, avatar_url, teacher_credentials, teacher_whatsapp_number")
+      .eq("id", directorProfileId)
+      .maybeSingle();
+    teacher = teacherData ?? null;
+  }
+
+  if (!programData) {
+    return { ...emptyProgramDetailSnapshot, mosque: mosqueData };
+  }
+
+  const [detailsResult, outcomesResult, contentResult, faqResult, mediaResult, tracksResult, enrolledCountResult] = await Promise.all([
+    supabase.from("program_details").select("*").eq("program_id", programData.id).maybeSingle(),
+    supabase.from("program_outcomes").select("*").eq("program_id", programData.id).order("sort_order", { ascending: true }),
+    supabase.from("program_content_sections").select("*").eq("program_id", programData.id).order("sort_order", { ascending: true }),
+    supabase.from("program_faqs").select("*").eq("program_id", programData.id).order("sort_order", { ascending: true }),
+    supabase.from("program_media").select("*").eq("program_id", programData.id).order("sort_order", { ascending: true }),
+    supabase.from("program_tracks").select("*").eq("program_id", programData.id).eq("is_active", true).order("sort_order", { ascending: true }),
+    supabase.from("enrollments").select("id").eq("program_id", programData.id).eq("status", "active"),
+  ]);
+
+  const activeEnrollmentIds = (enrolledCountResult.data ?? []).map((row) => row.id);
+  const { data: enrollmentTrackRows } = activeEnrollmentIds.length
+    ? await supabase.from("enrollment_tracks").select("enrollment_id, program_track_id").in("enrollment_id", activeEnrollmentIds)
+    : { data: [] as Array<{ enrollment_id: string; program_track_id: string }> };
+  const nextCountByTrackId: Record<string, number> = {};
+  for (const row of enrollmentTrackRows ?? []) {
+    nextCountByTrackId[row.program_track_id] = (nextCountByTrackId[row.program_track_id] ?? 0) + 1;
+  }
+
+  const snapshot: ProgramDetailSnapshot = {
+    mosque: mosqueData,
+    program: { ...programData, teacher },
+    details: detailsResult.data ?? null,
+    outcomes: outcomesResult.data ?? [],
+    contentSections: contentResult.data ?? [],
+    faqs: faqResult.data ?? [],
+    mediaItems: mediaResult.data ?? [],
+    tracks: tracksResult.data ?? [],
+    enrolledCount: activeEnrollmentIds.length,
+    enrolledCountByTrackId: nextCountByTrackId,
+    accountType: null,
+    childStatuses: {},
+    requestStatus: null,
+    isEnrolled: false,
+    isStaffForProgram: false,
+    error: null,
+  };
+
+  if (!userId) {
+    return snapshot;
+  }
+
+  const [profileResult, enrollmentResult, requestResult, teacherAssignmentResult, access] = await Promise.all([
+    supabase.from("profiles").select("account_type").eq("id", userId).maybeSingle(),
+    supabase.from("enrollments").select("*").eq("program_id", programData.id).eq("student_profile_id", userId).maybeSingle(),
+    supabase
+      .from("enrollment_requests")
+      .select("*")
+      .eq("program_id", programData.id)
+      .eq("student_profile_id", userId)
+      .is("student_dismissed_at", null)
+      .order("requested_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    supabase.from("program_teachers").select("program_id").eq("program_id", programData.id).eq("teacher_profile_id", userId).maybeSingle(),
+    loadCachedUserAccess(slug, userId),
+  ]);
+  const nextAccountType = profileResult.data?.account_type ?? access.accountType ?? null;
+  snapshot.accountType = nextAccountType;
+  snapshot.isEnrolled = Boolean(enrollmentResult.data);
+  snapshot.requestStatus = requestResult.data?.status ?? null;
+  snapshot.isStaffForProgram = Boolean(teacherAssignmentResult.data) || directorProfileId === userId || access.isMosqueAdmin;
+
+  if (nextAccountType === "parent") {
+    const { children } = await fetchParentChildren(supabase, slug, userId, mosqueData.id);
+    const childIds = children.map((child) => child.id);
+    if (childIds.length) {
+      const [childEnrollments, childRequests] = await Promise.all([
+        supabase.from("enrollments").select("student_profile_id").eq("program_id", programData.id).in("student_profile_id", childIds),
+        supabase
+          .from("enrollment_requests")
+          .select("student_profile_id, status")
+          .eq("program_id", programData.id)
+          .eq("parent_profile_id", userId)
+          .in("student_profile_id", childIds)
+          .is("student_dismissed_at", null)
+          .order("requested_at", { ascending: false }),
+      ]);
+      const enrolledChildIds = new Set((childEnrollments.data ?? []).map((row) => row.student_profile_id));
+      const statuses: Record<string, { enrolled: boolean; requestStatus: string | null }> = {};
+      for (const child of children) {
+        statuses[child.id] = {
+          enrolled: enrolledChildIds.has(child.id),
+          requestStatus: childRequests.data?.find((row) => row.student_profile_id === child.id)?.status ?? null,
+        };
+      }
+      snapshot.childStatuses = statuses;
+    }
+  }
+
+  return snapshot;
+}
+
 export function ProgramDetailData({ slug, programId, section = "public" }: { slug: string; programId: string; section?: "public" | "portal" | "teacher" }) {
   const [mosque, setMosque] = useState<Mosque | null>(null);
   const [program, setProgram] = useState<ProgramWithTeacher | null>(null);
@@ -1235,157 +1431,61 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
       setIsSignedIn(Boolean(session));
     });
 
-    async function load() {
-      const session = await loadCachedSession();
-      const userId = session?.user.id ?? null;
-
-      const { data: mosqueData, error: mosqueError } = await supabase.from("mosques").select("*").eq("slug", slug).maybeSingle();
-      if (mosqueError) {
-        setError(mosqueError.message);
-        setLoading(false);
-        return;
-      }
-
-      if (!mosqueData) {
-        setLoading(false);
-        return;
-      }
-
-      const { data: programData, error: programError } = await supabase
-        .from("programs")
-        .select("*")
-        .eq("id", programId)
-        .eq("mosque_id", mosqueData.id)
-        .maybeSingle();
-
-      if (programError) {
-        setError(programError.message);
-        setLoading(false);
-        return;
-      }
-
-      if (
-        section === "public" &&
-        programData &&
-        !["published", "hidden"].includes(programData.publication_status ?? "published")
-      ) {
-        setError("This program is not published yet.");
-        setLoading(false);
-        return;
-      }
-
-      let teacher: TeacherDisplay | null = null;
-      const directorProfileId = programData?.director_profile_id ?? programData?.teacher_profile_id ?? null;
-      if (directorProfileId) {
-        const { data: teacherData } = await supabase
-          .from("profiles")
-          .select("id, full_name, avatar_url, teacher_credentials, teacher_whatsapp_number")
-          .eq("id", directorProfileId)
-          .maybeSingle();
-        teacher = teacherData ?? null;
-      }
-
-      if (programData) {
-        const [detailsResult, outcomesResult, contentResult, faqResult, mediaResult, tracksResult, enrolledCountResult] = await Promise.all([
-          supabase.from("program_details").select("*").eq("program_id", programData.id).maybeSingle(),
-          supabase.from("program_outcomes").select("*").eq("program_id", programData.id).order("sort_order", { ascending: true }),
-          supabase.from("program_content_sections").select("*").eq("program_id", programData.id).order("sort_order", { ascending: true }),
-          supabase.from("program_faqs").select("*").eq("program_id", programData.id).order("sort_order", { ascending: true }),
-          supabase.from("program_media").select("*").eq("program_id", programData.id).order("sort_order", { ascending: true }),
-          supabase.from("program_tracks").select("*").eq("program_id", programData.id).eq("is_active", true).order("sort_order", { ascending: true }),
-          supabase.from("enrollments").select("id").eq("program_id", programData.id).eq("status", "active"),
-        ]);
-
-        setDetails(detailsResult.data ?? null);
-        setOutcomes(outcomesResult.data ?? []);
-        setContentSections(contentResult.data ?? []);
-        setFaqs(faqResult.data ?? []);
-        setMediaItems(mediaResult.data ?? []);
-        setTracks(tracksResult.data ?? []);
-        const activeEnrollmentIds = (enrolledCountResult.data ?? []).map((row) => row.id);
-        setEnrolledCount(activeEnrollmentIds.length);
-
-        const { data: enrollmentTrackRows } = activeEnrollmentIds.length
-          ? await supabase.from("enrollment_tracks").select("enrollment_id, program_track_id").in("enrollment_id", activeEnrollmentIds)
-          : { data: [] as Array<{ enrollment_id: string; program_track_id: string }> };
-        const nextCountByTrackId: Record<string, number> = {};
-        for (const row of enrollmentTrackRows ?? []) {
-          nextCountByTrackId[row.program_track_id] = (nextCountByTrackId[row.program_track_id] ?? 0) + 1;
-        }
-        setEnrolledCountByTrackId(nextCountByTrackId);
-
-        if (userId) {
-          const [profileResult, enrollmentResult, requestResult, teacherAssignmentResult, access] = await Promise.all([
-            supabase.from("profiles").select("account_type").eq("id", userId).maybeSingle(),
-            supabase.from("enrollments").select("*").eq("program_id", programData.id).eq("student_profile_id", userId).maybeSingle(),
-            supabase
-              .from("enrollment_requests")
-              .select("*")
-              .eq("program_id", programData.id)
-              .eq("student_profile_id", userId)
-              .is("student_dismissed_at", null)
-              .order("requested_at", { ascending: false })
-              .limit(1)
-              .maybeSingle(),
-            supabase.from("program_teachers").select("program_id").eq("program_id", programData.id).eq("teacher_profile_id", userId).maybeSingle(),
-            loadCachedUserAccess(slug, userId),
-          ]);
-          const nextAccountType = profileResult.data?.account_type ?? access.accountType ?? null;
-          setAccountType(nextAccountType);
-          setIsEnrolled(Boolean(enrollmentResult.data));
-          setRequestStatus(requestResult.data?.status ?? null);
-          setIsStaffForProgram(Boolean(teacherAssignmentResult.data) || directorProfileId === userId || access.isMosqueAdmin);
-
-          if (nextAccountType === "parent") {
-            const { children } = await fetchParentChildren(supabase, slug, userId, mosqueData.id);
-            const childIds = children.map((child) => child.id);
-            if (childIds.length) {
-              const [childEnrollments, childRequests] = await Promise.all([
-                supabase.from("enrollments").select("student_profile_id").eq("program_id", programData.id).in("student_profile_id", childIds),
-                supabase
-                  .from("enrollment_requests")
-                  .select("student_profile_id, status")
-                  .eq("program_id", programData.id)
-                  .eq("parent_profile_id", userId)
-                  .in("student_profile_id", childIds)
-                  .is("student_dismissed_at", null)
-                  .order("requested_at", { ascending: false }),
-              ]);
-              const enrolledChildIds = new Set((childEnrollments.data ?? []).map((row) => row.student_profile_id));
-              const statuses: Record<string, { enrolled: boolean; requestStatus: string | null }> = {};
-              for (const child of children) {
-                statuses[child.id] = {
-                  enrolled: enrolledChildIds.has(child.id),
-                  requestStatus: childRequests.data?.find((row) => row.student_profile_id === child.id)?.status ?? null,
-                };
-              }
-              setChildStatuses(statuses);
-            } else {
-              setChildStatuses({});
-            }
-          } else {
-            setChildStatuses({});
-          }
-        } else {
-          setAccountType(null);
-          setChildStatuses({});
-          setIsEnrolled(false);
-          setRequestStatus(null);
-          setIsStaffForProgram(false);
-        }
-      }
-
-      setMosque(mosqueData);
-      setProgram(programData ? { ...programData, teacher } : null);
-      setLoading(false);
-    }
-
-    load();
-
     return () => {
       subscription.unsubscribe();
     };
-  }, [programId, slug]);
+  }, []);
+
+  const [programDetailSession, setProgramDetailSession] = useState<ReturnType<typeof getCachedSessionSnapshot>>(() => getCachedSessionSnapshot());
+  useEffect(() => {
+    let cancelled = false;
+    loadCachedSession().then((nextSession) => {
+      if (!cancelled) {
+        setProgramDetailSession(nextSession);
+      }
+    });
+    const unsubscribe = subscribeCachedSession((nextSession) => {
+      setProgramDetailSession(nextSession);
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, []);
+
+  const programDetailUserId = programDetailSession?.user.id ?? null;
+  const programDetailKey =
+    programDetailSession === undefined ? null : `program-detail:${slug}:${programId}:${section}:${programDetailUserId ?? "guest"}`;
+  const { data: programDetailSnapshot, loading: programDetailQueryLoading } = useCachedQuery(programDetailKey, () =>
+    fetchProgramDetailSnapshot(slug, programId, section, programDetailUserId),
+  );
+
+  useEffect(() => {
+    if (!programDetailSnapshot) {
+      return;
+    }
+    setMosque(programDetailSnapshot.mosque);
+    setProgram(programDetailSnapshot.program);
+    setDetails(programDetailSnapshot.details);
+    setOutcomes(programDetailSnapshot.outcomes);
+    setContentSections(programDetailSnapshot.contentSections);
+    setFaqs(programDetailSnapshot.faqs);
+    setMediaItems(programDetailSnapshot.mediaItems);
+    setTracks(programDetailSnapshot.tracks);
+    setAccountType(programDetailSnapshot.accountType);
+    setChildStatuses(programDetailSnapshot.childStatuses);
+    setRequestStatus(programDetailSnapshot.requestStatus);
+    setIsEnrolled(programDetailSnapshot.isEnrolled);
+    setIsStaffForProgram(programDetailSnapshot.isStaffForProgram);
+    setEnrolledCount(programDetailSnapshot.enrolledCount);
+    setEnrolledCountByTrackId(programDetailSnapshot.enrolledCountByTrackId);
+    setError(programDetailSnapshot.error);
+    setLoading(false);
+  }, [programDetailSnapshot]);
+
+  useEffect(() => {
+    setLoading(programDetailQueryLoading);
+  }, [programDetailQueryLoading]);
 
   if (loading) {
     return <ProgramDetailLoadingState />;
@@ -1675,14 +1775,145 @@ export function ProgramDetailData({ slug, programId, section = "public" }: { slu
   );
 }
 
+type ProgramApplyDetailSnapshot = {
+  mosque: Mosque | null;
+  program: Program | null;
+  tracks: ProgramTrack[];
+  enrolledCountByTrackId: Record<string, number>;
+  accountType: string | null;
+  selfProfile: StudentDisplay | null;
+  parentChildren: StudentDisplay[];
+  childStatuses: Record<string, { enrolled: boolean; requestStatus: string | null }>;
+  requestStatus: string | null;
+  isEnrolled: boolean;
+  error: string | null;
+};
+
+const emptyProgramApplyDetailSnapshot: ProgramApplyDetailSnapshot = {
+  mosque: null,
+  program: null,
+  tracks: [],
+  enrolledCountByTrackId: {},
+  accountType: null,
+  selfProfile: null,
+  parentChildren: [],
+  childStatuses: {},
+  requestStatus: null,
+  isEnrolled: false,
+  error: null,
+};
+
+async function fetchProgramApplyDetail(slug: string, programId: string, userId: string | null): Promise<ProgramApplyDetailSnapshot> {
+  const supabase = createSupabaseBrowserClient();
+  const { data: mosqueData, error: mosqueError } = await supabase.from("mosques").select("*").eq("slug", slug).maybeSingle();
+  if (mosqueError || !mosqueData) {
+    return { ...emptyProgramApplyDetailSnapshot, error: mosqueError?.message ?? "Masjid not found." };
+  }
+
+  const { data: programData, error: programError } = await supabase
+    .from("programs")
+    .select("*")
+    .eq("id", programId)
+    .eq("mosque_id", mosqueData.id)
+    .maybeSingle();
+  if (programError || !programData) {
+    return { ...emptyProgramApplyDetailSnapshot, mosque: mosqueData, error: programError?.message ?? "This class could not be loaded." };
+  }
+  if (!["published", "hidden"].includes(programData.publication_status ?? "published")) {
+    return { ...emptyProgramApplyDetailSnapshot, mosque: mosqueData, program: programData, error: "This program is not published yet." };
+  }
+
+  const { data: tracksData } = await supabase
+    .from("program_tracks")
+    .select("*")
+    .eq("program_id", programData.id)
+    .eq("is_active", true)
+    .order("sort_order", { ascending: true });
+  const activeTracks = tracksData ?? [];
+
+  const { data: activeEnrollments } = await supabase.from("enrollments").select("id").eq("program_id", programData.id).eq("status", "active");
+  const activeEnrollmentIds = (activeEnrollments ?? []).map((row) => row.id);
+  const { data: enrollmentTrackRows } = activeEnrollmentIds.length
+    ? await supabase.from("enrollment_tracks").select("enrollment_id, program_track_id").in("enrollment_id", activeEnrollmentIds)
+    : { data: [] as Array<{ enrollment_id: string; program_track_id: string }> };
+  const nextCountByTrackId: Record<string, number> = {};
+  for (const row of enrollmentTrackRows ?? []) {
+    nextCountByTrackId[row.program_track_id] = (nextCountByTrackId[row.program_track_id] ?? 0) + 1;
+  }
+
+  const snapshot: ProgramApplyDetailSnapshot = {
+    ...emptyProgramApplyDetailSnapshot,
+    mosque: mosqueData,
+    program: programData,
+    tracks: activeTracks,
+    enrolledCountByTrackId: nextCountByTrackId,
+  };
+
+  if (!userId) {
+    return snapshot;
+  }
+
+  const [profileResult, enrollmentResult, requestResult, access] = await Promise.all([
+    supabase
+      .from("profiles")
+      .select("id, full_name, email, phone_number, avatar_url, age, gender, date_of_birth, account_type")
+      .eq("id", userId)
+      .maybeSingle(),
+    supabase.from("enrollments").select("*").eq("program_id", programData.id).eq("student_profile_id", userId).maybeSingle(),
+    supabase
+      .from("enrollment_requests")
+      .select("*")
+      .eq("program_id", programData.id)
+      .eq("student_profile_id", userId)
+      .is("student_dismissed_at", null)
+      .order("requested_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    loadCachedUserAccess(slug, userId),
+  ]);
+  const nextAccountType = profileResult.data?.account_type ?? access.accountType ?? null;
+  snapshot.accountType = nextAccountType;
+  snapshot.selfProfile = (profileResult.data as StudentDisplay | null) ?? null;
+  snapshot.isEnrolled = Boolean(enrollmentResult.data);
+  snapshot.requestStatus = requestResult.data?.status ?? null;
+
+  if (nextAccountType === "parent") {
+    const { children } = await fetchParentChildren(supabase, slug, userId, mosqueData.id);
+    snapshot.parentChildren = children;
+    const childIds = children.map((child) => child.id);
+    if (childIds.length) {
+      const [childEnrollments, childRequests] = await Promise.all([
+        supabase.from("enrollments").select("student_profile_id").eq("program_id", programData.id).in("student_profile_id", childIds),
+        supabase
+          .from("enrollment_requests")
+          .select("student_profile_id, status")
+          .eq("program_id", programData.id)
+          .eq("parent_profile_id", userId)
+          .in("student_profile_id", childIds)
+          .is("student_dismissed_at", null)
+          .order("requested_at", { ascending: false }),
+      ]);
+      const enrolledChildIds = new Set((childEnrollments.data ?? []).map((row) => row.student_profile_id));
+      const statuses: Record<string, { enrolled: boolean; requestStatus: string | null }> = {};
+      for (const child of children) {
+        statuses[child.id] = {
+          enrolled: enrolledChildIds.has(child.id),
+          requestStatus: childRequests.data?.find((row) => row.student_profile_id === child.id)?.status ?? null,
+        };
+      }
+      snapshot.childStatuses = statuses;
+    }
+  }
+
+  return snapshot;
+}
+
 export function ProgramApplyData({ slug, programId }: { slug: string; programId: string }) {
   const router = useRouter();
   const [mosque, setMosque] = useState<Mosque | null>(null);
   const [program, setProgram] = useState<Program | null>(null);
   const [tracks, setTracks] = useState<ProgramTrack[]>([]);
   const [enrolledCountByTrackId, setEnrolledCountByTrackId] = useState<Record<string, number>>({});
-  const [isSignedIn, setIsSignedIn] = useState(false);
-  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [accountType, setAccountType] = useState<string | null>(null);
   const [selfProfile, setSelfProfile] = useState<StudentDisplay | null>(null);
   const [parentChildren, setParentChildren] = useState<StudentDisplay[]>([]);
@@ -1699,149 +1930,66 @@ export function ProgramApplyData({ slug, programId }: { slug: string; programId:
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const [applySession, setApplySession] = useState<ReturnType<typeof getCachedSessionSnapshot>>(() => getCachedSessionSnapshot());
   useEffect(() => {
     let cancelled = false;
-
-    async function load() {
-      setLoading(true);
-      setError(null);
-      const supabase = createSupabaseBrowserClient();
-      const session = await loadCachedSession();
-      const userId = session?.user.id ?? null;
-      if (cancelled) {
-        return;
+    loadCachedSession().then((nextSession) => {
+      if (!cancelled) {
+        setApplySession(nextSession);
       }
-      setIsSignedIn(Boolean(session));
-      setCurrentUserId(userId);
-
-      const { data: mosqueData, error: mosqueError } = await supabase.from("mosques").select("*").eq("slug", slug).maybeSingle();
-      if (cancelled) {
-        return;
-      }
-      if (mosqueError || !mosqueData) {
-        setError(mosqueError?.message ?? "Masjid not found.");
-        setLoading(false);
-        return;
-      }
-
-      const { data: programData, error: programError } = await supabase
-        .from("programs")
-        .select("*")
-        .eq("id", programId)
-        .eq("mosque_id", mosqueData.id)
-        .maybeSingle();
-      if (cancelled) {
-        return;
-      }
-      if (programError || !programData) {
-        setError(programError?.message ?? "This class could not be loaded.");
-        setLoading(false);
-        return;
-      }
-      if (!["published", "hidden"].includes(programData.publication_status ?? "published")) {
-        setError("This program is not published yet.");
-        setLoading(false);
-        return;
-      }
-
-      const { data: tracksData } = await supabase
-        .from("program_tracks")
-        .select("*")
-        .eq("program_id", programData.id)
-        .eq("is_active", true)
-        .order("sort_order", { ascending: true });
-      const activeTracks = tracksData ?? [];
-      setTracks(activeTracks);
-      setSelectedTrackIds(activeTracks[0]?.id ? [activeTracks[0].id] : []);
-      setSelectedPaymentType(programOfferedPaymentTypes(programData)[0] ?? "monthly");
-      setMosque(mosqueData);
-      setProgram(programData);
-
-      const { data: activeEnrollments } = await supabase.from("enrollments").select("id").eq("program_id", programData.id).eq("status", "active");
-      const activeEnrollmentIds = (activeEnrollments ?? []).map((row) => row.id);
-      const { data: enrollmentTrackRows } = activeEnrollmentIds.length
-        ? await supabase.from("enrollment_tracks").select("enrollment_id, program_track_id").in("enrollment_id", activeEnrollmentIds)
-        : { data: [] as Array<{ enrollment_id: string; program_track_id: string }> };
-      const nextCountByTrackId: Record<string, number> = {};
-      for (const row of enrollmentTrackRows ?? []) {
-        nextCountByTrackId[row.program_track_id] = (nextCountByTrackId[row.program_track_id] ?? 0) + 1;
-      }
-      setEnrolledCountByTrackId(nextCountByTrackId);
-
-      if (!userId) {
-        setLoading(false);
-        return;
-      }
-
-      const [profileResult, enrollmentResult, requestResult, access] = await Promise.all([
-        supabase
-          .from("profiles")
-          .select("id, full_name, email, phone_number, avatar_url, age, gender, date_of_birth, account_type")
-          .eq("id", userId)
-          .maybeSingle(),
-        supabase.from("enrollments").select("*").eq("program_id", programData.id).eq("student_profile_id", userId).maybeSingle(),
-        supabase
-          .from("enrollment_requests")
-          .select("*")
-          .eq("program_id", programData.id)
-          .eq("student_profile_id", userId)
-          .is("student_dismissed_at", null)
-          .order("requested_at", { ascending: false })
-          .limit(1)
-          .maybeSingle(),
-        loadCachedUserAccess(slug, userId),
-      ]);
-      if (cancelled) {
-        return;
-      }
-      const nextAccountType = profileResult.data?.account_type ?? access.accountType ?? null;
-      setAccountType(nextAccountType);
-      setSelfProfile((profileResult.data as StudentDisplay | null) ?? null);
-      setIsEnrolled(Boolean(enrollmentResult.data));
-      setRequestStatus(requestResult.data?.status ?? null);
-
-      if (nextAccountType === "parent") {
-        const { children } = await fetchParentChildren(supabase, slug, userId, mosqueData.id);
-        if (cancelled) {
-          return;
-        }
-        setParentChildren(children);
-        const childIds = children.map((child) => child.id);
-        if (childIds.length) {
-          const [childEnrollments, childRequests] = await Promise.all([
-            supabase.from("enrollments").select("student_profile_id").eq("program_id", programData.id).in("student_profile_id", childIds),
-            supabase
-              .from("enrollment_requests")
-              .select("student_profile_id, status")
-              .eq("program_id", programData.id)
-              .eq("parent_profile_id", userId)
-              .in("student_profile_id", childIds)
-              .is("student_dismissed_at", null)
-              .order("requested_at", { ascending: false }),
-          ]);
-          if (cancelled) {
-            return;
-          }
-          const enrolledChildIds = new Set((childEnrollments.data ?? []).map((row) => row.student_profile_id));
-          const statuses: Record<string, { enrolled: boolean; requestStatus: string | null }> = {};
-          for (const child of children) {
-            statuses[child.id] = {
-              enrolled: enrolledChildIds.has(child.id),
-              requestStatus: childRequests.data?.find((row) => row.student_profile_id === child.id)?.status ?? null,
-            };
-          }
-          setChildStatuses(statuses);
-        }
-      }
-
-      setLoading(false);
-    }
-
-    load();
+    });
+    const unsubscribe = subscribeCachedSession((nextSession) => {
+      setApplySession(nextSession);
+    });
     return () => {
       cancelled = true;
+      unsubscribe();
     };
-  }, [programId, slug]);
+  }, []);
+
+  const isSignedIn = Boolean(applySession);
+  const currentUserId = applySession?.user.id ?? null;
+  const applyKey = applySession === undefined ? null : `program-apply:${slug}:${programId}:${currentUserId ?? "guest"}`;
+  const { data: applySnapshot, loading: applyQueryLoading } = useCachedQuery(applyKey, () => fetchProgramApplyDetail(slug, programId, currentUserId));
+
+  const hasAppliedDefaultsRef = useRef(false);
+  useEffect(() => {
+    if (!applySnapshot) {
+      return;
+    }
+    setMosque(applySnapshot.mosque);
+    setProgram(applySnapshot.program);
+    setTracks(applySnapshot.tracks);
+    setEnrolledCountByTrackId(applySnapshot.enrolledCountByTrackId);
+    setAccountType(applySnapshot.accountType);
+    setSelfProfile(applySnapshot.selfProfile);
+    setParentChildren(applySnapshot.parentChildren);
+    setChildStatuses(applySnapshot.childStatuses);
+    setRequestStatus(applySnapshot.requestStatus);
+    setIsEnrolled(applySnapshot.isEnrolled);
+    setError(applySnapshot.error);
+    setLoading(false);
+
+    // Only seed the user's track/payment-type selection from the fetched defaults on the
+    // first successful load — a later background revalidation (e.g. while the student is
+    // mid-form) must never clobber a selection they've already made.
+    if (!hasAppliedDefaultsRef.current && applySnapshot.program) {
+      hasAppliedDefaultsRef.current = true;
+      setSelectedTrackIds(applySnapshot.tracks[0]?.id ? [applySnapshot.tracks[0].id] : []);
+      setSelectedPaymentType(programOfferedPaymentTypes(applySnapshot.program)[0] ?? "monthly");
+    }
+  }, [applySnapshot]);
+
+  useEffect(() => {
+    setLoading(applyQueryLoading);
+  }, [applyQueryLoading]);
+
+  useEffect(() => {
+    if (!loading && !error && mosque && program && !isSignedIn) {
+      const returnTo = `/m/${slug}/programs/${programId}/apply`;
+      router.replace(`/m/${slug}/login?returnTo=${encodeURIComponent(returnTo)}`);
+    }
+  }, [loading, error, mosque, program, isSignedIn, router, slug, programId]);
 
   if (loading) {
     return <ProgramDetailLoadingState />;
@@ -1858,8 +2006,6 @@ export function ProgramApplyData({ slug, programId }: { slug: string; programId:
   const programHref = `/m/${slug}/programs/${programId}`;
 
   if (!isSignedIn) {
-    const returnTo = `${programHref}/apply`;
-    router.replace(`/m/${slug}/login?returnTo=${encodeURIComponent(returnTo)}`);
     return <ProgramDetailLoadingState />;
   }
 
@@ -1957,6 +2103,11 @@ export function ProgramApplyData({ slug, programId }: { slug: string; programId:
       }
 
       queueEnrollmentRequestSubmittedEmails((parentRequestRows ?? []).map((row) => row.id));
+      invalidateQuery(`student-applications:${slug}:${currentUserId}`);
+      invalidateQueryPrefix(`program-detail:${slug}:${programId}:`);
+      if (applyKey) {
+        invalidateQuery(applyKey);
+      }
       setSubmittedCount(requestableStudentIds.length);
       setSubmitted(true);
       setSubmitBusy(false);
@@ -2008,6 +2159,11 @@ export function ProgramApplyData({ slug, programId }: { slug: string; programId:
     }
 
     queueEnrollmentRequestSubmittedEmails((requestRows ?? []).map((row) => row.id));
+    invalidateQuery(`student-applications:${slug}:${currentUserId}`);
+    invalidateQueryPrefix(`program-detail:${slug}:${programId}:`);
+    if (applyKey) {
+      invalidateQuery(applyKey);
+    }
     setSubmittedCount(1);
     setSubmitted(true);
     setSubmitBusy(false);
@@ -4767,6 +4923,40 @@ function ConfirmStudentRescindModal({
   );
 }
 
+type TeacherInboxSnapshot = {
+  currentUserId: string | null;
+  seenRequestIds: Set<string>;
+  dismissedNotificationIds: Set<string>;
+  programs: Program[];
+  selectedProgramId: string;
+  canReviewRequests: boolean;
+  announcementTracksByProgramId: Record<string, ProgramTrack[]>;
+  selectedAnnouncementTargetValue: string;
+  announcements: AnnouncementWithContext[];
+  trackSwitchRequests: ProgramTrackSwitchRequestWithContext[];
+  requests: RequestWithContext[];
+  withdrawals: WithdrawalRequestWithContext[];
+  instructorNotifications: InstructorLifecycleNotification[];
+  error: string | null;
+};
+
+const emptyTeacherInboxSnapshot: TeacherInboxSnapshot = {
+  currentUserId: null,
+  seenRequestIds: new Set(),
+  dismissedNotificationIds: new Set(),
+  programs: [],
+  selectedProgramId: "",
+  canReviewRequests: false,
+  announcementTracksByProgramId: {},
+  selectedAnnouncementTargetValue: "",
+  announcements: [],
+  trackSwitchRequests: [],
+  requests: [],
+  withdrawals: [],
+  instructorNotifications: [],
+  error: null,
+};
+
 export function TeacherInboxData({ slug }: { slug: string }) {
   const router = useRouter();
   const pathname = usePathname();
@@ -4795,6 +4985,23 @@ export function TeacherInboxData({ slug }: { slug: string }) {
   const [error, setError] = useState<string | null>(null);
   const [reviewTarget, setReviewTarget] = useState<{ programId: string; requestId: string } | null>(null);
   const [drawerItem, setDrawerItem] = useState<TeacherInboxMessageItem | null>(null);
+  const [teacherInboxSession, setTeacherInboxSession] = useState<ReturnType<typeof getCachedSessionSnapshot>>(() => getCachedSessionSnapshot());
+
+  useEffect(() => {
+    let cancelled = false;
+    loadCachedSession().then((nextSession) => {
+      if (!cancelled) {
+        setTeacherInboxSession(nextSession);
+      }
+    });
+    const unsubscribe = subscribeCachedSession((nextSession) => {
+      setTeacherInboxSession(nextSession);
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, []);
 
   useEffect(() => {
     const nextTab = searchParams.get("tab");
@@ -4803,27 +5010,18 @@ export function TeacherInboxData({ slug }: { slug: string }) {
     }
   }, [searchParams]);
 
-  async function loadTeacherInbox() {
+  async function fetchTeacherInboxSnapshot(): Promise<TeacherInboxSnapshot> {
     const supabase = createSupabaseBrowserClient();
     const { data: sessionData } = await supabase.auth.getSession();
     const userId = sessionData.session?.user.id;
     if (!userId) {
-      setCurrentUserId(null);
-      setSeenRequestIds(new Set());
-      setDismissedNotificationIds(new Set());
-      setCanReviewRequests(false);
-      setLoading(false);
-      return;
+      return { ...emptyTeacherInboxSnapshot };
     }
 
-    setCurrentUserId(userId);
     const { seen: initialSeenIds, dismissed: initialDismissedIds } = await fetchNotificationState(userId);
-    setSeenRequestIds(initialSeenIds);
-    setDismissedNotificationIds(initialDismissedIds);
     const { data: mosque } = await supabase.from("mosques").select("id").eq("slug", slug).maybeSingle();
     if (!mosque) {
-      setLoading(false);
-      return;
+      return { ...emptyTeacherInboxSnapshot, currentUserId: userId, seenRequestIds: initialSeenIds, dismissedNotificationIds: initialDismissedIds };
     }
 
     const [{ data: mosquePrograms }, { data: assignments }] = await Promise.all([
@@ -4836,25 +5034,19 @@ export function TeacherInboxData({ slug }: { slug: string }) {
     const directorProgramIds = teacherPrograms
       .filter((program) => (program.director_profile_id ?? program.teacher_profile_id) === userId || directorAssignmentIds.has(program.id))
       .map((program) => program.id);
-    setPrograms(teacherPrograms);
-    setCanReviewRequests(directorProgramIds.length > 0);
     const activeProgramId = selectedProgramId || teacherPrograms[0]?.id || "";
-    if (!selectedProgramId && activeProgramId) {
-      setSelectedProgramId(activeProgramId);
-    }
 
     const programIds = teacherPrograms.map((program) => program.id);
     if (programIds.length === 0) {
-      setAnnouncements([]);
-      setRequests([]);
-      setWithdrawals([]);
-      setInstructorNotifications([]);
-      setTrackSwitchRequests([]);
-      setAnnouncementTracksByProgramId({});
-      setSelectedAnnouncementTargetValue("");
-      setCanReviewRequests(false);
-      setLoading(false);
-      return;
+      return {
+        ...emptyTeacherInboxSnapshot,
+        currentUserId: userId,
+        seenRequestIds: initialSeenIds,
+        dismissedNotificationIds: initialDismissedIds,
+        programs: teacherPrograms,
+        selectedProgramId: activeProgramId,
+        canReviewRequests: directorProgramIds.length > 0,
+      };
     }
 
     const [
@@ -4896,9 +5088,16 @@ export function TeacherInboxData({ slug }: { slug: string }) {
     ]);
 
     if (announcementError || requestError || withdrawalError || instructorError || instructorEventError) {
-      setError(announcementError?.message ?? requestError?.message ?? withdrawalError?.message ?? instructorError?.message ?? instructorEventError?.message ?? "Could not load teacher inbox.");
-      setLoading(false);
-      return;
+      return {
+        ...emptyTeacherInboxSnapshot,
+        currentUserId: userId,
+        seenRequestIds: initialSeenIds,
+        dismissedNotificationIds: initialDismissedIds,
+        programs: teacherPrograms,
+        selectedProgramId: activeProgramId,
+        canReviewRequests: directorProgramIds.length > 0,
+        error: announcementError?.message ?? requestError?.message ?? withdrawalError?.message ?? instructorError?.message ?? instructorEventError?.message ?? "Could not load teacher inbox.",
+      };
     }
 
     const studentIds = Array.from(
@@ -4943,43 +5142,6 @@ export function TeacherInboxData({ slug }: { slug: string }) {
       next[track.program_id] = [...(next[track.program_id] ?? []), track];
       return next;
     }, {});
-    setAnnouncementTracksByProgramId(tracksByProgramId);
-    if (!selectedAnnouncementTargetValue && activeProgramId) {
-      setSelectedAnnouncementTargetValue(announcementTargetValue(activeProgramId, null));
-    }
-    setAnnouncements(
-      (announcementRows ?? []).map((announcement) => ({
-        ...announcement,
-        program: teacherPrograms.find((program) => program.id === announcement.program_id) ?? null,
-        author: (authors ?? []).find((author) => author.id === announcement.author_profile_id) ?? null,
-      })),
-    );
-    setTrackSwitchRequests(
-      (trackSwitchRows ?? []).map((request) => ({
-        ...request,
-        program: teacherPrograms.find((program) => program.id === request.program_id) ?? null,
-        student: (students ?? []).find((student) => student.id === request.student_profile_id) ?? null,
-      })),
-    );
-    setRequests(
-      (requestRows ?? []).map((request) => ({
-        ...request,
-        program: teacherPrograms.find((program) => program.id === request.program_id) ?? null,
-        student: (students ?? []).find((student) => student.id === request.student_profile_id) ?? null,
-        parent: request.parent_profile_id ? ((parents ?? []).find((parent) => parent.id === request.parent_profile_id) as ParentDisplay | undefined) ?? null : null,
-        track: resolveRequestTrack(request, requestTrackIdsByRequestId, trackRows ?? []),
-      })),
-    );
-    setWithdrawals(
-      (withdrawalRows ?? []).map((request) => ({
-        ...request,
-        program: teacherPrograms.find((program) => program.id === request.program_id) ?? null,
-        student: (students ?? []).find((student) => student.id === request.student_profile_id) ?? null,
-        parent: request.parent_profile_id ? ((parents ?? []).find((parent) => parent.id === request.parent_profile_id) as ParentDisplay | undefined) ?? null : null,
-        subscription:
-          (subscriptions ?? []).find((subscription) => subscription.program_id === request.program_id && subscription.student_profile_id === request.student_profile_id) ?? null,
-      })),
-    );
     const joinedAssignmentIdsWithEvents = new Set((instructorEventRows ?? []).filter((event) => event.event_type === "joined" && event.assignment_id).map((event) => event.assignment_id as string));
     const instructorEventNotifications: InstructorLifecycleNotification[] = (instructorEventRows ?? []).map((event) => ({
       id: event.id,
@@ -5003,19 +5165,86 @@ export function TeacherInboxData({ slug }: { slug: string }) {
         program: teacherPrograms.find((program) => program.id === notification.program_id) ?? null,
         instructor: notification.teacher_profile_id ? ((instructorProfiles ?? []).find((profile) => profile.id === notification.teacher_profile_id) as Profile | undefined) ?? null : null,
       }));
-    setInstructorNotifications(
-      [...instructorEventNotifications, ...fallbackJoinNotifications].sort((a, b) => Date.parse(b.created_at ?? "0") - Date.parse(a.created_at ?? "0")),
-    );
-    setLoading(false);
+
+    return {
+      currentUserId: userId,
+      seenRequestIds: initialSeenIds,
+      dismissedNotificationIds: initialDismissedIds,
+      programs: teacherPrograms,
+      selectedProgramId: activeProgramId,
+      canReviewRequests: directorProgramIds.length > 0,
+      announcementTracksByProgramId: tracksByProgramId,
+      selectedAnnouncementTargetValue: selectedAnnouncementTargetValue || (activeProgramId ? announcementTargetValue(activeProgramId, null) : ""),
+      announcements: (announcementRows ?? []).map((announcement) => ({
+        ...announcement,
+        program: teacherPrograms.find((program) => program.id === announcement.program_id) ?? null,
+        author: (authors ?? []).find((author) => author.id === announcement.author_profile_id) ?? null,
+      })),
+      trackSwitchRequests: (trackSwitchRows ?? []).map((request) => ({
+        ...request,
+        program: teacherPrograms.find((program) => program.id === request.program_id) ?? null,
+        student: (students ?? []).find((student) => student.id === request.student_profile_id) ?? null,
+      })),
+      requests: (requestRows ?? []).map((request) => ({
+        ...request,
+        program: teacherPrograms.find((program) => program.id === request.program_id) ?? null,
+        student: (students ?? []).find((student) => student.id === request.student_profile_id) ?? null,
+        parent: request.parent_profile_id ? ((parents ?? []).find((parent) => parent.id === request.parent_profile_id) as ParentDisplay | undefined) ?? null : null,
+        track: resolveRequestTrack(request, requestTrackIdsByRequestId, trackRows ?? []),
+      })),
+      withdrawals: (withdrawalRows ?? []).map((request) => ({
+        ...request,
+        program: teacherPrograms.find((program) => program.id === request.program_id) ?? null,
+        student: (students ?? []).find((student) => student.id === request.student_profile_id) ?? null,
+        parent: request.parent_profile_id ? ((parents ?? []).find((parent) => parent.id === request.parent_profile_id) as ParentDisplay | undefined) ?? null : null,
+        subscription:
+          (subscriptions ?? []).find((subscription) => subscription.program_id === request.program_id && subscription.student_profile_id === request.student_profile_id) ?? null,
+      })),
+      instructorNotifications: [...instructorEventNotifications, ...fallbackJoinNotifications].sort((a, b) => Date.parse(b.created_at ?? "0") - Date.parse(a.created_at ?? "0")),
+      error: null,
+    };
   }
 
+  const teacherInboxKey = teacherInboxSession === undefined ? null : `teacher-inbox:${slug}:${teacherInboxSession?.user.id ?? "guest"}`;
+  const { data: inboxSnapshot, loading: inboxQueryLoading, refetch } = useCachedQuery(teacherInboxKey, () => fetchTeacherInboxSnapshot());
+
   useEffect(() => {
-    const timeout = window.setTimeout(() => {
-      void loadTeacherInbox();
-    }, 0);
-    return () => window.clearTimeout(timeout);
+    if (!inboxSnapshot) {
+      return;
+    }
+    setCurrentUserId(inboxSnapshot.currentUserId);
+    setSeenRequestIds(inboxSnapshot.seenRequestIds);
+    setDismissedNotificationIds(inboxSnapshot.dismissedNotificationIds);
+    setPrograms(inboxSnapshot.programs);
+    setSelectedProgramId(inboxSnapshot.selectedProgramId);
+    setCanReviewRequests(inboxSnapshot.canReviewRequests);
+    setAnnouncementTracksByProgramId(inboxSnapshot.announcementTracksByProgramId);
+    setSelectedAnnouncementTargetValue(inboxSnapshot.selectedAnnouncementTargetValue);
+    setAnnouncements(inboxSnapshot.announcements);
+    setTrackSwitchRequests(inboxSnapshot.trackSwitchRequests);
+    setRequests(inboxSnapshot.requests);
+    setWithdrawals(inboxSnapshot.withdrawals);
+    setInstructorNotifications(inboxSnapshot.instructorNotifications);
+    setError(inboxSnapshot.error);
+    setLoading(false);
+  }, [inboxSnapshot]);
+
+  useEffect(() => {
+    setLoading(inboxQueryLoading);
+  }, [inboxQueryLoading]);
+
+  // Switching which program's announcements to view isn't part of the cache key (it starts
+  // empty and only resolves once the first fetch runs), so re-run explicitly when the director
+  // picks a different program after the initial load, mirroring the original effect's behavior.
+  const hasLoadedInboxOnce = useRef(false);
+  useEffect(() => {
+    if (!hasLoadedInboxOnce.current) {
+      hasLoadedInboxOnce.current = Boolean(inboxSnapshot);
+      return;
+    }
+    void refetch();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [slug, selectedProgramId]);
+  }, [selectedProgramId]);
 
   async function sendAnnouncement() {
     if (!currentUserId || !selectedProgramId || !message.trim()) {
@@ -5046,7 +5275,7 @@ export function TeacherInboxData({ slug }: { slug: string }) {
     if (inserted) {
       void notifyAnnouncementPosted(targetProgramId, inserted.id);
     }
-    await loadTeacherInbox();
+    await refetch();
   }
 
   async function clearPastRequest(requestId: string) {
@@ -5112,7 +5341,7 @@ export function TeacherInboxData({ slug }: { slug: string }) {
       return false;
     }
     window.dispatchEvent(new Event("tareeqah:notifications-changed"));
-    await loadTeacherInbox();
+    await refetch();
     return true;
   }
 
@@ -5209,7 +5438,7 @@ export function TeacherInboxData({ slug }: { slug: string }) {
       return false;
     }
     setToast({ tone: "success", message: decision === "approved" ? "Switch approved." : "Switch rejected." });
-    await loadTeacherInbox();
+    await refetch();
     return true;
   }
 
@@ -5421,7 +5650,7 @@ export function TeacherInboxData({ slug }: { slug: string }) {
                 </select>
                 <button
                   type="button"
-                  onClick={() => void loadTeacherInbox()}
+                  onClick={() => void refetch()}
                   className="flex h-9 w-9 items-center justify-center rounded-full bg-[#EEF6F7] text-[#17624F] transition-colors hover:bg-[#DCEFF4]"
                   aria-label="Refresh inbox"
                   title="Refresh inbox"
@@ -5479,7 +5708,7 @@ export function TeacherInboxData({ slug }: { slug: string }) {
           mode="teacher"
           requestId={reviewTarget.requestId}
           onClose={closeReviewTarget}
-          onChanged={loadTeacherInbox}
+          onChanged={refetch}
         />
       ) : null}
     </div>
@@ -5831,7 +6060,7 @@ export function TeacherScheduleData({ slug, programId }: { slug: string; program
     const nextProgram = { ...program, schedule, schedule_notes: rows.length ? null : "Schedule TBA" };
     setProgram(nextProgram);
     setInitialRows(rows);
-    mosqueProgramsCache.delete(slug);
+    invalidateProgramCaches(slug, program.id);
     window.dispatchEvent(new Event("tareeqah:programs-changed"));
     setSaved(true);
     setSaving(false);
@@ -7128,7 +7357,7 @@ export function TeacherProgramCreateData({ slug }: { slug: string }) {
         }
       }
 
-      mosqueProgramsCache.delete(slug);
+      invalidateProgramCaches(slug, program.id);
       window.dispatchEvent(new Event("tareeqah:programs-changed"));
       queueEditorToast({ tone: "success", message: "Class created successfully." });
       window.location.href = creatorAccountType === "admin" ? `/m/${slug}/admin/programs` : `/m/${slug}/teacher/classes`;
@@ -8239,7 +8468,7 @@ export function TeacherProgramSettingsData({ slug, programId, returnHref }: { sl
 
     setProgram(result.program);
     setDetails(detailsPayload as ProgramDetails);
-    mosqueProgramsCache.delete(slug);
+    invalidateProgramCaches(slug, program.id);
     window.dispatchEvent(new Event("tareeqah:programs-changed"));
     queueEditorToast({ tone: "success", message: "Changes saved successfully." });
     window.location.href = returnHref ?? `/m/${slug}/teacher/classes`;
@@ -11356,6 +11585,30 @@ function AdminMemberChildrenList({ children }: { children: Profile[] }) {
   );
 }
 
+type TeacherRosterSnapshot = {
+  mosque: Mosque | null;
+  program: Program | null;
+  tracks: ProgramTrack[];
+  trackDaysById: Map<string, string[]>;
+  availableRosterDays: string[];
+  students: Array<{ enrollment: Enrollment; profile: StudentDisplay | null; parent?: ParentDisplay | null; subscription?: ProgramSubscription | null; trackIds: string[] }>;
+  waitlist: RequestWithContext[];
+  currentUserId: string | null;
+  error: string | null;
+};
+
+const emptyTeacherRosterSnapshot: TeacherRosterSnapshot = {
+  mosque: null,
+  program: null,
+  tracks: [],
+  trackDaysById: new Map(),
+  availableRosterDays: [],
+  students: [],
+  waitlist: [],
+  currentUserId: null,
+  error: null,
+};
+
 export function TeacherStudentsData({ slug, programId }: { slug: string; programId: string }) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -11405,19 +11658,14 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
     return `${basePath}/${programId}/students/${studentId}/notes`;
   }
 
-  async function loadStudents() {
-    setLoading(true);
-    setError(null);
+  async function fetchTeacherRoster(): Promise<TeacherRosterSnapshot> {
     const supabase = createSupabaseBrowserClient();
     const { data: sessionData } = await supabase.auth.getSession();
     const userId = sessionData.session?.user.id ?? null;
-    setCurrentUserId(userId);
 
     const { data: mosqueData, error: mosqueError } = await supabase.from("mosques").select("*").eq("slug", slug).maybeSingle();
     if (mosqueError || !mosqueData) {
-      setError(mosqueError?.message ?? "Masjid not found.");
-      setLoading(false);
-      return;
+      return { ...emptyTeacherRosterSnapshot, currentUserId: userId, error: mosqueError?.message ?? "Masjid not found." };
     }
 
     const { data: programData, error: programError } = await supabase
@@ -11428,9 +11676,7 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
       .maybeSingle();
 
     if (programError || !programData) {
-      setError(programError?.message ?? "Class not found.");
-      setLoading(false);
-      return;
+      return { ...emptyTeacherRosterSnapshot, currentUserId: userId, mosque: mosqueData, error: programError?.message ?? "Class not found." };
     }
 
     const [{ data: enrollmentRows, error: enrollmentError }, { data: waitlistRows, error: waitlistError }, { data: trackRows }] = await Promise.all([
@@ -11450,9 +11696,7 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
     ]);
 
     if (enrollmentError || waitlistError) {
-      setError(enrollmentError?.message ?? waitlistError?.message ?? "Could not load students.");
-      setLoading(false);
-      return;
+      return { ...emptyTeacherRosterSnapshot, currentUserId: userId, mosque: mosqueData, program: programData, error: enrollmentError?.message ?? waitlistError?.message ?? "Could not load students." };
     }
 
     const activeTrackRows = trackRows ?? [];
@@ -11501,27 +11745,14 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
       ? await supabase.from("profiles").select("id, full_name, email, phone_number, avatar_url").in("id", parentIds)
       : { data: [] as ParentDisplay[] };
 
-    setMosque(mosqueData);
-    setProgram(programData);
-    setTracks(activeTrackRows);
-    setTrackDaysById(nextTrackDaysById);
-    setSelectedRosterTrackIds((current) => {
-      const availableTrackIds = new Set(activeTrackRows.map((track) => track.id));
-      const next = current.filter((trackId) => availableTrackIds.has(trackId));
-      return next.length ? next : activeTrackRows.map((track) => track.id);
-    });
-    setSelectedRosterDays((current) => {
-      const next = current.filter((day) => availableRosterDays.includes(day));
-      if (next.length) {
-        return next;
-      }
-      if (sessionDayParam && availableRosterDays.includes(sessionDayParam)) {
-        return [sessionDayParam];
-      }
-      return availableRosterDays.length ? availableRosterDays : [...scheduleDayOptions];
-    });
-    setStudents(
-      (enrollmentRows ?? []).map((enrollment) => ({
+    return {
+      mosque: mosqueData,
+      program: programData,
+      tracks: activeTrackRows,
+      trackDaysById: nextTrackDaysById,
+      availableRosterDays,
+      currentUserId: userId,
+      students: (enrollmentRows ?? []).map((enrollment) => ({
         enrollment,
         trackIds: (enrollmentTrackRows ?? [])
           .filter((row) => row.enrollment_id === enrollment.id)
@@ -11536,26 +11767,52 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
             (parent) => parent.id === (linkRows ?? []).find((link) => link.child_profile_id === enrollment.student_profile_id)?.parent_profile_id,
           ) as ParentDisplay | undefined) ?? null,
       })),
-    );
-    setWaitlist(
-      (waitlistRows ?? []).map((request) => ({
+      waitlist: (waitlistRows ?? []).map((request) => ({
         ...request,
         program: programData,
         student: (profileRows ?? []).find((profile) => profile.id === request.student_profile_id) ?? null,
         parent: request.parent_profile_id ? ((parentRows ?? []).find((parent) => parent.id === request.parent_profile_id) as ParentDisplay | undefined) ?? null : null,
         track: request.program_track_id ? (trackRows ?? []).find((track) => track.id === request.program_track_id) ?? null : null,
       })),
-    );
-    setLoading(false);
+      error: null,
+    };
   }
 
+  const { data: rosterSnapshot, loading: rosterQueryLoading, refetch: refetchRoster } = useCachedQuery(programId ? `teacher-roster:${programId}` : null, () => fetchTeacherRoster());
+
   useEffect(() => {
-    const timeout = window.setTimeout(() => {
-      void loadStudents();
-    }, 0);
-    return () => window.clearTimeout(timeout);
+    if (!rosterSnapshot) {
+      return;
+    }
+    setMosque(rosterSnapshot.mosque);
+    setProgram(rosterSnapshot.program);
+    setTracks(rosterSnapshot.tracks);
+    setTrackDaysById(rosterSnapshot.trackDaysById);
+    setCurrentUserId(rosterSnapshot.currentUserId);
+    setStudents(rosterSnapshot.students);
+    setWaitlist(rosterSnapshot.waitlist);
+    setError(rosterSnapshot.error);
+    setSelectedRosterTrackIds((current) => {
+      const availableTrackIds = new Set(rosterSnapshot.tracks.map((track) => track.id));
+      const next = current.filter((trackId) => availableTrackIds.has(trackId));
+      return next.length ? next : rosterSnapshot.tracks.map((track) => track.id);
+    });
+    setSelectedRosterDays((current) => {
+      const next = current.filter((day) => rosterSnapshot.availableRosterDays.includes(day));
+      if (next.length) {
+        return next;
+      }
+      if (sessionDayParam && rosterSnapshot.availableRosterDays.includes(sessionDayParam)) {
+        return [sessionDayParam];
+      }
+      return rosterSnapshot.availableRosterDays.length ? rosterSnapshot.availableRosterDays : [...scheduleDayOptions];
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [programId, slug]);
+  }, [rosterSnapshot]);
+
+  useEffect(() => {
+    setLoading(rosterQueryLoading);
+  }, [rosterQueryLoading]);
 
   async function kickStudent(studentId: string, customMessage?: string) {
     if (!program || !mosque || !currentUserId) {
@@ -11611,7 +11868,7 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
     setKickTarget(null);
     setShowKickMessage(false);
     setKickMessage("");
-    await loadStudents();
+    await refetchRoster();
   }
 
   async function reviewWaitlistedRequest(
@@ -11643,7 +11900,7 @@ export function TeacherStudentsData({ slug, programId }: { slug: string; program
 
     queueEnrollmentRequestReviewedEmail(request.id);
     window.dispatchEvent(new Event("tareeqah:notifications-changed"));
-    await loadStudents();
+    await refetchRoster();
     setReviewBusy(false);
     setReviewTarget(null);
     setToast({ tone: "success", message: status === "approved" ? "Waitlisted application accepted." : "Waitlisted application rejected." });
@@ -15039,60 +15296,23 @@ function formatFinanceDate(value: string | null | undefined) {
   return new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
-function useMosquePrograms(slug: string) {
-  const cachedSnapshot = mosqueProgramsCache.get(slug);
-  const [mosque, setMosque] = useState<Mosque | null>(cachedSnapshot?.mosque ?? null);
-  const [programs, setPrograms] = useState<ProgramWithTeacher[]>(cachedSnapshot?.programs ?? []);
-  const [loading, setLoading] = useState(!cachedSnapshot);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function load() {
-      try {
-        const snapshot = await loadMosqueProgramsSnapshot(slug);
-        if (!cancelled) {
-          setMosque(snapshot.mosque);
-          setPrograms(snapshot.programs);
-          setError(null);
-          setLoading(false);
-        }
-      } catch (loadError) {
-        if (!cancelled) {
-          setError(loadError instanceof Error ? loadError.message : "Could not load programs.");
-          setLoading(false);
-        }
-      }
-    }
-
-    void load();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [slug]);
-
-  return { mosque, programs, loading, error };
+function mosqueProgramsQueryKey(slug: string) {
+  return `mosque-programs:${slug}`;
 }
 
-async function loadMosqueProgramsSnapshot(slug: string) {
-  const cached = mosqueProgramsCache.get(slug);
-  if (cached) {
-    return cached;
-  }
+/** Invalidate every cached list/detail view that embeds this program's data, after any edit
+ * to its schedule, tracks, pricing, or content — covers the guest/student browse list, the
+ * teacher's and admin's own program lists, and every viewer-scoped program-detail snapshot. */
+function invalidateProgramCaches(slug: string, programId: string) {
+  invalidateQuery(mosqueProgramsQueryKey(slug));
+  invalidateQuery(`teacher-programs:${slug}`);
+  invalidateQuery(`admin-programs:${slug}`);
+  invalidateQueryPrefix(`program-detail:${slug}:${programId}:`);
+}
 
-  const existing = mosqueProgramsPromises.get(slug);
-  if (existing) {
-    return existing;
-  }
-
-  const promise = fetchMosqueProgramsSnapshot(slug).finally(() => {
-    mosqueProgramsPromises.delete(slug);
-  });
-
-  mosqueProgramsPromises.set(slug, promise);
-  return promise;
+function useMosquePrograms(slug: string) {
+  const { data, loading, error: queryError, refetch } = useCachedQuery(slug ? mosqueProgramsQueryKey(slug) : null, () => fetchMosqueProgramsSnapshot(slug));
+  return { mosque: data?.mosque ?? null, programs: data?.programs ?? [], loading, error: queryError, refetch };
 }
 
 async function fetchMosqueProgramsSnapshot(slug: string): Promise<MosqueProgramsSnapshot> {
@@ -15151,7 +15371,6 @@ async function fetchMosqueProgramsSnapshot(slug: string): Promise<MosquePrograms
     }),
   };
 
-  mosqueProgramsCache.set(slug, snapshot);
   return snapshot;
 }
 
@@ -15305,403 +15524,318 @@ async function saveCanonicalProgramSessions(
   }
 }
 
-function useTeacherPrograms(slug: string) {
-  const [programs, setPrograms] = useState<ProgramScheduleSource[]>([]);
-  const [allPrograms, setAllPrograms] = useState<ProgramScheduleSource[]>([]);
-  const [roleByProgramId, setRoleByProgramId] = useState<Record<string, TeacherProgramRole>>({});
-  const [financeAccessByProgramId, setFinanceAccessByProgramId] = useState<Record<string, boolean>>({});
-  const [programCounts, setProgramCounts] = useState<Record<string, { students: number; applications: number; instructors: number }>>({});
-  const [canCreateClass, setCanCreateClass] = useState(false);
-  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+type TeacherProgramsResult = {
+  programs: ProgramScheduleSource[];
+  allPrograms: ProgramScheduleSource[];
+  roleByProgramId: Record<string, TeacherProgramRole>;
+  financeAccessByProgramId: Record<string, boolean>;
+  programCounts: Record<string, { students: number; applications: number; instructors: number }>;
+  canCreateClass: boolean;
+  currentUserId: string | null;
+  error: string | null;
+};
 
-  useEffect(() => {
-    const supabase = createSupabaseBrowserClient();
-    let active = true;
+const emptyTeacherProgramsResult: TeacherProgramsResult = {
+  programs: [],
+  allPrograms: [],
+  roleByProgramId: {},
+  financeAccessByProgramId: {},
+  programCounts: {},
+  canCreateClass: false,
+  currentUserId: null,
+  error: null,
+};
 
-    async function load() {
-      setLoading(true);
-      setError(null);
+async function fetchTeacherPrograms(slug: string): Promise<TeacherProgramsResult> {
+  const supabase = createSupabaseBrowserClient();
+  const session = await loadCachedSession();
+  const userId = session?.user.id;
+  if (!userId) {
+    return { ...emptyTeacherProgramsResult, error: "Log in required." };
+  }
 
-      const session = await loadCachedSession();
-      if (!active) {
-        return;
-      }
+  const [{ data: mosque, error: mosqueError }, { data: profile, error: profileError }] = await Promise.all([
+    supabase.from("mosques").select("id").eq("slug", slug).maybeSingle(),
+    supabase.from("profiles").select("account_type").eq("id", userId).maybeSingle(),
+  ]);
+  if (mosqueError) {
+    return { ...emptyTeacherProgramsResult, currentUserId: userId, error: mosqueError.message };
+  }
+  if (profileError) {
+    return { ...emptyTeacherProgramsResult, currentUserId: userId, error: profileError.message };
+  }
 
-      const userId = session?.user.id;
-      if (!userId) {
-        setPrograms([]);
-        setAllPrograms([]);
-        setRoleByProgramId({});
-        setFinanceAccessByProgramId({});
-        setProgramCounts({});
-        setCanCreateClass(false);
-        setCurrentUserId(null);
-        setError("Log in required.");
-        setLoading(false);
-        return;
-      }
+  const teacherAccountType = profile?.account_type?.toLowerCase() ?? null;
+  if (teacherAccountType !== "teacher" && teacherAccountType !== "admin") {
+    return { ...emptyTeacherProgramsResult, currentUserId: userId, error: "Teacher account required." };
+  }
 
-      setCurrentUserId(userId);
-      const [{ data: mosque, error: mosqueError }, { data: profile, error: profileError }] = await Promise.all([
-        supabase.from("mosques").select("id").eq("slug", slug).maybeSingle(),
-        supabase.from("profiles").select("account_type").eq("id", userId).maybeSingle(),
-      ]);
-      if (mosqueError) {
-        if (active) {
-          setError(mosqueError.message);
-          setLoading(false);
-        }
-        return;
-      }
-      if (profileError) {
-        if (active) {
-          setError(profileError.message);
-          setLoading(false);
-        }
-        return;
-      }
+  if (!mosque) {
+    return { ...emptyTeacherProgramsResult, currentUserId: userId };
+  }
 
-      const teacherAccountType = profile?.account_type?.toLowerCase() ?? null;
-      if (teacherAccountType !== "teacher" && teacherAccountType !== "admin") {
-        if (active) {
-          setPrograms([]);
-          setAllPrograms([]);
-          setRoleByProgramId({});
-          setFinanceAccessByProgramId({});
-          setProgramCounts({});
-          setCanCreateClass(false);
-          setError("Teacher account required.");
-          setLoading(false);
-        }
-        return;
-      }
+  const [{ data: mosquePrograms, error: programError }, { data: assignments, error: assignmentError }, { data: memberships }] = await Promise.all([
+    // Deliberately not filtered on is_active: a director/instructor must still be able to
+    // find their own draft (is_active=false) programs in "My Classes" to finish/publish them.
+    // Inactive programs unassigned to the viewer are filtered back out below, in the
+    // "My Classes" vs "Other Classes" split, so they never leak into other directors' browsing.
+    supabase.from("programs").select("*").eq("mosque_id", mosque.id).order("title", { ascending: true }),
+    supabase.from("program_teachers").select("program_id, role, can_manage_finances").eq("teacher_profile_id", userId),
+    supabase.from("mosque_memberships").select("role, status, can_create_programs").eq("mosque_id", mosque.id).eq("profile_id", userId),
+  ]);
 
-      if (!mosque) {
-        if (active) {
-          setPrograms([]);
-          setAllPrograms([]);
-          setRoleByProgramId({});
-          setFinanceAccessByProgramId({});
-          setProgramCounts({});
-          setCanCreateClass(false);
-          setLoading(false);
-        }
-        return;
-      }
+  if (programError || assignmentError) {
+    return { ...emptyTeacherProgramsResult, currentUserId: userId, error: programError?.message ?? assignmentError?.message ?? "Could not load assigned classes." };
+  }
 
-      const [{ data: mosquePrograms, error: programError }, { data: assignments, error: assignmentError }, { data: memberships }] = await Promise.all([
-        // Deliberately not filtered on is_active: a director/instructor must still be able to
-        // find their own draft (is_active=false) programs in "My Classes" to finish/publish them.
-        // Inactive programs unassigned to the viewer are filtered back out below, in the
-        // "My Classes" vs "Other Classes" split, so they never leak into other directors' browsing.
-        supabase.from("programs").select("*").eq("mosque_id", mosque.id).order("title", { ascending: true }),
-        supabase.from("program_teachers").select("program_id, role, can_manage_finances").eq("teacher_profile_id", userId),
-        supabase.from("mosque_memberships").select("role, status, can_create_programs").eq("mosque_id", mosque.id).eq("profile_id", userId),
-      ]);
+  const assignmentRoleByProgramId = Object.fromEntries(
+    (assignments ?? []).map((assignment) => [assignment.program_id, assignment.role === "director" ? "director" : "instructor" as TeacherProgramRole]),
+  ) as Record<string, TeacherProgramRole>;
+  const programIds = (mosquePrograms ?? []).map((program) => program.id);
+  const [{ data: trackRows }, { data: activeEnrollmentRows }, { data: pendingRequestRows }, { data: instructorRows }] = await Promise.all([
+    programIds.length
+      ? supabase.from("program_tracks").select("*").in("program_id", programIds).eq("is_active", true).order("sort_order", { ascending: true })
+      : Promise.resolve({ data: [] as ProgramTrack[] }),
+    programIds.length
+      ? supabase.from("enrollments").select("program_id").in("program_id", programIds).eq("status", "active")
+      : Promise.resolve({ data: [] as Array<{ program_id: string }> }),
+    programIds.length
+      ? supabase.from("enrollment_requests").select("program_id").in("program_id", programIds).eq("status", "pending")
+      : Promise.resolve({ data: [] as Array<{ program_id: string }> }),
+    programIds.length
+      ? supabase.from("program_teachers").select("program_id").in("program_id", programIds)
+      : Promise.resolve({ data: [] as Array<{ program_id: string }> }),
+  ]);
+  const nextProgramCounts: Record<string, { students: number; applications: number; instructors: number }> = {};
+  for (const programId of programIds) {
+    nextProgramCounts[programId] = { students: 0, applications: 0, instructors: 0 };
+  }
+  for (const row of activeEnrollmentRows ?? []) {
+    if (nextProgramCounts[row.program_id]) nextProgramCounts[row.program_id].students += 1;
+  }
+  for (const row of pendingRequestRows ?? []) {
+    if (nextProgramCounts[row.program_id]) nextProgramCounts[row.program_id].applications += 1;
+  }
+  for (const row of instructorRows ?? []) {
+    if (nextProgramCounts[row.program_id]) nextProgramCounts[row.program_id].instructors += 1;
+  }
+  const hydratedTrackRows = await hydrateTracksWithLinkedSessions(supabase, programIds, trackRows ?? []);
+  const programsWithTracks = (mosquePrograms ?? [])
+    // Keep active programs plus the viewer's own unpublished drafts (so a director can find
+    // and finish one) — but never resurface archived/cancelled (i.e. deleted) programs, which
+    // are also is_active=false but should stay gone for everyone.
+    .filter((program) => program.is_active || program.publication_status === "draft")
+    .map((program) => ({
+      ...program,
+      scheduleTracks: hydratedTrackRows.filter((track) => track.program_id === program.id),
+    }));
 
-      if (programError || assignmentError) {
-        if (active) {
-          setError(programError?.message ?? assignmentError?.message ?? "Could not load assigned classes.");
-          setLoading(false);
-        }
-        return;
-      }
-
-      const assignmentRoleByProgramId = Object.fromEntries(
-        (assignments ?? []).map((assignment) => [assignment.program_id, assignment.role === "director" ? "director" : "instructor" as TeacherProgramRole]),
-      ) as Record<string, TeacherProgramRole>;
-      const programIds = (mosquePrograms ?? []).map((program) => program.id);
-      const [{ data: trackRows }, { data: activeEnrollmentRows }, { data: pendingRequestRows }, { data: instructorRows }] = await Promise.all([
-        programIds.length
-          ? supabase.from("program_tracks").select("*").in("program_id", programIds).eq("is_active", true).order("sort_order", { ascending: true })
-          : Promise.resolve({ data: [] as ProgramTrack[] }),
-        programIds.length
-          ? supabase.from("enrollments").select("program_id").in("program_id", programIds).eq("status", "active")
-          : Promise.resolve({ data: [] as Array<{ program_id: string }> }),
-        programIds.length
-          ? supabase.from("enrollment_requests").select("program_id").in("program_id", programIds).eq("status", "pending")
-          : Promise.resolve({ data: [] as Array<{ program_id: string }> }),
-        programIds.length
-          ? supabase.from("program_teachers").select("program_id").in("program_id", programIds)
-          : Promise.resolve({ data: [] as Array<{ program_id: string }> }),
-      ]);
-      const nextProgramCounts: Record<string, { students: number; applications: number; instructors: number }> = {};
-      for (const programId of programIds) {
-        nextProgramCounts[programId] = { students: 0, applications: 0, instructors: 0 };
-      }
-      for (const row of activeEnrollmentRows ?? []) {
-        if (nextProgramCounts[row.program_id]) nextProgramCounts[row.program_id].students += 1;
-      }
-      for (const row of pendingRequestRows ?? []) {
-        if (nextProgramCounts[row.program_id]) nextProgramCounts[row.program_id].applications += 1;
-      }
-      for (const row of instructorRows ?? []) {
-        if (nextProgramCounts[row.program_id]) nextProgramCounts[row.program_id].instructors += 1;
-      }
-      const hydratedTrackRows = await hydrateTracksWithLinkedSessions(supabase, programIds, trackRows ?? []);
-      const programsWithTracks = (mosquePrograms ?? [])
-        // Keep active programs plus the viewer's own unpublished drafts (so a director can find
-        // and finish one) — but never resurface archived/cancelled (i.e. deleted) programs, which
-        // are also is_active=false but should stay gone for everyone.
-        .filter((program) => program.is_active || program.publication_status === "draft")
-        .map((program) => ({
-          ...program,
-          scheduleTracks: hydratedTrackRows.filter((track) => track.program_id === program.id),
-        }));
-      if (active) {
-        const nextRoleByProgramId: Record<string, TeacherProgramRole> = {};
-        const nextFinanceAccessByProgramId: Record<string, boolean> = {};
-        const isAdminForMosque = teacherAccountType === "admin" && (memberships ?? []).some((membership) => membership.role === "admin" && membership.status === "active");
-        const canCreateForMosque = isAdminForMosque || (teacherAccountType === "teacher" && (memberships ?? []).some((membership) => membership.role === "teacher" && membership.status === "active" && membership.can_create_programs));
-        const assignedPrograms = isAdminForMosque ? programsWithTracks : programsWithTracks.filter((program) => {
-          const isDirector = (program.director_profile_id ?? program.teacher_profile_id) === userId || assignmentRoleByProgramId[program.id] === "director";
-          const assignedRole = isDirector ? "director" : assignmentRoleByProgramId[program.id];
-          if (assignedRole) {
-            nextRoleByProgramId[program.id] = assignedRole;
-            nextFinanceAccessByProgramId[program.id] = assignedRole === "director" && Boolean((assignments ?? []).find((assignment) => assignment.program_id === program.id && assignment.role === "director")?.can_manage_finances);
-            return true;
-          }
-          return false;
-        });
-        if (isAdminForMosque) {
-          for (const program of assignedPrograms) {
-            nextRoleByProgramId[program.id] = "director";
-            nextFinanceAccessByProgramId[program.id] = true;
-          }
-        }
-        setAllPrograms(programsWithTracks);
-        setRoleByProgramId(nextRoleByProgramId);
-        setFinanceAccessByProgramId(nextFinanceAccessByProgramId);
-        setProgramCounts(nextProgramCounts);
-        setPrograms(assignedPrograms);
-        setCanCreateClass(canCreateForMosque);
-        setLoading(false);
-      }
+  const nextRoleByProgramId: Record<string, TeacherProgramRole> = {};
+  const nextFinanceAccessByProgramId: Record<string, boolean> = {};
+  const isAdminForMosque = teacherAccountType === "admin" && (memberships ?? []).some((membership) => membership.role === "admin" && membership.status === "active");
+  const canCreateForMosque = isAdminForMosque || (teacherAccountType === "teacher" && (memberships ?? []).some((membership) => membership.role === "teacher" && membership.status === "active" && membership.can_create_programs));
+  const assignedPrograms = isAdminForMosque ? programsWithTracks : programsWithTracks.filter((program) => {
+    const isDirector = (program.director_profile_id ?? program.teacher_profile_id) === userId || assignmentRoleByProgramId[program.id] === "director";
+    const assignedRole = isDirector ? "director" : assignmentRoleByProgramId[program.id];
+    if (assignedRole) {
+      nextRoleByProgramId[program.id] = assignedRole;
+      nextFinanceAccessByProgramId[program.id] = assignedRole === "director" && Boolean((assignments ?? []).find((assignment) => assignment.program_id === program.id && assignment.role === "director")?.can_manage_finances);
+      return true;
     }
+    return false;
+  });
+  if (isAdminForMosque) {
+    for (const program of assignedPrograms) {
+      nextRoleByProgramId[program.id] = "director";
+      nextFinanceAccessByProgramId[program.id] = true;
+    }
+  }
 
-    const timeout = window.setTimeout(() => {
-      void load();
-    }, 0);
-    return () => {
-      active = false;
-      window.clearTimeout(timeout);
-    };
-  }, [slug]);
+  return {
+    programs: assignedPrograms,
+    allPrograms: programsWithTracks,
+    roleByProgramId: nextRoleByProgramId,
+    financeAccessByProgramId: nextFinanceAccessByProgramId,
+    programCounts: nextProgramCounts,
+    canCreateClass: canCreateForMosque,
+    currentUserId: userId,
+    error: null,
+  };
+}
 
-  return { programs, allPrograms, roleByProgramId, financeAccessByProgramId, programCounts, canCreateClass, currentUserId, loading, error };
+function useTeacherPrograms(slug: string) {
+  const { data, loading, error: queryError, refetch } = useCachedQuery(slug ? `teacher-programs:${slug}` : null, () => fetchTeacherPrograms(slug));
+  const result = data ?? emptyTeacherProgramsResult;
+  return { ...result, error: result.error ?? queryError, loading, refetch };
+}
+
+type AdminProgramsResult = { programs: ProgramScheduleSource[]; error: string | null };
+const emptyAdminProgramsResult: AdminProgramsResult = { programs: [], error: null };
+
+async function fetchAdminProgramsWithTracks(slug: string): Promise<AdminProgramsResult> {
+  const supabase = createSupabaseBrowserClient();
+  const session = await loadCachedSession();
+  const userId = session?.user.id;
+  if (!userId) {
+    return { programs: [], error: "Log in required." };
+  }
+
+  const [{ data: mosque, error: mosqueError }, { data: profile }] = await Promise.all([
+    supabase.from("mosques").select("id").eq("slug", slug).maybeSingle(),
+    supabase.from("profiles").select("account_type").eq("id", userId).maybeSingle(),
+  ]);
+
+  if (mosqueError || !mosque) {
+    return { programs: [], error: mosqueError?.message ?? "Masjid not found." };
+  }
+
+  const { data: adminMembership } = await supabase
+    .from("mosque_memberships")
+    .select("id")
+    .eq("mosque_id", mosque.id)
+    .eq("profile_id", userId)
+    .eq("role", "admin")
+    .eq("status", "active")
+    .maybeSingle();
+
+  if (profile?.account_type !== "admin" || !adminMembership) {
+    return { programs: [], error: "Admin account required." };
+  }
+
+  const { data: programRows, error: programError } = await supabase
+    .from("programs")
+    .select("*")
+    .eq("mosque_id", mosque.id)
+    .eq("is_active", true)
+    .order("title", { ascending: true });
+
+  if (programError) {
+    return { programs: [], error: programError.message };
+  }
+
+  const programIds = (programRows ?? []).map((program) => program.id);
+  const { data: trackRows } = programIds.length
+    ? await supabase
+        .from("program_tracks")
+        .select("*")
+        .in("program_id", programIds)
+        .eq("is_active", true)
+        .order("sort_order", { ascending: true })
+    : { data: [] as ProgramTrack[] };
+  const hydratedTrackRows = await hydrateTracksWithLinkedSessions(supabase, programIds, trackRows ?? []);
+
+  return {
+    programs: (programRows ?? []).map((program) => ({
+      ...program,
+      scheduleTracks: hydratedTrackRows.filter((track) => track.program_id === program.id),
+    })),
+    error: null,
+  };
 }
 
 function useAdminProgramsWithTracks(slug: string) {
-  const [programs, setPrograms] = useState<ProgramScheduleSource[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const { data, loading, error: queryError, refetch } = useCachedQuery(slug ? `admin-programs:${slug}` : null, () => fetchAdminProgramsWithTracks(slug));
+  const result = data ?? emptyAdminProgramsResult;
+  return { programs: result.programs, error: result.error ?? queryError, loading, refetch };
+}
 
-  useEffect(() => {
-    const supabase = createSupabaseBrowserClient();
-    let active = true;
+type StudentEnrollmentsResult = {
+  enrolledProgramIds: string[];
+  programOwnerLabels: Record<string, string[]>;
+  programTracksByProgramId: Record<string, ProgramTrack[]>;
+  accountType: string | null;
+  viewerProfiles: StudentDisplay[];
+};
 
-    async function load() {
-      setLoading(true);
-      setError(null);
+const emptyStudentEnrollmentsResult: StudentEnrollmentsResult = {
+  enrolledProgramIds: [],
+  programOwnerLabels: {},
+  programTracksByProgramId: {},
+  accountType: null,
+  viewerProfiles: [],
+};
 
-      const session = await loadCachedSession();
-      const userId = session?.user.id;
-      if (!userId) {
-        if (active) {
-          setPrograms([]);
-          setError("Log in required.");
-          setLoading(false);
-        }
-        return;
-      }
+async function fetchStudentEnrollments(slug: string, userId: string | null): Promise<StudentEnrollmentsResult> {
+  if (!userId) {
+    return emptyStudentEnrollmentsResult;
+  }
 
-      const [{ data: mosque, error: mosqueError }, { data: profile }] = await Promise.all([
-        supabase.from("mosques").select("id").eq("slug", slug).maybeSingle(),
-        supabase.from("profiles").select("account_type").eq("id", userId).maybeSingle(),
-      ]);
+  const supabase = createSupabaseBrowserClient();
+  const [{ data: profile }, { data: mosque }] = await Promise.all([
+    supabase.from("profiles").select("id, full_name, email, phone_number, avatar_url, age, gender, date_of_birth, account_type").eq("id", userId).maybeSingle(),
+    supabase.from("mosques").select("id").eq("slug", slug).maybeSingle(),
+  ]);
 
-      if (mosqueError || !mosque) {
-        if (active) {
-          setPrograms([]);
-          setError(mosqueError?.message ?? "Masjid not found.");
-          setLoading(false);
-        }
-        return;
-      }
-
-      const { data: adminMembership } = await supabase
-        .from("mosque_memberships")
-        .select("id")
-        .eq("mosque_id", mosque.id)
-        .eq("profile_id", userId)
-        .eq("role", "admin")
-        .eq("status", "active")
-        .maybeSingle();
-
-      if (profile?.account_type !== "admin" || !adminMembership) {
-        if (active) {
-          setPrograms([]);
-          setError("Admin account required.");
-          setLoading(false);
-        }
-        return;
-      }
-
-      const { data: programRows, error: programError } = await supabase
-        .from("programs")
-        .select("*")
-        .eq("mosque_id", mosque.id)
-        .eq("is_active", true)
-        .order("title", { ascending: true });
-
-      if (programError) {
-        if (active) {
-          setError(programError.message);
-          setLoading(false);
-        }
-        return;
-      }
-
-      const programIds = (programRows ?? []).map((program) => program.id);
-      const { data: trackRows } = programIds.length
-        ? await supabase
-            .from("program_tracks")
-            .select("*")
-            .in("program_id", programIds)
-            .eq("is_active", true)
-            .order("sort_order", { ascending: true })
-        : { data: [] as ProgramTrack[] };
-      const hydratedTrackRows = await hydrateTracksWithLinkedSessions(supabase, programIds, trackRows ?? []);
-
-      if (active) {
-        setPrograms(
-          (programRows ?? []).map((program) => ({
-            ...program,
-            scheduleTracks: hydratedTrackRows.filter((track) => track.program_id === program.id),
-          })),
-        );
-        setLoading(false);
-      }
+  const nextAccountType = profile?.account_type ?? null;
+  if (nextAccountType === "parent" && mosque?.id) {
+    const { children } = await fetchParentChildren(supabase, slug, userId, mosque.id);
+    const possibleProfiles = [profile, ...children].filter(Boolean) as StudentDisplay[];
+    const childIds = children.map((child) => child.id);
+    const possibleIds = Array.from(new Set([userId, ...childIds]));
+    if (possibleIds.length === 0) {
+      return { ...emptyStudentEnrollmentsResult, accountType: nextAccountType, viewerProfiles: possibleProfiles };
     }
 
-    void load();
-    return () => {
-      active = false;
+    const { data } = await supabase.from("enrollments").select("id, program_id, student_profile_id").in("student_profile_id", possibleIds);
+    const childNameById = new Map(possibleProfiles.map((student) => [student.id, student.id === userId ? (student.full_name?.trim() || "You") : (student.full_name?.trim() || "Child")]));
+    const owners: Record<string, string[]> = {};
+    for (const row of data ?? []) {
+      const childName = childNameById.get(row.student_profile_id);
+      if (!childName) {
+        continue;
+      }
+      owners[row.program_id] = Array.from(new Set([...(owners[row.program_id] ?? []), childName]));
+    }
+    const trackMap = await loadEnrollmentTrackMap(supabase, data ?? []);
+    return {
+      enrolledProgramIds: Object.keys(owners),
+      programOwnerLabels: owners,
+      programTracksByProgramId: trackMap,
+      accountType: nextAccountType,
+      viewerProfiles: possibleProfiles,
     };
-  }, [slug]);
+  }
 
-  return { programs, loading, error };
+  const { data } = await supabase.from("enrollments").select("id, program_id").eq("student_profile_id", userId);
+  const trackMap = await loadEnrollmentTrackMap(supabase, data ?? []);
+  return {
+    enrolledProgramIds: (data ?? []).map((row) => row.program_id),
+    programOwnerLabels: {},
+    programTracksByProgramId: trackMap,
+    accountType: nextAccountType,
+    viewerProfiles: profile ? [profile as StudentDisplay] : [],
+  };
 }
 
 function useStudentPrograms(slug: string) {
   const base = useMosquePrograms(slug);
-  const [enrolledProgramIds, setEnrolledProgramIds] = useState<string[]>([]);
-  const [programOwnerLabels, setProgramOwnerLabels] = useState<Record<string, string[]>>({});
-  const [programTracksByProgramId, setProgramTracksByProgramId] = useState<Record<string, ProgramTrack[]>>({});
-  const [accountType, setAccountType] = useState<string | null>(null);
-  const [viewerProfiles, setViewerProfiles] = useState<StudentDisplay[]>([]);
-  const [enrollmentLoading, setEnrollmentLoading] = useState(true);
+  const [session, setSession] = useState<ReturnType<typeof getCachedSessionSnapshot>>(() => getCachedSessionSnapshot());
 
   useEffect(() => {
-    const supabase = createSupabaseBrowserClient();
-    let active = true;
-
-    async function loadEnrollments() {
-      if (active) {
-        setEnrollmentLoading(true);
+    let cancelled = false;
+    loadCachedSession().then((nextSession) => {
+      if (!cancelled) {
+        setSession(nextSession);
       }
-
-      const session = await loadCachedSession();
-      if (!active) {
-        return;
-      }
-
-      const userId = session?.user.id;
-      if (!userId) {
-        if (active) {
-          setEnrolledProgramIds([]);
-          setProgramOwnerLabels({});
-          setProgramTracksByProgramId({});
-          setAccountType(null);
-          setViewerProfiles([]);
-          setEnrollmentLoading(false);
-        }
-        return;
-      }
-
-      const [{ data: profile }, { data: mosque }] = await Promise.all([
-        supabase.from("profiles").select("id, full_name, email, phone_number, avatar_url, age, gender, date_of_birth, account_type").eq("id", userId).maybeSingle(),
-        supabase.from("mosques").select("id").eq("slug", slug).maybeSingle(),
-      ]);
-
-      const nextAccountType = profile?.account_type ?? null;
-      if (nextAccountType === "parent" && mosque?.id) {
-        const { children } = await fetchParentChildren(supabase, slug, userId, mosque.id);
-        const possibleProfiles = [profile, ...children].filter(Boolean) as StudentDisplay[];
-        const childIds = children.map((child) => child.id);
-        const possibleIds = Array.from(new Set([userId, ...childIds]));
-        if (possibleIds.length === 0) {
-          if (active) {
-            setEnrolledProgramIds([]);
-            setProgramOwnerLabels({});
-            setProgramTracksByProgramId({});
-            setAccountType(nextAccountType);
-            setViewerProfiles(possibleProfiles);
-            setEnrollmentLoading(false);
-          }
-          return;
-        }
-
-        const { data } = await supabase.from("enrollments").select("id, program_id, student_profile_id").in("student_profile_id", possibleIds);
-        const childNameById = new Map(possibleProfiles.map((student) => [student.id, student.id === userId ? (student.full_name?.trim() || "You") : (student.full_name?.trim() || "Child")]));
-        const owners: Record<string, string[]> = {};
-        for (const row of data ?? []) {
-          const childName = childNameById.get(row.student_profile_id);
-          if (!childName) {
-            continue;
-          }
-          owners[row.program_id] = Array.from(new Set([...(owners[row.program_id] ?? []), childName]));
-        }
-        const trackMap = await loadEnrollmentTrackMap(supabase, data ?? []);
-        if (active) {
-          setEnrolledProgramIds(Object.keys(owners));
-          setProgramOwnerLabels(owners);
-          setProgramTracksByProgramId(trackMap);
-          setAccountType(nextAccountType);
-          setViewerProfiles(possibleProfiles);
-          setEnrollmentLoading(false);
-        }
-        return;
-      }
-
-      const { data } = await supabase.from("enrollments").select("id, program_id").eq("student_profile_id", userId);
-      const trackMap = await loadEnrollmentTrackMap(supabase, data ?? []);
-      if (active) {
-        setEnrolledProgramIds((data ?? []).map((row) => row.program_id));
-        setProgramOwnerLabels({});
-        setProgramTracksByProgramId(trackMap);
-        setAccountType(nextAccountType);
-        setViewerProfiles(profile ? [profile as StudentDisplay] : []);
-        setEnrollmentLoading(false);
-      }
-    }
-
-    void loadEnrollments();
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange(() => {
-      void loadEnrollments();
     });
-
+    const unsubscribe = subscribeCachedSession((nextSession) => {
+      setSession(nextSession);
+    });
     return () => {
-      active = false;
-      subscription.unsubscribe();
+      cancelled = true;
+      unsubscribe();
     };
-  }, [slug]);
+  }, []);
 
-  return { ...base, enrolledProgramIds, programOwnerLabels, programTracksByProgramId, accountType, viewerProfiles, enrollmentLoading };
+  const userId = session?.user.id ?? null;
+  // Keying on userId (not just slug) means logging in/out while this page stays mounted
+  // naturally lands on a different cache key and refetches, without needing a manual
+  // onAuthStateChange subscription the way the pre-cache version required.
+  const enrollmentKey = session === undefined ? null : `student-enrollments:${slug}:${userId ?? "guest"}`;
+  const { data, loading: enrollmentLoading, refetch: refetchEnrollments } = useCachedQuery(enrollmentKey, () => fetchStudentEnrollments(slug, userId));
+  const result = data ?? emptyStudentEnrollmentsResult;
+
+  return { ...base, ...result, enrollmentLoading, refetchEnrollments };
 }
 
 async function loadEnrollmentTrackMap(
@@ -15772,89 +15906,93 @@ function applicantRowFromRequest(request: RequestWithContext): ApplicantApplicat
  * student_dismissed_at, since it's the persistent source of truth for
  * "what did I apply to and where does it stand", not a dismissable feed.
  */
-function useApplicantApplications(slug: string) {
-  const [rows, setRows] = useState<ApplicantApplicationRow[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+type ApplicantApplicationsResult = { rows: ApplicantApplicationRow[]; error: string | null };
+const emptyApplicantApplicationsResult: ApplicantApplicationsResult = { rows: [], error: null };
 
-  async function load() {
-    setLoading(true);
-    setError(null);
-    const supabase = createSupabaseBrowserClient();
-    const session = await loadCachedSession();
-    const userId = session?.user.id ?? null;
-    if (!userId) {
-      setRows([]);
-      setLoading(false);
-      return;
-    }
-
-    const [{ data: profile }, { data: mosque }] = await Promise.all([
-      supabase.from("profiles").select("account_type").eq("id", userId).maybeSingle(),
-      supabase.from("mosques").select("id").eq("slug", slug).maybeSingle(),
-    ]);
-    if (!mosque) {
-      setError("Masjid not found.");
-      setLoading(false);
-      return;
-    }
-
-    const isParent = profile?.account_type === "parent";
-    const { children } = isParent ? await fetchParentChildren(supabase, slug, userId, mosque.id) : { children: [] as StudentDisplay[] };
-
-    const { data: requestRows, error: requestError } = isParent
-      ? await supabase.from("enrollment_requests").select("*").eq("mosque_id", mosque.id).eq("parent_profile_id", userId).order("requested_at", { ascending: false })
-      : await supabase.from("enrollment_requests").select("*").eq("mosque_id", mosque.id).eq("student_profile_id", userId).order("requested_at", { ascending: false });
-
-    if (requestError) {
-      setError(requestError.message);
-      setLoading(false);
-      return;
-    }
-
-    const requests = requestRows ?? [];
-    const programIds = Array.from(new Set(requests.map((request) => request.program_id)));
-    const trackIds = Array.from(new Set(requests.map((request) => request.program_track_id).filter(Boolean) as string[]));
-    const studentIds = Array.from(new Set(requests.map((request) => request.student_profile_id)));
-
-    const [{ data: programRows }, { data: trackRows }, { data: subscriptionRows }] = await Promise.all([
-      programIds.length ? supabase.from("programs").select("*").in("id", programIds) : Promise.resolve({ data: [] as Program[] }),
-      trackIds.length ? supabase.from("program_tracks").select("*").in("id", trackIds) : Promise.resolve({ data: [] as ProgramTrack[] }),
-      programIds.length && studentIds.length
-        ? supabase.from("program_subscriptions").select("*").in("program_id", programIds).in("student_profile_id", studentIds)
-        : Promise.resolve({ data: [] as ProgramSubscription[] }),
-    ]);
-
-    const selfProfile = profile ? ({ id: userId } as StudentDisplay) : null;
-    const knownStudents = [...children, ...(selfProfile ? [selfProfile] : [])];
-    const missingStudentIds = studentIds.filter((id) => !knownStudents.some((student) => student.id === id));
-    const { data: extraStudents } = missingStudentIds.length
-      ? await supabase.from("profiles").select("id, full_name, email, phone_number, avatar_url, age, gender, date_of_birth, account_type").in("id", missingStudentIds)
-      : { data: [] as StudentDisplay[] };
-    const allStudents = [...children, ...(extraStudents ?? [])];
-
-    setRows(
-      requests.map((request) => ({
-        request,
-        program: (programRows ?? []).find((program) => program.id === request.program_id) ?? null,
-        track: request.program_track_id ? (trackRows ?? []).find((track) => track.id === request.program_track_id) ?? null : null,
-        subscription:
-          (subscriptionRows ?? []).find((subscription) => subscription.program_id === request.program_id && subscription.student_profile_id === request.student_profile_id) ?? null,
-        student: request.student_profile_id === userId ? null : allStudents.find((student) => student.id === request.student_profile_id) ?? null,
-      })),
-    );
-    setLoading(false);
+async function fetchApplicantApplications(slug: string, userId: string | null): Promise<ApplicantApplicationsResult> {
+  if (!userId) {
+    return emptyApplicantApplicationsResult;
   }
 
-  useEffect(() => {
-    const timeout = window.setTimeout(() => {
-      void load();
-    }, 0);
-    return () => window.clearTimeout(timeout);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [slug]);
+  const supabase = createSupabaseBrowserClient();
+  const [{ data: profile }, { data: mosque }] = await Promise.all([
+    supabase.from("profiles").select("account_type").eq("id", userId).maybeSingle(),
+    supabase.from("mosques").select("id").eq("slug", slug).maybeSingle(),
+  ]);
+  if (!mosque) {
+    return { rows: [], error: "Masjid not found." };
+  }
 
-  return { rows, loading, error, reload: load };
+  const isParent = profile?.account_type === "parent";
+  const { children } = isParent ? await fetchParentChildren(supabase, slug, userId, mosque.id) : { children: [] as StudentDisplay[] };
+
+  const { data: requestRows, error: requestError } = isParent
+    ? await supabase.from("enrollment_requests").select("*").eq("mosque_id", mosque.id).eq("parent_profile_id", userId).order("requested_at", { ascending: false })
+    : await supabase.from("enrollment_requests").select("*").eq("mosque_id", mosque.id).eq("student_profile_id", userId).order("requested_at", { ascending: false });
+
+  if (requestError) {
+    return { rows: [], error: requestError.message };
+  }
+
+  const requests = requestRows ?? [];
+  const programIds = Array.from(new Set(requests.map((request) => request.program_id)));
+  const trackIds = Array.from(new Set(requests.map((request) => request.program_track_id).filter(Boolean) as string[]));
+  const studentIds = Array.from(new Set(requests.map((request) => request.student_profile_id)));
+
+  const [{ data: programRows }, { data: trackRows }, { data: subscriptionRows }] = await Promise.all([
+    programIds.length ? supabase.from("programs").select("*").in("id", programIds) : Promise.resolve({ data: [] as Program[] }),
+    trackIds.length ? supabase.from("program_tracks").select("*").in("id", trackIds) : Promise.resolve({ data: [] as ProgramTrack[] }),
+    programIds.length && studentIds.length
+      ? supabase.from("program_subscriptions").select("*").in("program_id", programIds).in("student_profile_id", studentIds)
+      : Promise.resolve({ data: [] as ProgramSubscription[] }),
+  ]);
+
+  const selfProfile = profile ? ({ id: userId } as StudentDisplay) : null;
+  const knownStudents = [...children, ...(selfProfile ? [selfProfile] : [])];
+  const missingStudentIds = studentIds.filter((id) => !knownStudents.some((student) => student.id === id));
+  const { data: extraStudents } = missingStudentIds.length
+    ? await supabase.from("profiles").select("id, full_name, email, phone_number, avatar_url, age, gender, date_of_birth, account_type").in("id", missingStudentIds)
+    : { data: [] as StudentDisplay[] };
+  const allStudents = [...children, ...(extraStudents ?? [])];
+
+  return {
+    rows: requests.map((request) => ({
+      request,
+      program: (programRows ?? []).find((program) => program.id === request.program_id) ?? null,
+      track: request.program_track_id ? (trackRows ?? []).find((track) => track.id === request.program_track_id) ?? null : null,
+      subscription:
+        (subscriptionRows ?? []).find((subscription) => subscription.program_id === request.program_id && subscription.student_profile_id === request.student_profile_id) ?? null,
+      student: request.student_profile_id === userId ? null : allStudents.find((student) => student.id === request.student_profile_id) ?? null,
+    })),
+    error: null,
+  };
+}
+
+function useApplicantApplications(slug: string) {
+  const [session, setSession] = useState<ReturnType<typeof getCachedSessionSnapshot>>(() => getCachedSessionSnapshot());
+
+  useEffect(() => {
+    let cancelled = false;
+    loadCachedSession().then((nextSession) => {
+      if (!cancelled) {
+        setSession(nextSession);
+      }
+    });
+    const unsubscribe = subscribeCachedSession((nextSession) => {
+      setSession(nextSession);
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, []);
+
+  const userId = session?.user.id ?? null;
+  const key = session === undefined ? null : `student-applications:${slug}:${userId ?? "guest"}`;
+  const { data, loading, error: queryError, refetch } = useCachedQuery(key, () => fetchApplicantApplications(slug, userId));
+  const result = data ?? emptyApplicantApplicationsResult;
+
+  return { rows: result.rows, loading, error: result.error ?? queryError, reload: refetch };
 }
 
 async function fetchParentChildren(
