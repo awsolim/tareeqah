@@ -11,7 +11,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { EmptyState } from "@/components/data/empty-state";
 import { FlatLink } from "@/components/ui/flat-button";
 import { getAccountLabel, getDefaultLandingHref, loadUserAccessByMosqueSlug } from "@/lib/authz";
-import { clearUserScopedCaches, getCachedSessionSnapshot, loadCachedSession, loadCachedUserAccess, performClientLogout, setCachedProfileName, setCachedProfileSummary, setCachedSessionSnapshot, subscribeCachedSession } from "@/lib/client-cache";
+import { clearUserScopedCaches, getCachedProfileSummary, getCachedSessionSnapshot, getCachedUserAccess, loadCachedSession, loadCachedUserAccess, performClientLogout, setCachedProfileName, setCachedProfileSummary, setCachedSessionSnapshot, subscribeCachedSession } from "@/lib/client-cache";
 import { invalidateQuery, invalidateQueryPrefix, prefetchQuery, useCachedQuery } from "@/lib/query-cache";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import type { Database, Json } from "@/lib/supabase/types";
@@ -526,6 +526,7 @@ type NotificationCounts = {
   announcementCount: number;
   noteCount: number;
   requestCount: number;
+  actionRequired: boolean;
 };
 type EditorToastState = { tone: "success" | "error"; message: string };
 
@@ -1120,7 +1121,7 @@ export function PublicMasjidData({ slug }: { slug: string }) {
 export function StudentHomeData({ slug }: { slug: string }) {
   const { programs, enrolledProgramIds, programOwnerLabels, programTracksByProgramId, accountType, viewerProfiles, loading, enrollmentLoading, error } = useStudentPrograms(slug);
   const { rows: applicationRows, loading: applicationsLoading } = useApplicantApplications(slug);
-  const { announcementCount, noteCount } = useStudentNotificationCounts(slug);
+  const { announcementCount, noteCount, requestCount, actionRequired } = useStudentNotificationCounts(slug);
 
   if (loading || enrollmentLoading || applicationsLoading) {
     return <HomeLoadingState />;
@@ -1137,7 +1138,7 @@ export function StudentHomeData({ slug }: { slug: string }) {
       scheduleTracks: programTracksByProgramId[program.id],
     }));
 
-  const hasActionRequired = applicationRows.some((row) => isApplicationActionRequired(getApplicationStatus(row.request)));
+  const hasActionRequired = actionRequired || applicationRows.some((row) => isApplicationActionRequired(getApplicationStatus(row.request)));
   const hasAttention = announcementCount + noteCount > 0;
 
   return (
@@ -1150,7 +1151,7 @@ export function StudentHomeData({ slug }: { slug: string }) {
           text="Your inbox contains notifications requiring immediate action."
           href={`/m/${slug}/portal/announcements`}
         />
-      ) : hasAttention ? (
+      ) : hasAttention || requestCount > 0 ? (
         <HomeNotification
           tone="active"
           title="Attention"
@@ -3249,16 +3250,28 @@ function taxReceiptStatusLabel(status: string) {
 export function PortalAccountData({ slug }: { slug: string }) {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const initialSession = getCachedSessionSnapshot();
+  const initialUser = initialSession?.user ?? null;
+  const initialProfileSummary = initialUser?.id ? getCachedProfileSummary(initialUser.id) : undefined;
+  const initialAccess = initialUser?.id ? getCachedUserAccess(slug, initialUser.id) : null;
+  const initialMetadataName = typeof initialUser?.user_metadata?.full_name === "string" ? initialUser.user_metadata.full_name : "";
   const [profile, setProfile] = useState<Profile | null>(null);
-  const [sessionEmail, setSessionEmail] = useState("");
-  const [fallbackName, setFallbackName] = useState("");
-  const [accountLabel, setAccountLabel] = useState("Account");
-  const [isParent, setIsParent] = useState(false);
-  const [isSignedIn, setIsSignedIn] = useState(true);
+  const [sessionEmail, setSessionEmail] = useState(initialUser?.email ?? "");
+  const [fallbackName, setFallbackName] = useState(initialProfileSummary?.fullName ?? (initialMetadataName || initialUser?.email?.split("@")[0] || "Guest"));
+  const [accountLabel, setAccountLabel] = useState(initialAccess ? getAccountLabel(initialAccess) : "Account");
+  const [isParent, setIsParent] = useState(initialAccess?.accountType?.toLowerCase() === "parent");
+  const [isSignedIn, setIsSignedIn] = useState(initialSession !== null);
   const [activePanel, setActivePanel] = useState<AccountPanel>("menu");
   const [panelMotion, setPanelMotion] = useState<"forward" | "back">("forward");
   const [hasPanelNavigated, setHasPanelNavigated] = useState(false);
-  const [profileForm, setProfileForm] = useState({ avatarUrl: "", fullName: "", phone: "", dateOfBirth: "", email: "", password: "" });
+  const [profileForm, setProfileForm] = useState({
+    avatarUrl: initialProfileSummary?.avatarUrl ?? "",
+    fullName: initialProfileSummary?.fullName ?? initialMetadataName ?? "",
+    phone: "",
+    dateOfBirth: "",
+    email: initialUser?.email ?? "",
+    password: "",
+  });
   const [profileSaving, setProfileSaving] = useState(false);
   const [profileMessage, setProfileMessage] = useState<string | null>(null);
   const [toast, setToast] = useState<EditorToastState | null>(null);
@@ -3273,7 +3286,7 @@ export function PortalAccountData({ slug }: { slug: string }) {
   const [payments, setPayments] = useState<BillingPaymentRow[] | null>(null);
   const [paymentsLoading, setPaymentsLoading] = useState(false);
   const [paymentsError, setPaymentsError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(initialSession === undefined);
   const photoInputRef = useRef<HTMLInputElement | null>(null);
   const canUseAccountSwitcher = true;
 
@@ -3373,6 +3386,7 @@ export function PortalAccountData({ slug }: { slug: string }) {
       const metadataName = typeof metadata?.full_name === "string" ? metadata.full_name : "";
       setSessionEmail(session.user.email ?? "");
       setFallbackName(metadataName || session.user.email?.split("@")[0] || "Guest");
+      setLoading(false);
 
       const supabase = createSupabaseBrowserClient();
       const [{ data: profileRow }, access] = await Promise.all([
@@ -4399,10 +4413,6 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
   const unseenRequestCount =
     requests.filter((request) => !seenRequestIds.has(studentRequestNotificationKey(request))).length +
     studentWithdrawals.filter((request) => !seenRequestIds.has(studentWithdrawalNotificationKey(request))).length;
-  const allRequestIdsKey = [
-    ...requests.map(studentRequestNotificationKey),
-    ...studentWithdrawals.map(studentWithdrawalNotificationKey),
-  ].join("|");
   const announcementThreads = buildAnnouncementThreads(announcements, enrolledProgramsForInbox);
   const noteThreads = buildNoteThreads(notes);
   const unreadAnnouncementCount = announcements.filter((announcement) => !announcement.receipt?.read_at).length;
@@ -4422,22 +4432,18 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
     });
   }
 
-  useEffect(() => {
-    if (!loading && tab === "requests" && allRequestIdsKey) {
-      markRequestsSeenOptimistically(allRequestIdsKey.split("|"));
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentUserId, loading, allRequestIdsKey, tab]);
-
   function changeTab(nextTab: "announcements" | "notes" | "requests") {
     setTab(nextTab);
     setSelectedThread(null);
-    if (nextTab === "requests") {
-      markRequestsSeenOptimistically([
-        ...requests.map(studentRequestNotificationKey),
-        ...studentWithdrawals.map(studentWithdrawalNotificationKey),
-      ]);
-    }
+  }
+
+  function viewRequestFromInbox(request: RequestWithContext) {
+    markRequestsSeenOptimistically([studentRequestNotificationKey(request)]);
+    setApplicationDetailsRow(applicantRowFromRequest(request));
+  }
+
+  function viewWithdrawalFromInbox(request: WithdrawalRequestWithContext) {
+    markRequestsSeenOptimistically([studentWithdrawalNotificationKey(request)]);
   }
 
   useEffect(() => {
@@ -4757,10 +4763,10 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
               {pendingRequests.length || pendingWithdrawals.length ? (
                 <>
                   {pendingRequests.map((request) => (
-                    <StudentRequestCard key={request.id} request={request} viewHref={`/m/${slug}/portal/classes?tab=applications&requestId=${request.id}`} />
+                    <StudentRequestCard key={request.id} request={request} onViewApplication={() => viewRequestFromInbox(request)} />
                   ))}
                   {pendingWithdrawals.map((request) => (
-                    <StudentWithdrawalStatusCard key={request.id} request={request} />
+                    <StudentWithdrawalStatusCard key={request.id} request={request} onOpen={() => viewWithdrawalFromInbox(request)} />
                   ))}
                 </>
               ) : (
@@ -4774,13 +4780,13 @@ export function InboxAnnouncementsData({ slug }: { slug: string }) {
                     <StudentRequestCard
                       key={request.id}
                       request={request}
-                      onViewApplication={request.status === "approved" && !request.admission_completed_at ? () => setApplicationDetailsRow(applicantRowFromRequest(request)) : undefined}
+                      onViewApplication={request.status === "approved" && !request.admission_completed_at ? () => viewRequestFromInbox(request) : undefined}
                       viewClassHref={request.status === "approved" && request.admission_completed_at ? `/m/${slug}/portal/classes/${request.program_id}` : undefined}
                       onDismiss={() => dismissRequest(request.id)}
                     />
                   ))}
                   {returnedWithdrawals.map((request) => (
-                    <StudentWithdrawalStatusCard key={request.id} request={request} onDismiss={() => dismissWithdrawalRequests([request.id])} />
+                    <StudentWithdrawalStatusCard key={request.id} request={request} onOpen={() => viewWithdrawalFromInbox(request)} onDismiss={() => dismissWithdrawalRequests([request.id])} />
                   ))}
                 </>
               ) : (
@@ -4913,10 +4919,7 @@ function ConfirmStudentRescindModal({
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#26323A]/35 px-5 backdrop-blur-sm">
       <div ref={containerRef} role="dialog" aria-modal="true" tabIndex={-1} className="w-full max-w-sm rounded-[28px] bg-white p-6 text-[#26323A] shadow-[0_24px_60px_rgba(38,50,58,0.22)] outline-none">
-        <div className="flex h-14 w-14 items-center justify-center rounded-full bg-[#FFF2EF] text-[#C84B3E]">
-          <XIcon />
-        </div>
-        <h2 className="mt-4 text-xl font-semibold">{isCancelRegistration ? "Cancel registration?" : "Rescind application?"}</h2>
+        <h2 className="text-xl font-semibold">{isCancelRegistration ? "Cancel registration?" : "Rescind application?"}</h2>
         <p className="mt-2 text-sm leading-6 text-[#6B747B]">
           {isCancelRegistration
             ? `This will cancel the approved registration for ${request.student?.full_name ?? "this student"} in ${request.program?.title ?? "this class"}.`
@@ -16042,6 +16045,7 @@ export function useStudentNotificationCounts(slug: string) {
   const [announcementCount, setAnnouncementCount] = useState(cachedCounts?.announcementCount ?? 0);
   const [noteCount, setNoteCount] = useState(cachedCounts?.noteCount ?? 0);
   const [requestCount, setRequestCount] = useState(cachedCounts?.requestCount ?? 0);
+  const [actionRequired, setActionRequired] = useState(cachedCounts?.actionRequired ?? false);
 
   useEffect(() => {
     const supabase = createSupabaseBrowserClient();
@@ -16053,25 +16057,26 @@ export function useStudentNotificationCounts(slug: string) {
         setAnnouncementCount(nextCounts.announcementCount);
         setNoteCount(nextCounts.noteCount);
         setRequestCount(nextCounts.requestCount);
+        setActionRequired(nextCounts.actionRequired);
       }
     }
 
     async function load() {
       if (!slug) {
-        setCounts({ announcementCount: 0, noteCount: 0, requestCount: 0 });
+        setCounts({ announcementCount: 0, noteCount: 0, requestCount: 0, actionRequired: false });
         return;
       }
 
       const { data: sessionData } = await supabase.auth.getSession();
       const userId = sessionData.session?.user.id;
       if (!userId) {
-        setCounts({ announcementCount: 0, noteCount: 0, requestCount: 0 });
+        setCounts({ announcementCount: 0, noteCount: 0, requestCount: 0, actionRequired: false });
         return;
       }
 
       const { data: mosque } = await supabase.from("mosques").select("id").eq("slug", slug).maybeSingle();
       if (!mosque) {
-        setCounts({ announcementCount: 0, noteCount: 0, requestCount: 0 });
+        setCounts({ announcementCount: 0, noteCount: 0, requestCount: 0, actionRequired: false });
         return;
       }
 
@@ -16085,13 +16090,13 @@ export function useStudentNotificationCounts(slug: string) {
         profile?.account_type === "parent"
           ? supabase
               .from("enrollment_requests")
-              .select("id, status, reviewed_at, requested_at")
+              .select("*")
               .eq("mosque_id", mosque.id)
               .eq("parent_profile_id", userId)
               .is("student_dismissed_at", null)
           : supabase
               .from("enrollment_requests")
-              .select("id, status, reviewed_at, requested_at")
+              .select("*")
               .eq("mosque_id", mosque.id)
               .eq("student_profile_id", userId)
               .is("student_dismissed_at", null),
@@ -16118,6 +16123,7 @@ export function useStudentNotificationCounts(slug: string) {
         (requestRows ?? []).filter((request) => !seenRequestIds.has(studentRequestNotificationKey(request))).length +
         (withdrawalRows ?? []).filter((request) => !seenRequestIds.has(studentWithdrawalNotificationKey(request))).length;
       const nextNoteCount = (noteRows ?? []).filter((note) => !note.seen_at).length;
+      const nextActionRequired = (requestRows ?? []).some((request) => isApplicationActionRequired(getApplicationStatus(request as EnrollmentRequest)));
 
       const enrollmentRows = (enrollments ?? []) as EnrollmentTrackSelection[];
       const enrollmentIds = enrollmentRows.map((enrollment) => enrollment.id);
@@ -16128,7 +16134,7 @@ export function useStudentNotificationCounts(slug: string) {
       const enrolledJoinDatesByProgramId = getEnrollmentJoinDatesByProgram(enrollmentRows);
       const programIds = enrollmentRows.map((row) => row.program_id);
       if (programIds.length === 0) {
-        setCounts({ announcementCount: 0, noteCount: nextNoteCount, requestCount: nextRequestCount });
+        setCounts({ announcementCount: 0, noteCount: nextNoteCount, requestCount: nextRequestCount, actionRequired: nextActionRequired });
         return;
       }
 
@@ -16142,7 +16148,7 @@ export function useStudentNotificationCounts(slug: string) {
       );
       const announcementIds = visibleAnnouncements.map((item) => item.id);
       if (announcementIds.length === 0) {
-        setCounts({ announcementCount: 0, noteCount: nextNoteCount, requestCount: nextRequestCount });
+        setCounts({ announcementCount: 0, noteCount: nextNoteCount, requestCount: nextRequestCount, actionRequired: nextActionRequired });
         return;
       }
 
@@ -16152,7 +16158,7 @@ export function useStudentNotificationCounts(slug: string) {
         .eq("profile_id", userId)
         .in("announcement_id", announcementIds);
       const readOrDismissed = new Set((receipts ?? []).filter((receipt) => receipt.read_at || receipt.dismissed_at).map((receipt) => receipt.announcement_id));
-      setCounts({ announcementCount: announcementIds.filter((id) => !readOrDismissed.has(id)).length, noteCount: nextNoteCount, requestCount: nextRequestCount });
+      setCounts({ announcementCount: announcementIds.filter((id) => !readOrDismissed.has(id)).length, noteCount: nextNoteCount, requestCount: nextRequestCount, actionRequired: nextActionRequired });
     }
 
     void load();
@@ -16163,7 +16169,7 @@ export function useStudentNotificationCounts(slug: string) {
     };
   }, [slug, pathname]);
 
-  return { announcementCount, noteCount, requestCount, totalCount: announcementCount + noteCount + requestCount, actionRequired: false };
+  return { announcementCount, noteCount, requestCount, totalCount: (announcementCount + noteCount + requestCount || actionRequired) ? Math.max(announcementCount + noteCount + requestCount, 1) : 0, actionRequired };
 }
 
 export function useTeacherNotificationCounts(slug: string) {
@@ -16291,7 +16297,7 @@ function FloatingInboxTabs({
   onChange: (value: string) => void;
 }) {
   return (
-    <div className="flex justify-center gap-10 border-b border-[#D6DCE0] bg-[var(--workspace)] px-4">
+    <div className="grid grid-flow-col auto-cols-fr border-b border-[#D6DCE0] bg-[var(--workspace)] px-3">
         {tabs.map((tab) => {
           const active = value === tab.id;
           return (
@@ -16300,8 +16306,7 @@ function FloatingInboxTabs({
               type="button"
               onClick={() => onChange(tab.id)}
               className={cn(
-                "relative min-h-14 min-w-0 px-3 text-[17px] font-semibold transition",
-                tab.badge ? "pr-8" : "",
+                "relative flex min-h-14 min-w-0 items-center justify-center px-1 text-center text-[17px] font-semibold transition",
                 active ? "border-b-[3px] border-[#2F8FB3] text-[#2F8FB3]" : "text-[#8A949B]",
               )}
             >
@@ -16309,7 +16314,7 @@ function FloatingInboxTabs({
                 {tab.label}
                 {!tab.badge && tab.actionRequired ? <span className="h-2 w-2 shrink-0 rounded-full bg-[#2F8FB3]" /> : null}
               </span>
-              {tab.badge ? <NotificationBadge count={tab.badge} className="right-0 top-2" /> : null}
+              {tab.badge ? <NotificationBadge count={tab.badge} className="right-1 top-2" /> : null}
             </button>
           );
         })}
@@ -16861,7 +16866,7 @@ function StudentRequestCard({
   );
 }
 
-function StudentWithdrawalStatusCard({ request, onDismiss }: { request: WithdrawalRequestWithContext; onDismiss?: () => void }) {
+function StudentWithdrawalStatusCard({ request, onDismiss, onOpen }: { request: WithdrawalRequestWithContext; onDismiss?: () => void; onOpen?: () => void }) {
   const statusTime = request.reviewed_at ?? request.requested_at;
   const studentName = request.student?.full_name?.trim();
   const statusLabel = request.status === "approved" ? "Withdrawal approved" : request.status === "rejected" ? "Withdrawal rejected" : "Withdrawal pending";
@@ -16894,6 +16899,15 @@ function StudentWithdrawalStatusCard({ request, onDismiss }: { request: Withdraw
           </div>
           <p className="mt-2 text-sm leading-5 text-[#26323A]">{message}</p>
           {request.reason ? <p className="mt-2 text-xs leading-5 text-[#6B747B]">Reason: {request.reason}</p> : null}
+          {onOpen ? (
+            <button
+              type="button"
+              onClick={onOpen}
+              className="mt-3 inline-flex min-h-9 items-center justify-center rounded-[6px] border border-[#CBD5D9] bg-white px-4 text-xs font-semibold text-[#26323A] transition-colors hover:bg-[#F5F8F9]"
+            >
+              View
+            </button>
+          ) : null}
         </div>
       </div>
     </article>
@@ -19534,6 +19548,13 @@ function ApplicantDetailsDrawer({
 
   const containerRef = useRef<HTMLDivElement>(null);
   useModalFocusTrap(containerRef, true, onClose);
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent("tareeqah:overlay-chrome", { detail: { hidden: true } }));
+    return () => {
+      window.dispatchEvent(new CustomEvent("tareeqah:overlay-chrome", { detail: { hidden: false } }));
+    };
+  }, []);
+
   return createPortal(
     <div className="fixed inset-0 z-50 flex justify-end bg-[#26323A]/35 backdrop-blur-sm">
       <div ref={containerRef} role="dialog" aria-modal="true" tabIndex={-1} className="flex h-full w-full max-w-md flex-col bg-white text-[#26323A] shadow-[0_24px_70px_rgba(38,50,58,0.22)] outline-none">
@@ -20802,7 +20823,7 @@ function programLessonColor(programId: string) {
 
 function TeacherActionLink({ href, icon, label, previewLabel, count, urgent }: { href: string; icon: ReactNode; label: string; previewLabel?: string; count?: number; urgent?: boolean }) {
   return (
-    <TransitionLink href={href} label={previewLabel ?? label} className="group flex min-h-[58px] items-center gap-3 text-sm font-semibold text-[#26323A] transition hover:bg-[#F7FAFB]">
+    <TransitionLink href={href} label={previewLabel ?? label} className="group flex min-h-[58px] min-w-0 items-center gap-3 text-sm font-semibold text-[#26323A] transition hover:bg-[#F7FAFB]">
       <span className="flex h-10 w-10 shrink-0 items-center justify-center text-[#26323A] transition group-hover:text-[#17624F]" aria-hidden>
         {icon}
       </span>
@@ -20943,8 +20964,8 @@ function TeacherOtherClassCard({ program, mosqueSlug }: { program: Program; mosq
   const schedule = scheduleSummary(program.schedule, program.schedule_notes);
   const publicHref = `/m/${mosqueSlug}/programs/${program.id}?returnTo=${encodeURIComponent(`/m/${mosqueSlug}/teacher/classes`)}`;
   return (
-    <article className="rounded-[20px] border border-[#D6DCE0] bg-white p-4 shadow-[0_12px_28px_rgba(38,50,58,0.07)]">
-      <div className="flex gap-3">
+    <article className="w-full min-w-0 overflow-hidden rounded-[20px] border border-[#D6DCE0] bg-white p-4 shadow-[0_12px_28px_rgba(38,50,58,0.07)]">
+      <div className="flex min-w-0 gap-3">
         <HomeProgramThumb program={program} />
         <div className="min-w-0 flex-1">
           <h3 className="line-clamp-2 text-base font-semibold text-[#26323A]">{program.title}</h3>

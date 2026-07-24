@@ -11,10 +11,16 @@ type NavPreview = {
   kind?: "home" | "classes" | "inbox" | "me" | "subpage";
 };
 
+const visitedPreviewHrefs = new Set<string>();
+
 export function PageTransitionFrame({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [preview, setPreview] = useState<NavPreview | null>(null);
   const activePreview = preview && preview.fromPath === pathname ? preview : null;
+
+  useEffect(() => {
+    visitedPreviewHrefs.add(pathname);
+  }, [pathname]);
 
   useEffect(() => {
     function handlePreview(event: Event) {
@@ -80,7 +86,9 @@ function InstantNavPreview({ preview }: { preview: NavPreview }) {
 }
 
 function InstantPreviewContent({ preview }: { preview: NavPreview }) {
-  void preview;
+  if (visitedPreviewHrefs.has(preview.href)) {
+    return <div className="min-h-[calc(100vh-260px)] bg-[var(--workspace)]" aria-label="Opening page" />;
+  }
   return <GenericPreviewLoading />;
 }
 
